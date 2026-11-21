@@ -140,7 +140,7 @@ pub fn open_project(path: &Path) -> Result<Workbook> {
         );
     }
 
-    let mut wb = Workbook::with_model(model, store, Some(data_path))?;
+    let mut wb = Workbook::from_model(model, store, Some(data_path))?;
     wb.set_bridges(bridges);
     wb.recalc()?;
     Ok(wb)

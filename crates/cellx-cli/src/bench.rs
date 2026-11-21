@@ -250,7 +250,7 @@ pub fn make_demo(csv: &Path, out: &Path) -> Result<()> {
     let t = Instant::now();
     let stats = wb.set_inputs(0, &cells)?;
     for (col, w) in [(1, 150.0), (2, 150.0), (3, 110.0), (4, 100.0), (5, 160.0), (7, 70.0), (8, 100.0)] {
-        wb.set_column_width(0, col, w)?;
+        wb.set_column_width(0, col, col, w)?;
     }
     println!(
         "수식 {}개 계산: {:.0} ms (데이터 엔진 {:.0} ms, 호출 {}회)",

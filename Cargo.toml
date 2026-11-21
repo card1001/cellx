@@ -24,3 +24,7 @@ opt-level = 2
 # DuckDB's C++ debug info is several GB and slows every build; keep it out of dev builds.
 [profile.dev.package.libduckdb-sys]
 debug = false
+
+# IronCalc with CellX patches (see vendor/ironcalc_base/VENDORED.md).
+[patch.crates-io]
+ironcalc_base = { path = "vendor/ironcalc_base" }
