@@ -375,3 +375,98 @@ pub fn drop_table(state: State<'_, AppState>, table: String) -> CmdResult<BookIn
     book.dirty = true;
     info(&mut book)
 }
+
+// ---------------------------------------------------------------- memos, charts, conditional formats, pivots
+
+use cellx_core::extras::{Chart, ChartData, ChartKind, PivotDef, PivotSource};
+use cellx_core::objects::{CfRuleInput, ConditionalFormattingView, Memo, PasteSpecial};
+
+#[tauri::command]
+pub fn memos(state: State<'_, AppState>, sheet: u32) -> CmdResult<Vec<Memo>> {
+    read(&state, |wb| wb.memos(sheet))
+}
+
+#[tauri::command]
+pub fn set_memo(state: State<'_, AppState>, sheet: u32, row: i32, col: i32, text: Option<String>) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.set_memo(sheet, row, col, text.as_deref()))
+}
+
+#[tauri::command]
+pub fn clear_memos(state: State<'_, AppState>, sheet: u32, range: CellRange) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.clear_memos(sheet, range))
+}
+
+#[tauri::command]
+pub fn charts(state: State<'_, AppState>, sheet: u32) -> CmdResult<Vec<Chart>> {
+    read(&state, |wb| Ok(wb.charts(sheet)))
+}
+
+#[tauri::command]
+pub fn add_chart(state: State<'_, AppState>, sheet: u32, kind: ChartKind, range: CellRange) -> CmdResult<Chart> {
+    edit(&state, |wb| wb.add_chart(sheet, kind, range))
+}
+
+#[tauri::command]
+pub fn update_chart(state: State<'_, AppState>, chart: Chart) -> CmdResult<()> {
+    edit(&state, |wb| wb.update_chart(chart))
+}
+
+#[tauri::command]
+pub fn delete_chart(state: State<'_, AppState>, id: u32) -> CmdResult<()> {
+    edit(&state, |wb| wb.delete_chart(id))
+}
+
+#[tauri::command]
+pub fn chart_data(state: State<'_, AppState>, id: u32) -> CmdResult<ChartData> {
+    read(&state, |wb| wb.chart_data(id))
+}
+
+#[tauri::command]
+pub fn conditional_formats(state: State<'_, AppState>, sheet: u32) -> CmdResult<Vec<ConditionalFormattingView>> {
+    read(&state, |wb| wb.conditional_formats(sheet))
+}
+
+#[tauri::command]
+pub fn add_conditional_format(state: State<'_, AppState>, sheet: u32, range: CellRange, rule: CfRuleInput) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.add_conditional_format(sheet, range, rule))
+}
+
+#[tauri::command]
+pub fn delete_conditional_format(state: State<'_, AppState>, sheet: u32, index: u32) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.delete_conditional_format(sheet, index))
+}
+
+#[tauri::command]
+pub fn clear_conditional_formats(state: State<'_, AppState>, sheet: u32, range: Option<CellRange>) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.clear_conditional_formats(sheet, range))
+}
+
+#[tauri::command]
+pub fn paste_special(state: State<'_, AppState>, sheet: u32, row: i32, col: i32, options: PasteSpecial) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.paste_special(sheet, row, col, options))
+}
+
+#[tauri::command]
+pub fn pivot_fields(state: State<'_, AppState>, source: PivotSource, sheet: u32) -> CmdResult<Vec<String>> {
+    read(&state, |wb| wb.pivot_fields(&source, sheet))
+}
+
+#[tauri::command]
+pub fn pivot_at(state: State<'_, AppState>, sheet: u32, row: i32, col: i32) -> CmdResult<Option<PivotDef>> {
+    read(&state, |wb| Ok(wb.pivot_at(sheet, row, col)))
+}
+
+#[tauri::command]
+pub fn save_pivot(state: State<'_, AppState>, def: PivotDef, new_sheet: bool) -> CmdResult<PivotDef> {
+    edit(&state, |wb| wb.save_pivot(def, new_sheet))
+}
+
+#[tauri::command]
+pub fn refresh_pivots(state: State<'_, AppState>) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.refresh_pivots())
+}
+
+#[tauri::command]
+pub fn delete_pivot(state: State<'_, AppState>, id: u32) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.delete_pivot(id))
+}

@@ -28,6 +28,7 @@ pub type ClipboardData = HashMap<i32, HashMap<i32, ClipboardCell>>;
 pub type ClipboardTuple = (i32, i32, i32, i32);
 
 #[derive(Serialize, Deserialize)]
+/// One copied cell: its input and style.
 pub struct ClipboardCell {
     text: String,
     is_spill: bool,
@@ -45,6 +46,17 @@ pub struct Clipboard {
     pub(crate) data: ClipboardData,
     pub(crate) sheet: u32,
     pub(crate) range: (i32, i32, i32, i32),
+}
+
+impl ClipboardCell {
+    /// The cell's input as copied (a formula keeps its original references).
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+    /// The cell's style.
+    pub fn style(&self) -> &Style {
+        &self.style
+    }
 }
 
 impl Clipboard {

@@ -4,6 +4,7 @@
 //! manifest.json   format version and app version
 //! workbook.xlsx   the sheets, readable by Excel if extracted
 //! bridges.json    the original bridge formulas (the xlsx holds their results)
+//! pivots.json     pivot table definitions (the xlsx holds their output; memos and charts are in the xlsx)
 //! data.duckdb     the data sheets
 //! ```
 
@@ -13,13 +14,13 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ironcalc_base::Model;
 use serde::{Deserialize, Serialize};
 use zip::write::SimpleFileOptions;
 
 use crate::data::DataStore;
 use crate::error::{CellxError, Result};
-use crate::workbook::{BridgeCell, Workbook, LANGUAGE, LOCALE, TIMEZONE};
+use crate::extras::PivotDef;
+use crate::workbook::{BridgeCell, Workbook};
 
 pub const FORMAT_VERSION: u32 = 1;
 
@@ -77,11 +78,12 @@ pub fn save_project(wb: &mut Workbook, path: &Path) -> Result<()> {
         zip_err(zip.start_file("manifest.json", opts))?;
         zip.write_all(&serde_json::to_vec_pretty(&manifest).map_err(json_err)?)?;
 
-        let mut xlsx = std::io::Cursor::new(Vec::new());
-        ironcalc::export::save_xlsx_to_writer(wb.model(), &mut xlsx)
-            .map_err(|e| CellxError::Xlsx(e.to_string()))?;
+        let xlsx = wb.xlsx_bytes()?;
         zip_err(zip.start_file("workbook.xlsx", opts))?;
-        zip.write_all(xlsx.get_ref())?;
+        zip.write_all(&xlsx)?;
+
+        zip_err(zip.start_file("pivots.json", opts))?;
+        zip.write_all(&serde_json::to_vec_pretty(&wb.pivots()).map_err(json_err)?)?;
 
         let bridges: Vec<StoredBridge> = wb
             .bridges()
@@ -122,9 +124,7 @@ pub fn open_project(path: &Path) -> Result<Workbook> {
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "Book1".into());
-    let workbook = ironcalc::import::load_from_xlsx_bytes(&xlsx, &name, LOCALE, TIMEZONE)
-        .map_err(|e| CellxError::Xlsx(e.to_string()))?;
-    let model = Model::from_workbook(workbook, LANGUAGE)?;
+    let model = crate::workbook::model_from_xlsx_bytes(&xlsx, &name)?;
 
     let dir = new_work_dir()?;
     let data_path = dir.join("data.duckdb");
@@ -142,6 +142,12 @@ pub fn open_project(path: &Path) -> Result<Workbook> {
 
     let mut wb = Workbook::from_model(model, store, Some(data_path))?;
     wb.set_bridges(bridges);
+    wb.import_charts(&xlsx);
+    // Older projects have no pivots.json.
+    if let Ok(bytes) = read_entry(&mut zip, "pivots.json") {
+        let pivots: Vec<PivotDef> = serde_json::from_slice(&bytes).map_err(json_err)?;
+        wb.set_pivots(pivots);
+    }
     wb.recalc()?;
     Ok(wb)
 }

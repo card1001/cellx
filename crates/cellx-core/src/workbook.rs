@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use ironcalc_base::expressions::types::Area;
-use ironcalc_base::types::{BorderItem, Color, HorizontalAlignment, VerticalAlignment};
+use ironcalc_base::types::{BorderItem, Color, Comment, HorizontalAlignment, VerticalAlignment};
 use ironcalc_base::worksheet::NavigationDirection;
 use ironcalc_base::{Model, UserModel};
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::bridge::{self, BridgeValue, CellRef, CellResolver};
 use crate::data::{ColumnFilter, DataStore, Page, Sort, TableInfo};
 use crate::error::{CellxError, Result};
+use crate::extras::{Chart, PivotDef};
 use crate::refs::{self, Axis};
 use crate::value::{from_ironcalc, Scalar};
 
@@ -69,11 +70,11 @@ impl CellRange {
             c1: self.c0.max(self.c1),
         }
     }
-    fn area(self, sheet: u32) -> Area {
+    pub(crate) fn area(self, sheet: u32) -> Area {
         let r = self.normalized();
         Area { sheet, row: r.r0, column: r.c0, width: r.c1 - r.c0 + 1, height: r.r1 - r.r0 + 1 }
     }
-    fn contains(self, row: i32, col: i32) -> bool {
+    pub(crate) fn contains(self, row: i32, col: i32) -> bool {
         let r = self.normalized();
         row >= r.r0 && row <= r.r1 && col >= r.c0 && col <= r.c1
     }
@@ -118,6 +119,33 @@ pub struct CellStyle {
     pub border_bottom: Option<BorderView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub border_left: Option<BorderView>,
+    /// Conditional formatting data bar.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bar: Option<BarView>,
+    /// Conditional formatting icon (or rating).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<IconView>,
+}
+
+#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+pub struct BarView {
+    /// Filled proportion of the cell width, 0..1.
+    pub value: f64,
+    /// Where zero sits, 0..1.
+    pub axis: f64,
+    pub color: String,
+    pub negative: String,
+    pub gradient: bool,
+    pub show_value: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Default, PartialEq)]
+pub struct IconView {
+    pub name: String,
+    pub color: String,
+    pub count: u32,
+    pub max: u32,
+    pub show_value: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -210,18 +238,27 @@ pub enum Direction {
     Right,
 }
 
+/// State kept outside IronCalc's history, saved before and after each action.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Side {
+    bridges: BridgeMap,
+    charts: Vec<Chart>,
+    pivots: Vec<PivotDef>,
+    comments: Vec<Vec<Comment>>,
+}
+
 #[derive(Debug, Clone)]
 struct Action {
     steps: usize,
-    before: BridgeMap,
-    after: BridgeMap,
+    before: Side,
+    after: Side,
 }
 
-struct StoredClipboard {
-    clip: ironcalc_base::Clipboard,
+pub(crate) struct StoredClipboard {
+    pub(crate) clip: ironcalc_base::Clipboard,
     /// Bridge formulas in the copied range, by offset from its top-left cell.
-    bridges: Vec<(i32, i32, String)>,
-    cut: bool,
+    pub(crate) bridges: Vec<(i32, i32, String)>,
+    pub(crate) cut: bool,
 }
 
 struct ModelCells<'m, 'a> {
@@ -253,14 +290,17 @@ impl CellResolver for ModelCells<'_, '_> {
 }
 
 pub struct Workbook {
-    um: UserModel<'static>,
+    pub(crate) um: UserModel<'static>,
     data: DataStore,
     data_path: Option<PathBuf>,
-    bridges: BridgeMap,
+    pub(crate) bridges: BridgeMap,
     cache: HashMap<String, BridgeValue>,
     undo: Vec<Action>,
     redo: Vec<Action>,
-    clipboard: Option<StoredClipboard>,
+    pub(crate) clipboard: Option<StoredClipboard>,
+    pub(crate) charts: Vec<Chart>,
+    pub(crate) pivots: Vec<PivotDef>,
+    pub(crate) next_object_id: u32,
     pub last_recalc: RecalcStats,
 }
 
@@ -277,8 +317,12 @@ impl Workbook {
 
     /// Opens an xlsx file. Cached values from Excel are kept until the first recalculation.
     pub fn open_xlsx(path: &Path) -> Result<Self> {
-        let model = load_xlsx(path)?;
-        Self::from_model(model, DataStore::open_in_memory()?, None)
+        let bytes = std::fs::read(path)?;
+        let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Book1".into());
+        let model = model_from_xlsx_bytes(&bytes, &name)?;
+        let mut wb = Self::from_model(model, DataStore::open_in_memory()?, None)?;
+        wb.import_charts(&bytes);
+        Ok(wb)
     }
 
     pub(crate) fn from_model(model: Model<'static>, data: DataStore, data_path: Option<PathBuf>) -> Result<Self> {
@@ -297,6 +341,9 @@ impl Workbook {
             undo: Vec::new(),
             redo: Vec::new(),
             clipboard: None,
+            charts: Vec::new(),
+            pivots: Vec::new(),
+            next_object_id: 1,
             last_recalc: RecalcStats::default(),
         })
     }
@@ -313,7 +360,7 @@ impl Workbook {
         self.um.get_model()
     }
 
-    fn model_mut(&mut self) -> &mut Model<'static> {
+    pub(crate) fn model_mut(&mut self) -> &mut Model<'static> {
         self.um.get_model_mut()
     }
 
@@ -347,14 +394,33 @@ impl Workbook {
 
     // ------------------------------------------------------------ actions (undo)
 
-    fn begin(&self) -> (usize, BridgeMap) {
-        (self.um.undo_depth(), self.bridges.clone())
+    fn side(&self) -> Side {
+        Side {
+            bridges: self.bridges.clone(),
+            charts: self.charts.clone(),
+            pivots: self.pivots.clone(),
+            comments: self.model().workbook.worksheets.iter().map(|w| w.comments.clone()).collect(),
+        }
     }
 
-    fn commit(&mut self, start: (usize, BridgeMap)) -> Result<RecalcStats> {
+    fn restore_side(&mut self, side: &Side) {
+        self.bridges = side.bridges.clone();
+        self.charts = side.charts.clone();
+        self.pivots = side.pivots.clone();
+        for (ws, c) in self.model_mut().workbook.worksheets.iter_mut().zip(side.comments.iter()) {
+            ws.comments = c.clone();
+        }
+    }
+
+    pub(crate) fn begin(&self) -> (usize, Side) {
+        (self.um.undo_depth(), self.side())
+    }
+
+    pub(crate) fn commit(&mut self, start: (usize, Side)) -> Result<RecalcStats> {
         let steps = self.um.undo_depth().saturating_sub(start.0);
-        if steps > 0 || start.1 != self.bridges {
-            self.undo.push(Action { steps, before: start.1, after: self.bridges.clone() });
+        let after = self.side();
+        if steps > 0 || start.1 != after {
+            self.undo.push(Action { steps, before: start.1, after });
             self.redo.clear();
         }
         self.recalc()
@@ -373,7 +439,7 @@ impl Workbook {
         for _ in 0..a.steps {
             self.um.undo()?;
         }
-        self.bridges = a.before.clone();
+        self.restore_side(&a.before);
         self.redo.push(a);
         self.mark_bridges_dirty();
         self.recalc()
@@ -384,7 +450,7 @@ impl Workbook {
         for _ in 0..a.steps {
             self.um.redo()?;
         }
-        self.bridges = a.after.clone();
+        self.restore_side(&a.after);
         self.undo.push(a);
         self.mark_bridges_dirty();
         self.recalc()
@@ -424,6 +490,7 @@ impl Workbook {
                     b.rewritten = None;
                 }
             }
+            self.rename_in_objects(&format!("{quoted_old}!"), &format!("{quoted_new}!"));
         }
         self.commit(start)?;
         Ok(())
@@ -443,6 +510,7 @@ impl Workbook {
                 self.bridges.insert((s - 1, r, c), b);
             }
         }
+        self.objects_after_sheet_delete(sheet);
         self.commit(start)?;
         Ok(())
     }
@@ -494,7 +562,7 @@ impl Workbook {
     }
 
     /// Writes one cell. `record` = through IronCalc's history (user edits) or not.
-    fn write_input(&mut self, sheet: u32, row: i32, col: i32, input: &str, record: bool) -> Result<()> {
+    pub(crate) fn write_input(&mut self, sheet: u32, row: i32, col: i32, input: &str, record: bool) -> Result<()> {
         let is_bridge = self.is_bridge_input(input);
         let text = if is_bridge {
             self.bridges.insert((sheet, row, col), BridgeCell::new(input.to_string()));
@@ -571,7 +639,7 @@ impl Workbook {
 
     // ------------------------------------------------------------ clipboard
 
-    fn select(&mut self, sheet: u32, range: CellRange) -> Result<()> {
+    pub(crate) fn select(&mut self, sheet: u32, range: CellRange) -> Result<()> {
         let r = range.normalized();
         self.um.set_selected_sheet(sheet)?;
         self.um.set_selected_cell(r.r0, r.c0)?;
@@ -701,6 +769,11 @@ impl Workbook {
 
     // ------------------------------------------------------------ rows and columns
 
+    fn shift_all(&mut self, sheet: u32, axis: Axis, at: i32, count: i32) {
+        self.shift_bridges(sheet, axis, at, count);
+        self.shift_objects(sheet, axis, at, count);
+    }
+
     fn shift_bridges(&mut self, sheet: u32, axis: Axis, at: i32, count: i32) {
         let names = self.sheet_names();
         let target = names.get(sheet as usize).cloned().unwrap_or_default();
@@ -730,28 +803,28 @@ impl Workbook {
     pub fn insert_rows(&mut self, sheet: u32, row: i32, count: i32) -> Result<RecalcStats> {
         let start = self.begin();
         self.um.insert_rows(sheet, row, count)?;
-        self.shift_bridges(sheet, Axis::Row, row, count);
+        self.shift_all(sheet, Axis::Row, row, count);
         self.commit(start)
     }
 
     pub fn delete_rows(&mut self, sheet: u32, row: i32, count: i32) -> Result<RecalcStats> {
         let start = self.begin();
         self.um.delete_rows(sheet, row, count)?;
-        self.shift_bridges(sheet, Axis::Row, row, -count);
+        self.shift_all(sheet, Axis::Row, row, -count);
         self.commit(start)
     }
 
     pub fn insert_columns(&mut self, sheet: u32, col: i32, count: i32) -> Result<RecalcStats> {
         let start = self.begin();
         self.um.insert_columns(sheet, col, count)?;
-        self.shift_bridges(sheet, Axis::Column, col, count);
+        self.shift_all(sheet, Axis::Column, col, count);
         self.commit(start)
     }
 
     pub fn delete_columns(&mut self, sheet: u32, col: i32, count: i32) -> Result<RecalcStats> {
         let start = self.begin();
         self.um.delete_columns(sheet, col, count)?;
-        self.shift_bridges(sheet, Axis::Column, col, -count);
+        self.shift_all(sheet, Axis::Column, col, -count);
         self.commit(start)
     }
 
@@ -1107,7 +1180,8 @@ impl Workbook {
     }
 
     fn cell_style(&self, sheet: u32, row: i32, col: i32, default_font: &(String, i32)) -> Option<CellStyle> {
-        let s = self.um.get_cell_style(sheet, row, col).ok()?;
+        let ext = self.um.get_extended_cell_style(sheet, row, col).ok()?;
+        let s = &ext.style;
         let color = |c: &Color| -> Option<String> {
             match c {
                 Color::None => None,
@@ -1157,6 +1231,34 @@ impl Workbook {
                 _ => None,
             };
             cs.wrap = a.wrap_text;
+        }
+        if let Some(bar) = &ext.data_bar {
+            cs.bar = Some(BarView {
+                value: bar.value,
+                axis: bar.axis_position,
+                color: color(&bar.positive_color).unwrap_or_else(|| "#638EC6".into()),
+                negative: color(&bar.negative_color).unwrap_or_else(|| "#FF0000".into()),
+                gradient: bar.is_gradient,
+                show_value: bar.show_value,
+            });
+        }
+        if let Some(icon) = &ext.icon {
+            cs.icon = Some(IconView {
+                name: format!("{:?}", icon.icon),
+                color: color(&icon.color).unwrap_or_else(|| "#000000".into()),
+                count: 1,
+                max: 1,
+                show_value: icon.show_value,
+            });
+        }
+        if let Some(r) = &ext.rating {
+            cs.icon = Some(IconView {
+                name: format!("{:?}", r.icon),
+                color: color(&r.color).unwrap_or_else(|| "#000000".into()),
+                count: r.count,
+                max: r.max,
+                show_value: r.show_value,
+            });
         }
         (cs != CellStyle::default()).then_some(cs)
     }
@@ -1282,7 +1384,18 @@ impl Workbook {
     /// Saves the workbook as xlsx. Bridge formulas are written with their current
     /// results inlined (`=ROUND(1234.5,0)`), so Excel shows the same values.
     pub fn save_xlsx(&self, path: &Path) -> Result<()> {
-        save_xlsx(self.model(), path)
+        let bytes = self.xlsx_bytes()?;
+        let tmp = path.with_extension("cellx-tmp.xlsx");
+        std::fs::write(&tmp, bytes)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// The workbook as xlsx bytes, with memos and charts.
+    pub fn xlsx_bytes(&self) -> Result<Vec<u8>> {
+        let mut xlsx = std::io::Cursor::new(Vec::new());
+        ironcalc::export::save_xlsx_to_writer(self.model(), &mut xlsx).map_err(|e| CellxError::Xlsx(e.to_string()))?;
+        crate::ooxml::add_extras(xlsx.get_ref(), &self.sheet_parts())
     }
 
     pub fn bridge_formula_count(&self) -> usize {
@@ -1290,12 +1403,18 @@ impl Workbook {
     }
 }
 
-fn quote_sheet(name: &str) -> String {
+pub(crate) fn quote_sheet(name: &str) -> String {
     if name.chars().all(|c| c.is_alphanumeric() || c == '_') {
         name.to_string()
     } else {
         format!("'{}'", name.replace('\'', "''"))
     }
+}
+
+pub(crate) fn model_from_xlsx_bytes(bytes: &[u8], name: &str) -> Result<Model<'static>> {
+    let workbook = ironcalc::import::load_from_xlsx_bytes(bytes, name, LOCALE, TIMEZONE)
+        .map_err(|e| CellxError::Xlsx(e.to_string()))?;
+    Ok(Model::from_workbook(workbook, LANGUAGE)?)
 }
 
 pub fn load_xlsx(path: &Path) -> Result<Model<'static>> {

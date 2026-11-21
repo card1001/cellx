@@ -57,7 +57,42 @@ interface Props {
   onZoom?(z: number): void;
   /** Rows that fit on screen, for PageUp/PageDown. */
   onPageSize?(rows: number): void;
+  /** Mouse over a cell (memo tooltips), or null when it leaves the grid. */
+  onHover?(hit: Hit | null): void;
+  /** Floating objects (charts) drawn over the cells; positions relative to the cell area. */
+  renderOverlay?(geo: OverlayGeometry): ReactNode;
 }
+
+export interface OverlayGeometry {
+  /** A cell's rectangle relative to the top-left of the cell area. */
+  cellRect(r: number, c: number): CellRect;
+  zoom: number;
+  width: number;
+  height: number;
+}
+
+const ICON_GLYPHS: Record<string, string> = {
+  ArrowUp: "⬆",
+  ArrowRight: "➡",
+  ArrowDown: "⬇",
+  ArrowAngleUp: "⬈",
+  ArrowAngleDown: "⬊",
+  Circle: "●",
+  TriangleUp: "▲",
+  TriangleDown: "▼",
+  TriangleUpFilled: "▲",
+  TriangleDownFilled: "▼",
+  FlatRectangle: "▬",
+  Rhombus: "◆",
+  Flag: "⚑",
+  Check: "✔",
+  Cross: "✖",
+  Exclamation: "❗",
+  Star: "★",
+  Heart: "♥",
+  ThumbsUp: "▲",
+  ThumbsDown: "▼",
+};
 
 const ACCENT = "#4f46e5";
 export const UI_FONT = '"맑은 고딕", "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif';
@@ -362,11 +397,57 @@ export function Grid(props: Props) {
         }
       }
 
+      // Conditional formatting: data bars and icons.
+      for (const it of items) {
+        const st = it.cell?.style;
+        if (!st?.bar && !st?.icon) continue;
+        const { rect } = it;
+        if (st.bar) {
+          const b = st.bar;
+          const inner = rect.w - 4 * z;
+          const a = Math.min(b.axis, b.value);
+          const e = Math.max(b.axis, b.value);
+          const x = rect.x + 2 * z + a * inner;
+          const w = Math.max(e - a, 0.002) * inner;
+          const neg = b.value < b.axis;
+          const color = neg ? b.negative : b.color;
+          if (b.gradient) {
+            const g = ctx.createLinearGradient(x, 0, x + w, 0);
+            g.addColorStop(neg ? 1 : 0, color);
+            g.addColorStop(neg ? 0 : 1, "#ffffff");
+            ctx.fillStyle = g;
+          } else ctx.fillStyle = color;
+          ctx.fillRect(x, rect.y + 2 * z, w, rect.h - 5 * z);
+          if (b.gradient) {
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1;
+            ctx.strokeRect(x + 0.5, rect.y + 2 * z + 0.5, w - 1, rect.h - 5 * z - 1);
+          }
+        }
+        if (st.icon) {
+          const ic = st.icon;
+          const glyph = ICON_GLYPHS[ic.name] ?? "●";
+          ctx.font = `${Math.round(11 * z)}px ${UI_FONT}`;
+          ctx.textAlign = "left";
+          ctx.textBaseline = "middle";
+          let x = rect.x + 2 * z;
+          const y = rect.y + rect.h / 2;
+          const n = ic.max > 1 ? ic.max : 1;
+          for (let i = 0; i < n; i++) {
+            ctx.fillStyle = ic.max > 1 && i >= ic.count ? "#d4d4d8" : ic.color;
+            ctx.fillText(glyph, x, y);
+            x += 12 * z;
+          }
+          ctx.textBaseline = "alphabetic";
+        }
+      }
+
       // Text.
       ctx.textBaseline = "alphabetic";
       for (const it of items) {
         const cell = it.cell;
         if (!cell?.text) continue;
+        if ((cell.style?.bar && !cell.style.bar.show_value) || (cell.style?.icon && !cell.style.icon.show_value)) continue;
         const st = cell.style;
         ctx.font = fontCss(st, baseFont, z);
         const fontPx = (((st?.size ?? baseFont[1]) * 4) / 3) * z;
@@ -486,6 +567,24 @@ export function Grid(props: Props) {
         side(st.border_bottom, x, y + h, x + w, y + h);
         side(st.border_left, x, y, x, y + h);
         side(st.border_right, x + w, y, x + w, y + h);
+      }
+
+      // Memo markers: a red triangle in the top-right corner, as in Excel.
+      const memos = source.memos?.() ?? [];
+      if (memos.length && reg.rs.length && reg.cs.length) {
+        const [ra, rb] = [reg.rs[0], reg.rs[reg.rs.length - 1]];
+        const [ca, cb] = [reg.cs[0], reg.cs[reg.cs.length - 1]];
+        ctx.fillStyle = "#e11d48";
+        for (const m of memos) {
+          if (m.row < ra || m.row > rb || m.col < ca || m.col > cb) continue;
+          const rect = cellRect(m.row, m.col, source.mergeAt(m.row, m.col));
+          ctx.beginPath();
+          ctx.moveTo(rect.x + rect.w - 1, rect.y);
+          ctx.lineTo(rect.x + rect.w - 1 - 6 * z, rect.y);
+          ctx.lineTo(rect.x + rect.w - 1, rect.y + 6 * z);
+          ctx.closePath();
+          ctx.fill();
+        }
       }
       ctx.restore();
     }
@@ -740,6 +839,7 @@ export function Grid(props: Props) {
     const el = scrollRef.current;
     const h = hit(e.clientX, e.clientY);
     if (!g) {
+      props.onHover?.(h.area === "cell" ? h : null);
       if (!el) return;
       let cursor = "cell";
       if (h.area === "colHeader") cursor = props.onColumnResize && colBorderAt(h.x) !== null ? "col-resize" : "s-resize";
@@ -822,6 +922,7 @@ export function Grid(props: Props) {
         onScroll={(e) => setScroll({ top: e.currentTarget.scrollTop, left: e.currentTarget.scrollLeft })}
         onMouseDown={onMouseDown}
         onMouseMove={onMouseMove}
+        onMouseLeave={() => props.onHover?.(null)}
         onContextMenu={(e) => e.preventDefault()}
         onDoubleClick={(e) => {
           const h = hit(e.clientX, e.clientY);
@@ -830,6 +931,19 @@ export function Grid(props: Props) {
       >
         <div style={{ width: rowHeaderW + frozenW * z + scrollTotalW * z, height: HEADER_H + frozenH * z + scrollAreaH }} />
       </div>
+      {props.renderOverlay && (
+        <div className="grid-overlay" style={{ left: rowHeaderW, top: HEADER_H }}>
+          {props.renderOverlay({
+            cellRect: (r, c) => {
+              const rc = cellRect(r, c);
+              return { x: rc.x - rowHeaderW, y: rc.y - HEADER_H, w: rc.w, h: rc.h };
+            },
+            zoom: z,
+            width: size.w - rowHeaderW,
+            height: size.h - HEADER_H,
+          })}
+        </div>
+      )}
       {props.renderEditor(editorRect, editorFont)}
     </div>
   );

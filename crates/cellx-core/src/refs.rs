@@ -300,6 +300,66 @@ pub fn offset_refs(formula: &str, drow: i32, dcol: i32) -> String {
     })
 }
 
+/// Paste with "행/열 바꿈": a formula copied from `src` to `dst` (row, col). Fully
+/// relative references swap their row and column offsets, as Excel does; others move
+/// like a normal paste.
+pub fn transpose_refs(formula: &str, src: (i32, i32), dst: (i32, i32)) -> String {
+    let plain = offset_refs(formula, dst.0 - src.0, dst.1 - src.1);
+    let mut any_swapped = false;
+    let swapped = rewrite(formula, |r| {
+        let turn = |c: Corner| -> Option<Corner> {
+            match (c.col, c.row) {
+                (Some((col, false)), Some((row, false))) => {
+                    let (dr, dc) = (row - src.0, col - src.1);
+                    let nc = (dst.1 + dr, false);
+                    let nr = (dst.0 + dc, false);
+                    ((1..=LAST_COL).contains(&nc.0) && (1..=LAST_ROW).contains(&nr.0))
+                        .then_some(Corner { col: Some(nc), row: Some(nr) })
+                }
+                _ => None,
+            }
+        };
+        let a = turn(r.a);
+        let b = r.b.map(turn);
+        match (a, b) {
+            (Some(a), None) => {
+                any_swapped = true;
+                Some(render(r, a, None))
+            }
+            (Some(a), Some(Some(b))) => {
+                any_swapped = true;
+                Some(render(r, a, Some(b)))
+            }
+            _ => None,
+        }
+    });
+    if !any_swapped {
+        return plain;
+    }
+    // Mixed formulas: swap the fully relative references, move the rest.
+    let mut out = String::new();
+    let refs_plain = find_refs(&plain);
+    let refs_sw = find_refs(&swapped);
+    if refs_plain.len() != refs_sw.len() {
+        return swapped;
+    }
+    let orig = find_refs(formula);
+    let mut last = 0;
+    for (i, r) in refs_sw.iter().enumerate() {
+        out.push_str(&swapped[last..r.start]);
+        let fully_relative = |c: &Corner| matches!((c.col, c.row), (Some((_, false)), Some((_, false))));
+        let use_swapped = orig.get(i).is_some_and(|o| fully_relative(&o.a) && o.b.as_ref().is_none_or(fully_relative));
+        if use_swapped {
+            out.push_str(&swapped[r.start..r.end]);
+        } else {
+            out.push_str(&plain[refs_plain[i].start..refs_plain[i].end]);
+        }
+        last = r.end;
+    }
+    out.push_str(&swapped[last..]);
+    out
+}
+
 /// Updates references after rows or columns are inserted (`count > 0`) or deleted
 /// (`count < 0`) at `at` on `target_sheet`. `own_sheet` is the sheet that holds the
 /// formula (references without a sheet prefix point there).
@@ -421,6 +481,13 @@ pub fn ref_spans(formula: &str) -> Vec<RefSpan> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transposed_paste_swaps_relative_offsets() {
+        // B1 = A1*10 pasted transposed at C4 (from C3:C4) refers to C3.
+        assert_eq!(transpose_refs("=A1*10", (1, 2), (4, 3)), "=C3*10");
+        assert_eq!(transpose_refs("=$A$1+A1", (1, 2), (4, 3)), "=$A$1+C3");
+    }
 
     #[test]
     fn copies_move_relative_parts_only() {

@@ -29,6 +29,71 @@ export interface CellStyle {
   border_right?: BorderView;
   border_bottom?: BorderView;
   border_left?: BorderView;
+  /** Conditional formatting data bar. */
+  bar?: { value: number; axis: number; color: string; negative: string; gradient: boolean; show_value: boolean };
+  /** Conditional formatting icon or rating. */
+  icon?: { name: string; color: string; count: number; max: number; show_value: boolean };
+}
+
+export interface Memo {
+  row: number;
+  col: number;
+  text: string;
+  author: string;
+}
+
+export type ChartKind = "Column" | "Bar" | "Line" | "Pie" | "Doughnut" | "Area" | "Scatter";
+
+export interface Chart {
+  id: number;
+  sheet: number;
+  kind: ChartKind;
+  title: string;
+  range: string;
+  series_in_rows: boolean;
+  legend: boolean;
+  anchor: { row: number; col: number; dx: number; dy: number; width: number; height: number };
+}
+
+export interface ChartData {
+  title: string;
+  categories: string[];
+  x_values: (number | null)[] | null;
+  series: { name: string; values: (number | null)[] }[];
+  sheet: number;
+}
+
+export type Aggregate = "Sum" | "Count" | "Average" | "Max" | "Min";
+export type PivotSource = { kind: "Range"; range: string } | { kind: "Table"; name: string };
+
+export interface PivotDef {
+  id: number;
+  source: PivotSource;
+  rows: string[];
+  columns: string | null;
+  values: { field: string; agg: Aggregate }[];
+  sheet: number;
+  row: number;
+  col: number;
+  extent: [number, number];
+}
+
+export type PasteWhat = "All" | "Formulas" | "Values" | "Formats" | "ColumnWidths";
+export type PasteOp = "None" | "Add" | "Subtract" | "Multiply" | "Divide";
+export interface PasteSpecial {
+  what: PasteWhat;
+  op: PasteOp;
+  skip_blanks: boolean;
+  transpose: boolean;
+}
+
+/** IronCalc's conditional formatting rule input (tagged by `type`). */
+export type CfRule = { type: string; [k: string]: unknown };
+export interface CfView {
+  index: number;
+  range: string;
+  cf_rule: { [k: string]: unknown } | string;
+  priority: number;
 }
 
 export interface CellView {
@@ -185,6 +250,28 @@ export const api = {
     invoke<RecalcStats>("paste", { sheet, row, col, text, internal }),
   autoFill: (sheet: number, source: Range, target: Range) => invoke<RecalcStats>("auto_fill", { sheet, source, target }),
   undo: () => invoke<RecalcStats>("undo"),
+  memos: (sheet: number) => invoke<Memo[]>("memos", { sheet }),
+  setMemo: (sheet: number, row: number, col: number, text: string | null) =>
+    invoke<RecalcStats>("set_memo", { sheet, row, col, text }),
+  clearMemos: (sheet: number, range: Range) => invoke<RecalcStats>("clear_memos", { sheet, range }),
+  charts: (sheet: number) => invoke<Chart[]>("charts", { sheet }),
+  addChart: (sheet: number, kind: ChartKind, range: Range) => invoke<Chart>("add_chart", { sheet, kind, range }),
+  updateChart: (chart: Chart) => invoke<void>("update_chart", { chart }),
+  deleteChart: (id: number) => invoke<void>("delete_chart", { id }),
+  chartData: (id: number) => invoke<ChartData>("chart_data", { id }),
+  conditionalFormats: (sheet: number) => invoke<CfView[]>("conditional_formats", { sheet }),
+  addConditionalFormat: (sheet: number, range: Range, rule: CfRule) =>
+    invoke<RecalcStats>("add_conditional_format", { sheet, range, rule }),
+  deleteConditionalFormat: (sheet: number, index: number) => invoke<RecalcStats>("delete_conditional_format", { sheet, index }),
+  clearConditionalFormats: (sheet: number, range: Range | null) =>
+    invoke<RecalcStats>("clear_conditional_formats", { sheet, range }),
+  pasteSpecial: (sheet: number, row: number, col: number, options: PasteSpecial) =>
+    invoke<RecalcStats>("paste_special", { sheet, row, col, options }),
+  pivotFields: (source: PivotSource, sheet: number) => invoke<string[]>("pivot_fields", { source, sheet }),
+  pivotAt: (sheet: number, row: number, col: number) => invoke<PivotDef | null>("pivot_at", { sheet, row, col }),
+  savePivot: (def: PivotDef, newSheet: boolean) => invoke<PivotDef>("save_pivot", { def, newSheet }),
+  refreshPivots: () => invoke<RecalcStats>("refresh_pivots"),
+  deletePivot: (id: number) => invoke<RecalcStats>("delete_pivot", { id }),
   redo: () => invoke<RecalcStats>("redo"),
 
   insertRows: (sheet: number, at: number, count: number) => invoke<RecalcStats>("insert_rows", { sheet, at, count }),

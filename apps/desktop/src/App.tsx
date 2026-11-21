@@ -4,21 +4,28 @@ import {
   api,
   type BookInfo,
   type CellDetail,
+  type Chart,
+  type ChartKind,
   type Direction,
+  type PasteSpecial,
+  type PivotDef,
   errorText,
   isTauri,
   type RecalcStats,
   type SelectionStats,
   type TableInfo,
 } from "./api";
+import { colorScaleRule, dataBarRule, highlightRule, type HighlightKind, ICON_SETS, iconSetRule, ratingRule } from "./cf";
+import { CHART_KINDS, ChartLayer } from "./components/Chart";
 import { FindDialog, type FormatResult, FormatCellsDialog, PromptDialog } from "./components/Dialogs";
+import { CfManagerDialog, ChartDialog, HighlightDialog, MemoBox, PasteSpecialDialog, PivotDialog } from "./components/ObjectDialogs";
 import { FormulaText } from "./components/FormulaText";
 import { ContextMenu, type MenuItem } from "./components/Menu";
 import { Ribbon, type RibbonActions } from "./components/Ribbon";
 import { decreaseDecimals, increaseDecimals } from "./formats";
-import { canPointAt, completeFunctions, cycleAbsolute, functionPrefixAt, insertRef, type PointRef, refSpans } from "./formula";
+import { canPointAt, completeFunctions, cycleAbsolute, functionPrefixAt, insertRef, type PointRef, quoteSheet, refSpans } from "./formula";
 import { fontCss, Grid, type Hit, type RefBox, type Selection } from "./grid/Grid";
-import { formatCount, normalize, parseAddr, type Pos, type Range, rangeLabel, toTsv } from "./grid/model";
+import { addr, formatCount, normalize, parseAddr, type Pos, type Range, rangeLabel, toTsv } from "./grid/model";
 import { DataSource, SheetSource } from "./grid/sources";
 
 type Tab = { kind: "sheet"; index: number } | { kind: "data"; name: string };
@@ -41,6 +48,11 @@ interface Session {
 type Dialog =
   | { kind: "prompt"; title: string; label: string; value: string; resolve(v: string | null): void }
   | { kind: "format" }
+  | { kind: "pasteSpecial" }
+  | { kind: "highlight"; cf: HighlightKind }
+  | { kind: "cfManager" }
+  | { kind: "pivot"; def: PivotDef }
+  | { kind: "chart"; chart: Chart }
   | null;
 
 const ARROWS: Record<string, Direction> = { ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right" };
@@ -83,6 +95,12 @@ export default function App() {
   const [acIndex, setAcIndex] = useState(0);
   const [acDismissed, setAcDismissed] = useState(false);
   const [source, setSource] = useState<SheetSource | DataSource | null>(null);
+  const [charts, setCharts] = useState<Chart[]>([]);
+  const [chartVersion, setChartVersion] = useState(0);
+  const [selectedChart, setSelectedChart] = useState<number | null>(null);
+  const [hoverMemo, setHoverMemo] = useState<Pos | null>(null);
+  const [editMemo, setEditMemo] = useState<Pos | null>(null);
+  const [showMemos, setShowMemos] = useState(false);
   const [, force] = useState(0);
 
   const sources = useRef(new Map<string, SheetSource | DataSource>());
@@ -220,8 +238,25 @@ export default function App() {
     return () => clearTimeout(id);
   }, [selection, tab, stats]);
 
+  // Charts of the sheet on screen.
+  useEffect(() => {
+    if (tab.kind !== "sheet") {
+      setCharts([]);
+      return;
+    }
+    let live = true;
+    api
+      .charts(tab.index)
+      .then((c) => live && setCharts(c))
+      .catch(() => live && setCharts([]));
+    return () => {
+      live = false;
+    };
+  }, [tab, info, chartVersion]);
+
   const afterChange = async (s?: RecalcStats) => {
     if (s) setStats(s);
+    setChartVersion((v) => v + 1);
     await invalidateSheets();
     void loadDetail();
     void refreshInfo();
@@ -789,11 +824,112 @@ export default function App() {
     } else setFindMsg("찾는 내용이 없습니다.");
   };
 
+  // ---------------------------------------------------------------- charts, memos, pivots
+  const deleteChart = async (id: number) => {
+    await api.deleteChart(id).catch(fail);
+    setSelectedChart(null);
+    await afterChange();
+  };
+
+  const updateChart = async (c: Chart) => {
+    await api.updateChart(c).catch(fail);
+    await afterChange();
+  };
+
+  /** Excel charts the current region when a single cell is selected. */
+  const dataRange = async (): Promise<Range> => {
+    const rg = range();
+    const t = tabRef.current;
+    if (t.kind === "sheet" && rg.r0 === rg.r1 && rg.c0 === rg.c1) {
+      return api.currentRegion(t.index, rg.r0, rg.c0);
+    }
+    return rg;
+  };
+
+  const insertChart = async (kind: ChartKind) => {
+    const t = tabRef.current;
+    if (t.kind !== "sheet") return say("차트는 일반 시트의 범위로 만듭니다", true);
+    const rg = await dataRange();
+    if (rg.r0 === rg.r1 && rg.c0 === rg.c1 && !(await currentInput())) return say("차트로 만들 데이터 범위를 선택하세요", true);
+    const c = await run("차트 삽입", () => api.addChart(t.index, kind, rg));
+    if (c) {
+      setSelectedChart(c.id);
+      await afterChange();
+    }
+  };
+
+  const openPivotDialog = async () => {
+    const t = tabRef.current;
+    const sheetIdx = t.kind === "sheet" ? t.index : 0;
+    let def: PivotDef = { id: 0, source: { kind: "Range", range: "" }, rows: [], columns: null, values: [], sheet: sheetIdx, row: 1, col: 1, extent: [0, 0] };
+    if (t.kind === "data") def = { ...def, source: { kind: "Table", name: t.name } };
+    else {
+      const rg = await dataRange();
+      def = { ...def, source: { kind: "Range", range: `${quoteSheet(sheetName(t.index))}!${addr({ r: rg.r0, c: rg.c0 })}:${addr({ r: rg.r1, c: rg.c1 })}` } };
+    }
+    setDialog({ kind: "pivot", def });
+  };
+
+  const memoAt = (p: Pos) => (sourceRef.current instanceof SheetSource ? sourceRef.current.memoAt(p.r, p.c) : undefined);
+
+  const saveMemo = async (p: Pos, text: string) => {
+    const t = tabRef.current;
+    setEditMemo(null);
+    if (t.kind !== "sheet") return;
+    const old = memoAt(p)?.text ?? "";
+    if (text === old) return focusGrid();
+    const st = await run("메모", () => api.setMemo(t.index, p.r, p.c, text.trim() ? text : null));
+    if (st) await afterChange(st);
+    focusGrid();
+  };
+
+  const addCf = async (rule: Parameters<typeof api.addConditionalFormat>[2]) => {
+    const st = await onSheetOnly("조건부 서식", (s) => api.addConditionalFormat(s, range(), rule));
+    if (st) await afterChange(st);
+  };
+
+  const pasteSpecialNow = async (opts: PasteSpecial) => {
+    if (!copyMark) return say("먼저 CellX에서 셀을 복사(Ctrl+C)하세요", true);
+    const at = range();
+    const st = await onSheetOnly("붙여넣는 중", (s) => api.pasteSpecial(s, at.r0, at.c0, opts));
+    if (st) await afterChange(st);
+    focusGrid();
+  };
+
   // ---------------------------------------------------------------- keys on the grid (not editing)
   const gridKey = async (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const mod = e.ctrlKey || e.metaKey;
     const f = selectionRef.current.focus;
     const t = tabRef.current;
+    if (selectedChart !== null) {
+      // A selected chart takes Delete and Esc, like a selected shape in Excel.
+      if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        await deleteChart(selectedChart);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setSelectedChart(null);
+        return;
+      }
+      setSelectedChart(null);
+    }
+    if (mod && e.altKey && e.key.toLowerCase() === "v") {
+      e.preventDefault();
+      actions.pasteSpecial();
+      return;
+    }
+    if (e.key === "F2" && e.shiftKey) {
+      e.preventDefault();
+      actions.newMemo();
+      return;
+    }
+    if (mod && e.altKey && e.key === "F5") {
+      e.preventDefault();
+      actions.refreshAll();
+      return;
+    }
     const dir = ARROWS[e.key];
     if (dir) {
       e.preventDefault();
@@ -1050,6 +1186,7 @@ export default function App() {
   // ---------------------------------------------------------------- mouse
   const onCellDown = (h: Hit, e: React.MouseEvent) => {
     setMenu(null);
+    setSelectedChart(null);
     const s = sessionRef.current;
     const src = sourceRef.current;
     if (s && pointable(s)) {
@@ -1103,7 +1240,8 @@ export default function App() {
     else if (d === "row") setSelection({ anchor: selectionRef.current.anchor, focus: { r: h.r, c: 1 } });
   };
 
-  const onContextMenu = (h: Hit, x: number, y: number) => {
+  const onContextMenu = async (h: Hit, x: number, y: number) => {
+    setSelectedChart(null);
     if (sessionRef.current) void commit("none");
     const rg = range();
     const inside = h.r >= rg.r0 && h.r <= rg.r1 && h.c >= rg.c0 && h.c <= rg.c1;
@@ -1146,17 +1284,42 @@ export default function App() {
         { label: "숨기기", onClick: () => hide(false, true) },
         { label: "숨기기 취소", onClick: () => hide(false, false) },
       ];
-    else
+    else {
+      const at = selectionRef.current.focus;
+      const memo = memoAt(at);
+      const t = tabRef.current;
+      const pivot = t.kind === "sheet" ? await api.pivotAt(t.index, at.r, at.c).catch(() => null) : null;
+      const pivotItems: MenuItem[] = pivot
+        ? [
+            { label: "새로 고침", onClick: () => actions.refreshAll() },
+            { label: "피벗 테이블 필드...", onClick: () => setDialog({ kind: "pivot", def: pivot }) },
+            {
+              label: "피벗 테이블 삭제",
+              onClick: async () => {
+                const st = await run("피벗 테이블 삭제", () => api.deletePivot(pivot.id));
+                if (st) await afterChange(st);
+              },
+            },
+            { separator: true },
+          ]
+        : [];
       items = [
         ...clip,
+        { label: "선택하여 붙여넣기...", shortcut: "Ctrl+Alt+V", disabled: !copyMark, onClick: () => actions.pasteSpecial() },
+        { separator: true },
+        ...pivotItems,
         { label: "행 삽입", onClick: insertRows },
         { label: "열 삽입", onClick: insertColumns },
         { label: "행 삭제", onClick: deleteRows },
         { label: "열 삭제", onClick: deleteColumns },
         { label: "내용 지우기", shortcut: "Delete", onClick: () => clearRange("contents") },
         { separator: true },
+        { label: memo ? "메모 편집" : "새 메모", shortcut: "Shift+F2", onClick: () => actions.newMemo() },
+        ...(memo ? [{ label: "메모 삭제", onClick: () => actions.deleteMemo() }] : []),
+        { separator: true },
         format,
       ];
+    }
     setMenu({ x, y, items });
   };
 
@@ -1267,6 +1430,48 @@ export default function App() {
       await afterChange();
     },
     zoom: (z) => setZoom(z),
+    pasteAs: (kind) =>
+      void pasteSpecialNow({
+        what: kind === "Transpose" ? "All" : kind,
+        op: "None",
+        skip_blanks: false,
+        transpose: kind === "Transpose",
+      }),
+    pasteSpecial: () => {
+      if (!copyMark) return say("먼저 CellX에서 셀을 복사(Ctrl+C)하세요", true);
+      setDialog({ kind: "pasteSpecial" });
+    },
+    highlight: (cf) => tabRef.current.kind === "sheet" && setDialog({ kind: "highlight", cf }),
+    dataBar: (color, gradient) => void addCf(dataBarRule(color, gradient)),
+    colorScale: (colors) => void addCf(colorScaleRule(colors)),
+    iconSet: (i) => void addCf(iconSetRule(ICON_SETS[i].icons as [string, string][])),
+    rating: () => void addCf(ratingRule()),
+    clearCf: async (scope) => {
+      const st = await onSheetOnly("규칙 지우기", (s) => api.clearConditionalFormats(s, scope === "selection" ? range() : null));
+      if (st) await afterChange(st);
+    },
+    manageCf: () => tabRef.current.kind === "sheet" && setDialog({ kind: "cfManager" }),
+    insertChart: (k) => void insertChart(k),
+    insertPivot: () => void openPivotDialog(),
+    refreshAll: async () => {
+      const st = await run("새로 고침", api.refreshPivots);
+      if (st) {
+        await afterChange(st);
+        say("피벗 테이블을 새로 고쳤습니다");
+      }
+    },
+    newMemo: () => {
+      if (tabRef.current.kind !== "sheet") return say("메모는 일반 시트에 넣을 수 있습니다", true);
+      setEditMemo(selectionRef.current.focus);
+    },
+    deleteMemo: async () => {
+      const t = tabRef.current;
+      const p = selectionRef.current.focus;
+      if (t.kind !== "sheet" || !memoAt(p)) return;
+      const st = await run("메모 삭제", () => api.setMemo(t.index, p.r, p.c, null));
+      if (st) await afterChange(st);
+    },
+    toggleMemos: () => setShowMemos((v) => !v),
     zoomToSelection: () => {
       const src = sourceRef.current;
       if (!src) return;
@@ -1352,6 +1557,8 @@ export default function App() {
         sqlOpen={showSql}
         onDataSheet={tab.kind === "data"}
         functions={functions}
+        showMemos={showMemos}
+        hasMemo={onSheetTab && !!memoAt(selection.focus)}
       />
 
       <div className="formula-bar">
@@ -1517,6 +1724,77 @@ export default function App() {
               }}
               onZoom={setZoom}
               onPageSize={(n) => (pageRows.current = n)}
+              onHover={(h) => {
+                const m = h && memoAt({ r: h.r, c: h.c }) ? { r: h.r, c: h.c } : null;
+                setHoverMemo((cur) => (cur?.r === m?.r && cur?.c === m?.c ? cur : m));
+              }}
+              renderOverlay={(geo) => {
+                const memoPositions: Pos[] = [];
+                if (source instanceof SheetSource) {
+                  if (showMemos) memoPositions.push(...source.memos().map((m) => ({ r: m.row, c: m.col })));
+                  if (hoverMemo && !memoPositions.some((p) => p.r === hoverMemo.r && p.c === hoverMemo.c)) memoPositions.push(hoverMemo);
+                }
+                if (editMemo) {
+                  const i = memoPositions.findIndex((p) => p.r === editMemo.r && p.c === editMemo.c);
+                  if (i >= 0) memoPositions.splice(i, 1);
+                }
+                const box = (p: Pos) => {
+                  const rc = geo.cellRect(p.r, p.c);
+                  return { x: rc.x + rc.w + 6, y: Math.max(0, rc.y - 4) };
+                };
+                return (
+                  <>
+                    <ChartLayer
+                      charts={charts}
+                      geo={geo}
+                      version={chartVersion}
+                      selected={selectedChart}
+                      onSelect={(id) => {
+                        if (sessionRef.current) void commit("none");
+                        setSelectedChart(id);
+                        focusGrid();
+                      }}
+                      onChange={(c) => void updateChart(c)}
+                      onEdit={(c) => setDialog({ kind: "chart", chart: c })}
+                      onContextMenu={(c, x, y) =>
+                        setMenu({
+                          x,
+                          y,
+                          items: [
+                            { label: "차트 편집...", onClick: () => setDialog({ kind: "chart", chart: c }) },
+                            { separator: true },
+                            ...CHART_KINDS.map((k) => ({ label: k.label, checked: c.kind === k.kind, onClick: () => void updateChart({ ...c, kind: k.kind }) })),
+                            { separator: true },
+                            { label: "범례", checked: c.legend, onClick: () => void updateChart({ ...c, legend: !c.legend }) },
+                            { label: "삭제", shortcut: "Delete", onClick: () => void deleteChart(c.id) },
+                          ],
+                        })
+                      }
+                    />
+                    {memoPositions.map((p) => {
+                      const m = memoAt(p);
+                      if (!m) return null;
+                      const b = box(p);
+                      return <MemoBox key={`m${p.r}:${p.c}`} x={b.x} y={b.y} text={m.text} author={m.author} editing={false} />;
+                    })}
+                    {editMemo && (
+                      <MemoBox
+                        key={`edit${editMemo.r}:${editMemo.c}`}
+                        x={box(editMemo).x}
+                        y={box(editMemo).y}
+                        text={memoAt(editMemo)?.text ?? ""}
+                        author={memoAt(editMemo)?.author ?? ""}
+                        editing
+                        onSave={(text) => void saveMemo(editMemo, text)}
+                        onCancel={() => {
+                          setEditMemo(null);
+                          focusGrid();
+                        }}
+                      />
+                    )}
+                  </>
+                );
+              }}
             />
           )}
           {findOpen && (
@@ -1639,6 +1917,63 @@ export default function App() {
             dialog.resolve(v);
             setDialog(null);
             focusGrid();
+          }}
+        />
+      )}
+      {dialog?.kind === "pasteSpecial" && (
+        <PasteSpecialDialog
+          onDone={(o) => {
+            setDialog(null);
+            focusGrid();
+            if (o) void pasteSpecialNow(o);
+          }}
+        />
+      )}
+      {dialog?.kind === "highlight" && (
+        <HighlightDialog
+          kind={dialog.cf}
+          onDone={(r) => {
+            const k = dialog.cf;
+            setDialog(null);
+            focusGrid();
+            if (r) void addCf(highlightRule(k, r.a, r.b, r.style));
+          }}
+        />
+      )}
+      {dialog?.kind === "cfManager" && onSheetTab && (
+        <CfManagerDialog
+          sheet={sheetIndex}
+          onChanged={() => void afterChange()}
+          onClose={() => {
+            setDialog(null);
+            focusGrid();
+          }}
+        />
+      )}
+      {dialog?.kind === "pivot" && (
+        <PivotDialog
+          initial={dialog.def}
+          tables={(info?.tables ?? []).map((t) => t.name)}
+          sheetName={sheetName}
+          onDone={async (def, newSheet) => {
+            setDialog(null);
+            if (!def) return focusGrid();
+            const saved = await run("피벗 테이블", () => api.savePivot(def, newSheet));
+            if (!saved) return;
+            await refreshInfo();
+            await afterChange();
+            if (tabRef.current.kind !== "sheet" || tabRef.current.index !== saved.sheet) switchTab({ kind: "sheet", index: saved.sheet });
+            setSelection({ anchor: { r: saved.row, c: saved.col }, focus: { r: saved.row, c: saved.col } });
+          }}
+        />
+      )}
+      {dialog?.kind === "chart" && (
+        <ChartDialog
+          chart={dialog.chart}
+          onDone={(c) => {
+            setDialog(null);
+            focusGrid();
+            if (c) void updateChart(c);
           }}
         />
       )}

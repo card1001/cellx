@@ -4,7 +4,7 @@ import type { CurrentStyle } from "../api";
 import { FORMAT_CHOICES } from "../formats";
 import { ColorPicker } from "./ColorPicker";
 
-function Modal(props: { title: string; children: ReactNode; onClose(): void; wide?: boolean }) {
+export function Modal(props: { title: string; children: ReactNode; onClose(): void; wide?: boolean }) {
   return (
     <div className="modal-back" onMouseDown={props.onClose}>
       <div className={`modal ${props.wide ? "wide" : ""}`} onMouseDown={(e) => e.stopPropagation()}>

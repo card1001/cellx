@@ -19,5 +19,5 @@ pub use common::UserModel;
 #[cfg(test)]
 pub use ui::SelectedView;
 
-pub use clipboard::{Clipboard, ClipboardData};
+pub use clipboard::{Clipboard, ClipboardCell, ClipboardData};
 pub use common::BorderArea;

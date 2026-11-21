@@ -4,6 +4,7 @@ import {
   type CellStyle,
   type ColumnFilter,
   type ColumnKind,
+  type Memo,
   type Page,
   type Scalar,
   type SheetLayout,
@@ -43,6 +44,8 @@ export interface GridSource {
   cell(r: number, c: number): CellData | undefined;
   /** The merged range a cell belongs to, if any. */
   mergeAt(r: number, c: number): Merge | undefined;
+  /** Cells with memos (sheets only). */
+  memos?(): Memo[];
   request(r0: number, c0: number, r1: number, c1: number): void;
   grow?(r: number, c: number): void;
   subscribe(cb: () => void): () => void;
@@ -83,6 +86,8 @@ export class SheetSource extends Emitter implements GridSource {
   private inflight = new Set<string>();
   private generation = 0;
   private last: [number, number, number, number] = [1, 1, 40, 20];
+  private memoList: Memo[] = [];
+  private memoIndex = new Map<number, Memo>();
 
   constructor(
     readonly sheet: number,
@@ -93,6 +98,25 @@ export class SheetSource extends Emitter implements GridSource {
     this.rows = new Axis(200, layout.default_row_height);
     this.cols = new Axis(26, layout.default_col_width);
     this.applyLayout(layout);
+    void this.loadMemos();
+  }
+
+  memos() {
+    return this.memoList;
+  }
+
+  memoAt(r: number, c: number): Memo | undefined {
+    return this.memoIndex.get(this.key(r, c));
+  }
+
+  private async loadMemos() {
+    try {
+      this.memoList = await api.memos(this.sheet);
+      this.memoIndex = new Map(this.memoList.map((m) => [this.key(m.row, m.col), m]));
+      this.emit();
+    } catch {
+      /* the sheet may be gone */
+    }
   }
 
   private key(r: number, c: number) {
@@ -191,6 +215,7 @@ export class SheetSource extends Emitter implements GridSource {
     const [r0, c0, r1, c1] = this.last;
     this.request(r0, c0, r1, c1);
     this.applyLayout(await api.layout(this.sheet));
+    await this.loadMemos();
   }
 }
 

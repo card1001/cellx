@@ -1,6 +1,8 @@
 // The ribbon, laid out like Korean Excel's: 파일 · 홈 · 삽입 · 수식 · 데이터 · 보기.
 import { useState, type ReactNode } from "react";
-import type { CurrentStyle } from "../api";
+import type { ChartKind, CurrentStyle } from "../api";
+import { COLOR_SCALES, DATA_BARS, HIGHLIGHT, type HighlightKind, ICON_SETS } from "../cf";
+import { CHART_KINDS } from "./Chart";
 import { FORMAT_CHOICES, formatLabel } from "../formats";
 import { ColorPicker } from "./ColorPicker";
 import { FONTS, SIZES } from "./Dialogs";
@@ -48,6 +50,21 @@ export interface RibbonActions {
   toggleGrid(): void;
   zoom(z: number): void;
   zoomToSelection(): void;
+  pasteAs(kind: "Values" | "Formulas" | "Formats" | "Transpose"): void;
+  pasteSpecial(): void;
+  highlight(kind: HighlightKind): void;
+  dataBar(color: string, gradient: boolean): void;
+  colorScale(colors: string[]): void;
+  iconSet(index: number): void;
+  rating(): void;
+  clearCf(scope: "selection" | "sheet"): void;
+  manageCf(): void;
+  insertChart(kind: ChartKind): void;
+  insertPivot(): void;
+  refreshAll(): void;
+  newMemo(): void;
+  deleteMemo(): void;
+  toggleMemos(): void;
 }
 
 interface Props {
@@ -59,9 +76,11 @@ interface Props {
   sqlOpen: boolean;
   onDataSheet: boolean;
   functions: string[];
+  showMemos: boolean;
+  hasMemo: boolean;
 }
 
-const TABS = ["파일", "홈", "삽입", "수식", "데이터", "보기"] as const;
+const TABS = ["파일", "홈", "삽입", "수식", "데이터", "검토", "보기"] as const;
 type Tab = (typeof TABS)[number];
 
 function Group(props: { label: string; children: ReactNode }) {
@@ -172,9 +191,24 @@ export function Ribbon(props: Props) {
         {tab === "홈" && (
           <>
             <Group label="클립보드">
-              <Btn big title="붙여넣기 (Ctrl+V)" onClick={a.paste}>
-                <span className="ic">📋</span>붙여넣기
-              </Btn>
+              <div className="split">
+                <Btn big title="붙여넣기 (Ctrl+V)" onClick={a.paste}>
+                  <span className="ic">📋</span>붙여넣기
+                </Btn>
+                <Dropdown
+                  label=""
+                  title="붙여넣기 옵션"
+                  items={[
+                    { label: "붙여넣기", shortcut: "Ctrl+V", onClick: a.paste },
+                    { label: "수식", onClick: () => a.pasteAs("Formulas") },
+                    { label: "값", onClick: () => a.pasteAs("Values") },
+                    { label: "서식", onClick: () => a.pasteAs("Formats") },
+                    { label: "행/열 바꿈", onClick: () => a.pasteAs("Transpose") },
+                    { separator: true },
+                    { label: "선택하여 붙여넣기...", shortcut: "Ctrl+Alt+V", onClick: a.pasteSpecial },
+                  ]}
+                />
+              </div>
               <div className="col">
                 <Btn title="잘라내기 (Ctrl+X)" onClick={a.cut}>
                   ✂ 잘라내기
@@ -327,6 +361,48 @@ export function Ribbon(props: Props) {
                 </div>
               </div>
             </Group>
+            <Group label="스타일">
+              <Dropdown
+                label={<span className="dd-big"><span className="ic">▦</span>조건부 서식</span>}
+                title="조건부 서식"
+                className="big-dd"
+                items={[
+                  { label: "셀 강조 규칙", disabled: true },
+                  ...(["GreaterThan", "LessThan", "Between", "Equal", "TextContains", "Duplicate"] as HighlightKind[]).map((k) => ({
+                    label: `   ${HIGHLIGHT[k].title}...`,
+                    onClick: () => a.highlight(k),
+                  })),
+                  { separator: true },
+                  { label: "상위/하위 규칙", disabled: true },
+                  ...(["Top10", "Bottom10", "AboveAverage", "BelowAverage"] as HighlightKind[]).map((k) => ({
+                    label: `   ${HIGHLIGHT[k].title}...`,
+                    onClick: () => a.highlight(k),
+                  })),
+                  { separator: true },
+                  { label: "데이터 막대", disabled: true },
+                  ...DATA_BARS.map((d) => ({
+                    label: `   ${d.label}`,
+                    icon: <span className="swatch" style={{ background: d.color }} />,
+                    onClick: () => a.dataBar(d.color, d.gradient),
+                  })),
+                  { separator: true },
+                  { label: "색조", disabled: true },
+                  ...COLOR_SCALES.map((c) => ({
+                    label: `   ${c.label}`,
+                    icon: <span className="swatch" style={{ background: `linear-gradient(90deg, ${[...c.colors].reverse().join(",")})` }} />,
+                    onClick: () => a.colorScale(c.colors),
+                  })),
+                  { separator: true },
+                  { label: "아이콘 집합", disabled: true },
+                  ...ICON_SETS.map((s, i) => ({ label: `   ${s.label}`, onClick: () => a.iconSet(i) })),
+                  { label: "   별점 5개", onClick: a.rating },
+                  { separator: true },
+                  { label: "선택한 셀의 규칙 지우기", onClick: () => a.clearCf("selection") },
+                  { label: "시트 전체에서 규칙 지우기", onClick: () => a.clearCf("sheet") },
+                  { label: "규칙 관리...", onClick: a.manageCf },
+                ]}
+              />
+            </Group>
             <Group label="셀">
               <Dropdown
                 label="삽입"
@@ -415,9 +491,22 @@ export function Ribbon(props: Props) {
                 <span className="ic">▭</span>시트 삽입
               </Btn>
             </Group>
+            <Group label="표">
+              <Btn big title="피벗 테이블: 선택한 범위를 요약합니다" onClick={a.insertPivot}>
+                <span className="ic">⊞</span>피벗 테이블
+              </Btn>
+            </Group>
             <Group label="차트">
-              <Btn big title="다음 단계에서 지원합니다" disabled onClick={() => {}}>
-                <span className="ic">📊</span>차트 (준비 중)
+              {CHART_KINDS.map((k) => (
+                <Btn big key={k.kind} title={`${k.label} 차트 삽입`} onClick={() => a.insertChart(k.kind)}>
+                  <span className="ic">{k.icon}</span>
+                  {k.label}
+                </Btn>
+              ))}
+            </Group>
+            <Group label="메모">
+              <Btn big title="새 메모 (Shift+F2)" onClick={a.newMemo}>
+                <span className="ic">🗨</span>메모
               </Btn>
             </Group>
             <Group label="데이터">
@@ -450,6 +539,27 @@ export function Ribbon(props: Props) {
               </Btn>
               <Btn big title="데이터 시트를 CSV·Parquet으로" disabled={!props.onDataSheet} onClick={a.exportTable}>
                 <span className="ic">⇪</span>내보내기
+              </Btn>
+            </Group>
+            <Group label="쿼리 및 연결">
+              <Btn big title="피벗 테이블을 모두 새로 고침 (Ctrl+Alt+F5)" onClick={a.refreshAll}>
+                <span className="ic">⟳</span>모두 새로 고침
+              </Btn>
+            </Group>
+          </>
+        )}
+        {tab === "검토" && (
+          <>
+            <Group label="메모">
+              <Btn big title={props.hasMemo ? "메모 편집 (Shift+F2)" : "새 메모 (Shift+F2)"} onClick={a.newMemo}>
+                <span className="ic">🗨</span>
+                {props.hasMemo ? "메모 편집" : "새 메모"}
+              </Btn>
+              <Btn big title="선택한 셀의 메모 삭제" disabled={!props.hasMemo} onClick={a.deleteMemo}>
+                <span className="ic">🗑</span>삭제
+              </Btn>
+              <Btn big title="모든 메모 표시" on={props.showMemos} onClick={a.toggleMemos}>
+                <span className="ic">🗪</span>메모 모두 표시
               </Btn>
             </Group>
           </>

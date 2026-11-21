@@ -78,6 +78,7 @@ export function Dropdown(props: {
   className?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [at, setAt] = useState({ x: 0, y: 0 });
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
@@ -93,13 +94,18 @@ export function Dropdown(props: {
         className={`rb dd ${open ? "on" : ""}`}
         title={props.title}
         onMouseDown={(e) => e.preventDefault()}
-        onClick={() => setOpen((o) => !o)}
+        onClick={(e) => {
+          // The ribbon clips overflowing children, so the panel is placed in window coordinates.
+          const r = e.currentTarget.getBoundingClientRect();
+          setAt({ x: Math.min(r.left, window.innerWidth - 260), y: r.bottom + 1 });
+          setOpen((o) => !o);
+        }}
       >
         {props.label}
         <span className="caret">▾</span>
       </button>
       {open && (
-        <div className="dropdown-panel">
+        <div className="dropdown-panel" style={{ position: "fixed", left: at.x, top: at.y, maxHeight: window.innerHeight - at.y - 8 }}>
           {props.items ? (
             <MenuList items={props.items} onClose={() => setOpen(false)} />
           ) : (
