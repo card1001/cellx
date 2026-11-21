@@ -39,7 +39,13 @@ enum Command {
         /// 일치율이 이 값(%) 미만이면 실패 코드로 종료
         #[arg(long)]
         min_rate: Option<f64>,
+        /// 파일 하나당 제한 시간(초)
+        #[arg(long, default_value_t = 120)]
+        timeout: u64,
     },
+    /// (내부용) 파일 하나를 검사해 JSON으로 출력합니다.
+    #[command(hide = true)]
+    CompatOne { file: PathBuf },
     /// 성능 측정용 합성 주문 데이터(CSV)를 만듭니다.
     GenData {
         #[arg(long, default_value_t = 1_000_000)]
@@ -58,6 +64,12 @@ enum Command {
         #[arg(long, default_value_t = 25_000)]
         rows: i32,
     },
+    /// CSV를 데이터 시트로 넣은 예제 프로젝트(.cellx)를 만듭니다.
+    MakeDemo {
+        csv: PathBuf,
+        #[arg(short, long)]
+        out: PathBuf,
+    },
     /// xlsx를 열고 다시 계산한 뒤 셀 값을 출력합니다. 예: Sheet1!B3
     Eval { file: PathBuf, cell: String },
 }
@@ -65,8 +77,9 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Compat { inputs, json, verbose, min_rate } => {
-            let report = compat::run(&inputs);
+        Command::CompatOne { file } => compat::run_one(&file),
+        Command::Compat { inputs, json, verbose, min_rate, timeout } => {
+            let report = compat::run(&inputs, std::time::Duration::from_secs(timeout));
             compat::print(&report, verbose);
             if let Some(path) = json {
                 std::fs::write(&path, serde_json::to_vec_pretty(&report)?)?;
@@ -85,6 +98,7 @@ fn main() -> Result<()> {
         }
         Command::BenchData { csv, runs } => bench::bench_data(&csv, runs)?,
         Command::BenchCalc { rows } => bench::bench_calc(rows)?,
+        Command::MakeDemo { csv, out } => bench::make_demo(&csv, &out)?,
         Command::Eval { file, cell } => {
             let mut wb = cellx_core::Workbook::open_xlsx(&file)?;
             wb.recalc()?;

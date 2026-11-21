@@ -3,7 +3,9 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use cellx_core::value::{from_ironcalc, Scalar};
 use cellx_core::workbook::load_xlsx;
@@ -194,37 +196,120 @@ fn check_file(path: &Path, functions: &mut BTreeMap<String, FunctionStat>) -> Fi
     FileResult { file, formula_cells, mismatches, load_ms, eval_ms, error: None, examples }
 }
 
-pub fn run(inputs: &[PathBuf]) -> Report {
+#[derive(Serialize, serde::Deserialize)]
+pub struct OneFile {
+    pub result: FileResultData,
+    pub functions: BTreeMap<String, (u64, u64)>,
+}
+
+/// Serializable mirror of [`FileResult`] for the child-process protocol.
+#[derive(Serialize, serde::Deserialize)]
+pub struct FileResultData {
+    pub file: String,
+    pub formula_cells: u64,
+    pub mismatches: u64,
+    pub load_ms: f64,
+    pub eval_ms: f64,
+    pub error: Option<String>,
+    pub examples: Vec<String>,
+}
+
+/// Checks one file and prints the result as JSON (runs in a child process).
+pub fn run_one(path: &Path) {
+    let mut local = BTreeMap::new();
+    let r = check_file(path, &mut local);
+    let out = OneFile {
+        result: FileResultData {
+            file: r.file,
+            formula_cells: r.formula_cells,
+            mismatches: r.mismatches,
+            load_ms: r.load_ms,
+            eval_ms: r.eval_ms,
+            error: r.error,
+            examples: r.examples,
+        },
+        functions: local.into_iter().map(|(k, v)| (k, (v.cells, v.mismatches))).collect(),
+    };
+    println!("{}", serde_json::to_string(&out).unwrap_or_default());
+}
+
+fn failed(path: &Path, why: String) -> FileResult {
+    FileResult {
+        file: path.display().to_string(),
+        formula_cells: 0,
+        mismatches: 0,
+        load_ms: 0.0,
+        eval_ms: 0.0,
+        error: Some(why),
+        examples: vec![],
+    }
+}
+
+/// Runs every file in its own process: IronCalc can abort on some inputs (for
+/// example an allocation failure), which would otherwise end the whole run.
+pub fn run(inputs: &[PathBuf], timeout: Duration) -> Report {
     let files = collect_files(inputs);
-    let mut functions = BTreeMap::new();
+    let exe = std::env::current_exe().expect("current exe");
+    let mut functions: BTreeMap<String, FunctionStat> = BTreeMap::new();
     let mut results = Vec::new();
-    for path in files {
-        // IronCalc is young: a panic on one file must not stop the whole run.
-        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut local = BTreeMap::new();
-            let r = check_file(&path, &mut local);
-            (r, local)
-        }));
-        match outcome {
-            Ok((r, local)) => {
-                for (k, v) in local {
-                    let s: &mut FunctionStat = functions.entry(k).or_default();
-                    s.cells += v.cells;
-                    s.mismatches += v.mismatches;
-                }
-                results.push(r);
+    let total = files.len();
+    for (i, path) in files.into_iter().enumerate() {
+        eprint!("\r[{}/{}] {}", i + 1, total, path.file_name().and_then(|n| n.to_str()).unwrap_or(""));
+        let child = Command::new(&exe)
+            .arg("compat-one")
+            .arg(&path)
+            .env("RUST_BACKTRACE", "0")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        let mut child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                results.push(failed(&path, format!("검사 프로세스를 시작하지 못했습니다: {e}")));
+                continue;
             }
-            Err(_) => results.push(FileResult {
-                file: path.display().to_string(),
-                formula_cells: 0,
-                mismatches: 0,
-                load_ms: 0.0,
-                eval_ms: 0.0,
-                error: Some("계산 엔진이 이 파일에서 중단되었습니다(panic)".into()),
-                examples: vec![],
-            }),
+        };
+        let start = Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(s)) => break Some(s),
+                Ok(None) if start.elapsed() > timeout => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+                Err(_) => break None,
+            }
+        };
+        let mut stdout = String::new();
+        if let Some(mut out) = child.stdout.take() {
+            let _ = out.read_to_string(&mut stdout);
+        }
+        let parsed = serde_json::from_str::<OneFile>(stdout.trim());
+        match (status, parsed) {
+            (Some(_), Ok(one)) => {
+                for (k, (cells, mism)) in one.functions {
+                    let s = functions.entry(k).or_default();
+                    s.cells += cells;
+                    s.mismatches += mism;
+                }
+                let r = one.result;
+                results.push(FileResult {
+                    file: r.file,
+                    formula_cells: r.formula_cells,
+                    mismatches: r.mismatches,
+                    load_ms: r.load_ms,
+                    eval_ms: r.eval_ms,
+                    error: r.error,
+                    examples: r.examples,
+                });
+            }
+            (None, _) => results.push(failed(&path, format!("{}초 안에 끝나지 않았습니다", timeout.as_secs()))),
+            (Some(s), Err(_)) => results.push(failed(&path, format!("계산 엔진이 이 파일에서 중단되었습니다 ({s})"))),
         }
     }
+    eprintln!();
     let formula_cells: u64 = results.iter().map(|r| r.formula_cells).sum();
     let mismatches: u64 = results.iter().map(|r| r.mismatches).sum();
     let match_rate = if formula_cells == 0 {

@@ -179,6 +179,22 @@ export function Grid(props: Props) {
     ctx.beginPath();
     ctx.rect(rowHeaderW, HEADER_H, bodyW, bodyH);
     ctx.clip();
+    // Grid lines
+    ctx.strokeStyle = line;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let r = firstRow; r <= lastRow + 1; r++) {
+      const y = Math.round(rowY(r)) + 0.5;
+      ctx.moveTo(rowHeaderW, y);
+      ctx.lineTo(size.w, y);
+    }
+    for (let c = firstCol; c <= lastCol + 1; c++) {
+      const x = Math.round(colXScreen(c)) + 0.5;
+      ctx.moveTo(x, HEADER_H);
+      ctx.lineTo(x, size.h);
+    }
+    ctx.stroke();
+
     for (let r = firstRow; r <= lastRow; r++) {
       const y = rowY(r);
       for (let c = firstCol; c <= lastCol; c++) {
@@ -195,9 +211,25 @@ export function Grid(props: Props) {
           ctx.font = `${st?.italic ? "italic " : ""}${st?.bold ? "600 " : ""}${FONT}`;
           ctx.fillStyle = cell.error ? "#c62828" : st?.color ?? text;
           const align = st?.align ?? (cell.numeric || cell.error ? "right" : "left");
+          // Like Excel, left-aligned text runs over empty cells to its right.
+          let clipW = w;
+          if (align === "left" && !cell.numeric) {
+            const need = ctx.measureText(cell.text).width + 12;
+            let k = c + 1;
+            while (clipW < need && k <= lastCol + 20 && k <= cols && !source.cell(r, k)?.text) {
+              clipW += source.colWidth(k);
+              k++;
+            }
+          }
+          if (clipW > w) {
+            // Hide the grid lines under the overflowing part, as Excel does.
+            ctx.fillStyle = bg;
+            ctx.fillRect(x + w - 1, y + 1, clipW - w, rh - 1);
+            ctx.fillStyle = cell.error ? "#c62828" : st?.color ?? text;
+          }
           ctx.save();
           ctx.beginPath();
-          ctx.rect(x + 1, y, w - 2, rh);
+          ctx.rect(x + 1, y, clipW - 2, rh);
           ctx.clip();
           let tx = x + 6;
           if (align === "right") {
@@ -229,22 +261,6 @@ export function Grid(props: Props) {
         }
       }
     }
-    // Grid lines
-    ctx.strokeStyle = line;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    for (let r = firstRow; r <= lastRow + 1; r++) {
-      const y = Math.round(rowY(r)) + 0.5;
-      ctx.moveTo(rowHeaderW, y);
-      ctx.lineTo(size.w, y);
-    }
-    for (let c = firstCol; c <= lastCol + 1; c++) {
-      const x = Math.round(colXScreen(c)) + 0.5;
-      ctx.moveTo(x, HEADER_H);
-      ctx.lineTo(x, size.h);
-    }
-    ctx.stroke();
-
     // Selection
     const sx0 = colXScreen(sel.c0);
     const sx1 = colXScreen(sel.c1) + source.colWidth(sel.c1);

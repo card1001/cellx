@@ -207,3 +207,59 @@ pub fn bench_calc(rows: i32) -> Result<()> {
     println!("VLOOKUP {lookups}개 (범위 {rows}행) 추가 후 전체 계산: {:.0} ms", s.calc_ms);
     Ok(())
 }
+
+/// Builds a sample project: an `orders` data sheet and a summary sheet of bridge formulas.
+pub fn make_demo(csv: &Path, out: &Path) -> Result<()> {
+    let mut wb = Workbook::new()?;
+    let info = wb.import_data(csv, "orders")?;
+    wb.rename_sheet(0, "요약")?;
+    let mut cells: Vec<(i32, i32, String)> = vec![
+        (1, 1, "지역별 매출 요약 — 데이터 시트 orders".into()),
+        (2, 1, format!("원본 {}행 · 수식은 orders[열]을 참조하고 DuckDB에서 계산됩니다", info.rows)),
+        (4, 1, "지역".into()),
+        (4, 2, "매출 합계".into()),
+        (4, 3, "주문 수".into()),
+        (4, 4, "취소율(%)".into()),
+        (4, 5, "기준일 이후 매출".into()),
+        (4, 7, "기준일".into()),
+        (4, 8, "2025-01-01".into()),
+    ];
+    for (i, region) in REGIONS.iter().enumerate() {
+        let r = 5 + i as i32;
+        cells.push((r, 1, region.to_string()));
+        cells.push((r, 2, format!("=SUMIFS(orders[amount], orders[region], A{r})")));
+        cells.push((r, 3, format!("=COUNTIFS(orders[region], A{r})")));
+        cells.push((
+            r,
+            4,
+            format!("=ROUND(COUNTIFS(orders[region], A{r}, orders[status], \"취소\") / C{r} * 100, 2)"),
+        ));
+        cells.push((r, 5, format!("=SUMIFS(orders[amount], orders[region], A{r}, orders[order_date], \">=\"&$H$4)")));
+    }
+    let last = 4 + REGIONS.len() as i32;
+    cells.push((last + 1, 1, "합계".into()));
+    cells.push((last + 1, 2, format!("=SUM(B5:B{last})")));
+    cells.push((last + 1, 3, format!("=SUM(C5:C{last})")));
+    cells.push((last + 1, 5, format!("=SUM(E5:E{last})")));
+    cells.push((last + 3, 1, "카테고리별 주문 수 (DQUERY)".into()));
+    cells.push((
+        last + 4,
+        1,
+        "=DQUERY(\"SELECT category, COUNT(*) AS orders, SUM(amount) AS total FROM orders GROUP BY 1 ORDER BY 3 DESC\")".into(),
+    ));
+    let t = Instant::now();
+    let stats = wb.set_inputs(0, &cells)?;
+    for (col, w) in [(1, 150.0), (2, 150.0), (3, 110.0), (4, 100.0), (5, 160.0), (7, 70.0), (8, 100.0)] {
+        wb.set_column_width(0, col, w)?;
+    }
+    println!(
+        "수식 {}개 계산: {:.0} ms (데이터 엔진 {:.0} ms, 호출 {}회)",
+        wb.bridge_formula_count(),
+        t.elapsed().as_secs_f64() * 1000.0,
+        stats.bridge_ms,
+        stats.bridge_calls
+    );
+    cellx_core::project::save_project(&mut wb, out)?;
+    println!("저장: {}", out.display());
+    Ok(())
+}

@@ -200,14 +200,20 @@ pub fn criterion_sql(col: &ColumnInfo, criterion: &Scalar) -> (String, Vec<Value
                 }
             }
             let text = text_expr(col);
+            // Text with no cased letters (Korean, digits, symbols) needs no lower(): comparing
+            // the raw column keeps the comparison case-insensitive and is much faster.
+            let caseless = col.kind == ColumnKind::Text && rest.to_lowercase() == rest.to_uppercase();
+            let raw = quote_ident(&col.name);
             match op {
                 Op::Eq | Op::Ne => {
-                    let (pred, param) = match wildcard_to_like(rest) {
-                        Some(pattern) => (
+                    let (pred, param) = match (wildcard_to_like(rest), caseless) {
+                        (Some(pattern), true) => (format!("{raw} LIKE ? ESCAPE '\\'"), Value::Text(pattern)),
+                        (Some(pattern), false) => (
                             format!("{text} LIKE lower(?) ESCAPE '\\'"),
                             Value::Text(pattern),
                         ),
-                        None => (format!("{text} = lower(?)"), Value::Text(unescape_tilde(rest))),
+                        (None, true) => (format!("{raw} = ?"), Value::Text(unescape_tilde(rest))),
+                        (None, false) => (format!("{text} = lower(?)"), Value::Text(unescape_tilde(rest))),
                     };
                     if op == Op::Eq {
                         (pred, vec![param])

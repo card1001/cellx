@@ -21,6 +21,16 @@ impl Book {
     pub fn new() -> cellx_core::Result<Self> {
         Ok(Book { wb: Workbook::new()?, path: None, dirty: false })
     }
+
+    pub fn open(path: &Path) -> cellx_core::Result<Self> {
+        let mut wb = if is_project(path) {
+            project::open_project(path)?
+        } else {
+            Workbook::open_xlsx(path)?
+        };
+        wb.recalc()?;
+        Ok(Book { wb, path: Some(path.to_path_buf()), dirty: false })
+    }
 }
 
 pub struct AppState(pub Mutex<Book>);
@@ -60,7 +70,8 @@ fn is_project(path: &Path) -> bool {
 
 #[tauri::command]
 pub fn book_info(state: State<'_, AppState>) -> CmdResult<BookInfo> {
-    info(&mut lock(&state)?)
+    let mut book = lock(&state)?;
+    info(&mut book)
 }
 
 #[tauri::command]
@@ -72,15 +83,9 @@ pub fn new_book(state: State<'_, AppState>) -> CmdResult<BookInfo> {
 
 #[tauri::command]
 pub async fn open_file(state: State<'_, AppState>, path: String) -> CmdResult<BookInfo> {
-    let p = PathBuf::from(&path);
-    let mut wb = if is_project(&p) {
-        project::open_project(&p).map_err(err)?
-    } else {
-        Workbook::open_xlsx(&p).map_err(err)?
-    };
-    wb.recalc().map_err(err)?;
+    let opened = Book::open(Path::new(&path)).map_err(err)?;
     let mut book = lock(&state)?;
-    *book = Book { wb, path: Some(p), dirty: false };
+    *book = opened;
     info(&mut book)
 }
 

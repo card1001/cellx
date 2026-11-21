@@ -6,7 +6,15 @@ mod commands;
 use std::sync::Mutex;
 
 fn main() {
-    let book = commands::Book::new().expect("CellX 엔진을 시작하지 못했습니다");
+    // A file passed on the command line (double-click on a .cellx/.xlsx file) opens at start.
+    let initial = std::env::args().nth(1).map(std::path::PathBuf::from);
+    let book = match initial.as_deref() {
+        Some(path) => commands::Book::open(path).unwrap_or_else(|e| {
+            eprintln!("{}: {e}", path.display());
+            commands::Book::new().expect("CellX 엔진을 시작하지 못했습니다")
+        }),
+        None => commands::Book::new().expect("CellX 엔진을 시작하지 못했습니다"),
+    };
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(commands::AppState(Mutex::new(book)))

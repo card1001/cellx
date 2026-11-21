@@ -82,12 +82,17 @@ export default function App() {
     void refreshInfo().catch(fail);
   }, []);
 
+  // Always read the latest focus: async callers may hold an older closure.
+  const focusRef = useRef(selection.focus);
+  focusRef.current = selection.focus;
+
   const loadFocusedCell = useCallback(async () => {
-    const f = selection.focus;
+    const f = focusRef.current;
     if (formulaEditing.current) return;
     if (tab.kind === "sheet") {
       try {
         const d = await api.cellDetail(tab.index, f.r, f.c);
+        if (focusRef.current !== f) return;
         setFormula(d.input);
         setBridgeError(d.bridge_error);
       } catch (e) {
@@ -103,6 +108,15 @@ export default function App() {
   useEffect(() => {
     void loadFocusedCell();
   }, [loadFocusedCell]);
+
+  // Data sheets load pages asynchronously: refresh the row count and formula bar when they arrive.
+  useEffect(() => {
+    if (!(source instanceof DataSource)) return;
+    return source.subscribe(() => {
+      force((x) => x + 1);
+      void loadFocusedCell();
+    });
+  }, [source, loadFocusedCell]);
 
   const afterRecalc = (s: RecalcStats) => {
     setStats(s);
@@ -562,9 +576,10 @@ export default function App() {
 
 function DataBar(props: { source: DataSource; onChange(): void; onExport(): void }) {
   const { source } = props;
-  const [column, setColumn] = useState(source.info.columns[0]?.name ?? "");
+  const defaultColumn = (source.info.columns.find((c) => c.kind === "Text") ?? source.info.columns[0])?.name ?? "";
+  const [column, setColumn] = useState(defaultColumn);
   const [criterion, setCriterion] = useState("");
-  useEffect(() => setColumn(source.info.columns[0]?.name ?? ""), [source]);
+  useEffect(() => setColumn(defaultColumn), [source, defaultColumn]);
   const apply = (filters: typeof source.filters) => {
     source.setView(source.sort, filters);
     props.onChange();
@@ -605,9 +620,11 @@ function DataBar(props: { source: DataSource; onChange(): void; onExport(): void
 
 function SqlPanel(props: { tables: TableInfo[]; onCreate(sql: string, name: string): Promise<void> }) {
   const first = props.tables[0];
+  // Group by the first text column: a useful default, unlike grouping by an id.
+  const groupCol = first?.columns.find((c) => c.kind === "Text") ?? first?.columns[0];
   const [sql, setSql] = useState(
     first
-      ? `SELECT ${first.columns[0]?.name ?? "*"}, COUNT(*) AS cnt\nFROM ${first.name}\nGROUP BY 1\nORDER BY 2 DESC`
+      ? `SELECT ${groupCol?.name ?? "*"}, COUNT(*) AS cnt\nFROM ${first.name}\nGROUP BY 1\nORDER BY 2 DESC`
       : "SELECT 1 AS x",
   );
   const [name, setName] = useState("result");
