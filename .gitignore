@@ -1,0 +1,9 @@
+/target
+node_modules/
+dist/
+*.duckdb
+*.duckdb.wal
+/bench-data/
+/apps/desktop/src-tauri/gen/
+*.cellx-tmp
+*.cellx-tmp.xlsx

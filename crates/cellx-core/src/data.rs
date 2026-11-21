@@ -1,0 +1,559 @@
+//! Data engine: large tables ("data sheets") stored in DuckDB.
+//!
+//! Every imported table gets a stable `_rid` column so that rows keep their
+//! identity after sorting or filtering.
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::Arc;
+
+use duckdb::{params_from_iter, Connection, InterruptHandle};
+use serde::Serialize;
+
+use crate::error::{CellxError, Result};
+use crate::value::{from_duckdb, Scalar};
+
+/// Column kind as the bridge needs it to translate Excel criteria.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ColumnKind {
+    Number,
+    Text,
+    Bool,
+    Date,
+    Timestamp,
+    Other,
+}
+
+impl ColumnKind {
+    fn from_duckdb_type(t: &str) -> Self {
+        let t = t.to_ascii_uppercase();
+        if t == "BOOLEAN" {
+            ColumnKind::Bool
+        } else if t == "DATE" {
+            ColumnKind::Date
+        } else if t.starts_with("TIMESTAMP") {
+            ColumnKind::Timestamp
+        } else if t.starts_with("DECIMAL")
+            || matches!(
+                t.as_str(),
+                "TINYINT" | "SMALLINT" | "INTEGER" | "BIGINT" | "HUGEINT" | "UTINYINT"
+                    | "USMALLINT" | "UINTEGER" | "UBIGINT" | "UHUGEINT" | "FLOAT" | "DOUBLE"
+            )
+        {
+            ColumnKind::Number
+        } else if t == "VARCHAR" || t.starts_with("VARCHAR") || t == "UUID" {
+            ColumnKind::Text
+        } else {
+            ColumnKind::Other
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ColumnInfo {
+    pub name: String,
+    pub sql_type: String,
+    pub kind: ColumnKind,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TableInfo {
+    pub name: String,
+    pub rows: u64,
+    pub columns: Vec<ColumnInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Page {
+    pub columns: Vec<String>,
+    /// Row ids (`_rid`) of the returned rows, for editing and selection.
+    pub row_ids: Vec<i64>,
+    pub rows: Vec<Vec<Scalar>>,
+    /// Number of rows matching the filter (not just this page).
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Sort {
+    pub column: String,
+    pub descending: bool,
+}
+
+/// A simple filter entered in the column header UI: an Excel-style criterion
+/// such as `">=100"`, `"서울"` or `"*카드*"` applied to one column.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ColumnFilter {
+    pub column: String,
+    pub criterion: String,
+}
+
+pub struct DataStore {
+    conn: Connection,
+    schema_cache: HashMap<String, TableInfo>,
+    /// Bumped on every change to a table; lets the bridge invalidate cached results.
+    versions: HashMap<String, u64>,
+}
+
+pub fn quote_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Table names must be usable inside Excel structured references (`sales[amount]`).
+pub fn is_valid_table_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    name.len() <= 64 && chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+impl DataStore {
+    /// Opens (or creates) a project database file.
+    pub fn open(path: &Path) -> Result<Self> {
+        Self::configure(Connection::open(path)?)
+    }
+
+    pub fn open_in_memory() -> Result<Self> {
+        Self::configure(Connection::open_in_memory()?)
+    }
+
+    fn configure(conn: Connection) -> Result<Self> {
+        // No silent downloads: CellX must work offline and never fetch code.
+        conn.execute_batch(
+            "SET autoinstall_known_extensions = false;
+             SET autoload_known_extensions = false;",
+        )?;
+        let mut store = DataStore {
+            conn,
+            schema_cache: HashMap::new(),
+            versions: HashMap::new(),
+        };
+        for name in store.table_names()? {
+            store.versions.insert(name, 1);
+        }
+        Ok(store)
+    }
+
+    pub fn duckdb_version(&self) -> Result<String> {
+        Ok(self
+            .conn
+            .query_row("SELECT version()", [], |r| r.get::<_, String>(0))?)
+    }
+
+    pub fn interrupt_handle(&self) -> Arc<InterruptHandle> {
+        self.conn.interrupt_handle()
+    }
+
+    pub fn table_names(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT table_name FROM information_schema.tables
+             WHERE table_schema = 'main' AND table_name NOT LIKE '\\_cellx\\_%' ESCAPE '\\'
+             ORDER BY table_name",
+        )?;
+        let names = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(names)
+    }
+
+    pub fn has_table(&self, name: &str) -> bool {
+        self.versions
+            .keys()
+            .any(|t| t.eq_ignore_ascii_case(name))
+    }
+
+    /// Canonical spelling of a table name (structured references are case-insensitive).
+    pub fn canonical_table(&self, name: &str) -> Option<String> {
+        self.versions
+            .keys()
+            .find(|t| t.eq_ignore_ascii_case(name))
+            .cloned()
+    }
+
+    pub fn version(&self, table: &str) -> u64 {
+        self.versions.get(table).copied().unwrap_or(0)
+    }
+
+    /// Imports a CSV, TSV or Parquet file as a data sheet.
+    pub fn import_file(&mut self, path: &Path, table: &str) -> Result<TableInfo> {
+        if !is_valid_table_name(table) {
+            return Err(CellxError::InvalidName(table.to_string()));
+        }
+        let path_text = path
+            .to_str()
+            .ok_or_else(|| CellxError::InvalidName(path.display().to_string()))?;
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let reader = match ext.as_str() {
+            "parquet" => "read_parquet(?)",
+            // A large sample keeps type inference stable without scanning the whole file twice.
+            _ => "read_csv(?, sample_size = 20480, ignore_errors = false)",
+        };
+        let sql = format!(
+            "CREATE OR REPLACE TABLE {t} AS SELECT row_number() OVER () AS _rid, * FROM {reader}",
+            t = quote_ident(table)
+        );
+        self.conn.execute(&sql, [path_text])?;
+        self.touch(table);
+        self.table_info(table)
+    }
+
+    /// Creates a table from rows already in memory (used by tests and pasted data).
+    pub fn create_table_from_sql(&mut self, table: &str, select_sql: &str) -> Result<TableInfo> {
+        if !is_valid_table_name(table) {
+            return Err(CellxError::InvalidName(table.to_string()));
+        }
+        let sql = format!(
+            "CREATE OR REPLACE TABLE {t} AS SELECT row_number() OVER () AS _rid, * FROM ({select_sql})",
+            t = quote_ident(table)
+        );
+        self.conn.execute_batch(&sql)?;
+        self.touch(table);
+        self.table_info(table)
+    }
+
+    pub fn drop_table(&mut self, table: &str) -> Result<()> {
+        self.conn
+            .execute_batch(&format!("DROP TABLE IF EXISTS {}", quote_ident(table)))?;
+        self.versions.remove(table);
+        self.schema_cache.remove(table);
+        Ok(())
+    }
+
+    fn touch(&mut self, table: &str) {
+        *self.versions.entry(table.to_string()).or_insert(0) += 1;
+        self.schema_cache.remove(table);
+    }
+
+    pub fn table_info(&mut self, table: &str) -> Result<TableInfo> {
+        if let Some(info) = self.schema_cache.get(table) {
+            return Ok(info.clone());
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT column_name, data_type FROM information_schema.columns
+             WHERE table_schema = 'main' AND table_name = ? ORDER BY ordinal_position",
+        )?;
+        let columns = stmt
+            .query_map([table], |r| {
+                let name: String = r.get(0)?;
+                let sql_type: String = r.get(1)?;
+                Ok(ColumnInfo {
+                    kind: ColumnKind::from_duckdb_type(&sql_type),
+                    name,
+                    sql_type,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if columns.is_empty() {
+            return Err(CellxError::UnknownTable(table.to_string()));
+        }
+        let rows: i64 = self.conn.query_row(
+            &format!("SELECT count(*) FROM {}", quote_ident(table)),
+            [],
+            |r| r.get(0),
+        )?;
+        let info = TableInfo {
+            name: table.to_string(),
+            rows: rows as u64,
+            columns: columns.into_iter().filter(|c| c.name != "_rid").collect(),
+        };
+        self.schema_cache.insert(table.to_string(), info.clone());
+        Ok(info)
+    }
+
+    pub fn column(&mut self, table: &str, column: &str) -> Result<ColumnInfo> {
+        let info = self.table_info(table)?;
+        info.columns
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(column))
+            .cloned()
+            .ok_or_else(|| CellxError::UnknownColumn(format!("{table}[{column}]")))
+    }
+
+    /// Runs a query that returns one value.
+    pub fn scalar(&self, sql: &str, params: &[duckdb::types::Value]) -> Result<Scalar> {
+        let mut stmt = self.conn.prepare(sql)?;
+        let mut rows = stmt.query(params_from_iter(params.iter()))?;
+        match rows.next()? {
+            Some(row) => Ok(from_duckdb(row.get::<_, duckdb::types::Value>(0)?)),
+            None => Ok(Scalar::Empty),
+        }
+    }
+
+    /// Runs a query and returns column names plus up to `max_rows` rows.
+    pub fn rows(
+        &self,
+        sql: &str,
+        params: &[duckdb::types::Value],
+        max_rows: usize,
+    ) -> Result<(Vec<String>, Vec<Vec<Scalar>>, bool)> {
+        let mut stmt = self.conn.prepare(sql)?;
+        let mut rows = stmt.query(params_from_iter(params.iter()))?;
+        let names = rows
+            .as_ref()
+            .map(|s| s.column_names())
+            .unwrap_or_default();
+        let width = names.len();
+        let mut out = Vec::new();
+        let mut truncated = false;
+        while let Some(row) = rows.next()? {
+            if out.len() == max_rows {
+                truncated = true;
+                break;
+            }
+            let mut values = Vec::with_capacity(width);
+            for i in 0..width {
+                values.push(from_duckdb(row.get::<_, duckdb::types::Value>(i)?));
+            }
+            out.push(values);
+        }
+        Ok((names, out, truncated))
+    }
+
+    /// Rejects anything that is not a single read-only SELECT over CellX tables.
+    ///
+    /// DuckDB's own parser does the work: `json_serialize_sql` only accepts SELECT
+    /// statements, and its output lets us refuse table functions such as
+    /// `read_csv` or `glob`, which could read arbitrary files.
+    pub fn validate_user_select(&self, sql: &str) -> Result<()> {
+        let trimmed = sql.trim().trim_end_matches(';');
+        if trimmed.contains(';') {
+            return Err(CellxError::UnsafeSql("여러 문장은 실행할 수 없습니다".into()));
+        }
+        let json: String = self.conn.query_row(
+            "SELECT json_serialize_sql(?::VARCHAR)",
+            [trimmed],
+            |r| r.get(0),
+        )?;
+        let parsed: serde_json::Value = serde_json::from_str(&json)
+            .map_err(|e| CellxError::UnsafeSql(e.to_string()))?;
+        if parsed.get("error").and_then(|v| v.as_bool()) == Some(true) {
+            let message = parsed
+                .get("error_message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("SELECT 문만 실행할 수 있습니다");
+            return Err(CellxError::UnsafeSql(message.to_string()));
+        }
+        if json_contains_table_function(&parsed) {
+            return Err(CellxError::UnsafeSql(
+                "파일을 읽는 테이블 함수(read_csv 등)는 사용할 수 없습니다".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// One page of a data sheet for the grid, with optional sort and filters.
+    pub fn page(
+        &mut self,
+        table: &str,
+        offset: u64,
+        limit: u64,
+        sort: Option<&Sort>,
+        filters: &[ColumnFilter],
+    ) -> Result<Page> {
+        let info = self.table_info(table)?;
+        let mut where_sql = Vec::new();
+        let mut params = Vec::new();
+        for f in filters {
+            if f.criterion.trim().is_empty() {
+                continue;
+            }
+            let col = self.column(table, &f.column)?;
+            let (sql, mut p) = crate::criteria::criterion_sql(
+                &col,
+                &Scalar::Text(f.criterion.clone()),
+            );
+            where_sql.push(sql);
+            params.append(&mut p);
+        }
+        let where_clause = if where_sql.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", where_sql.join(" AND "))
+        };
+        let order = match sort {
+            Some(s) => {
+                let col = self.column(table, &s.column)?;
+                format!(
+                    "ORDER BY {} {} NULLS LAST, _rid",
+                    quote_ident(&col.name),
+                    if s.descending { "DESC" } else { "ASC" }
+                )
+            }
+            None => "ORDER BY _rid".to_string(),
+        };
+        let cols: Vec<String> = info.columns.iter().map(|c| quote_ident(&c.name)).collect();
+        let t = quote_ident(table);
+        let total = match self.scalar(
+            &format!("SELECT count(*) FROM {t} {where_clause}"),
+            &params,
+        )? {
+            Scalar::Number(n) => n as u64,
+            _ => 0,
+        };
+        let sql = format!(
+            "SELECT _rid, {cols} FROM {t} {where_clause} {order} LIMIT {limit} OFFSET {offset}",
+            cols = cols.join(", "),
+        );
+        let (_, rows, _) = self.rows(&sql, &params, limit as usize)?;
+        let mut row_ids = Vec::with_capacity(rows.len());
+        let mut data = Vec::with_capacity(rows.len());
+        for mut r in rows {
+            let rid = match r.remove(0) {
+                Scalar::Number(n) => n as i64,
+                _ => 0,
+            };
+            row_ids.push(rid);
+            data.push(r);
+        }
+        Ok(Page {
+            columns: info.columns.iter().map(|c| c.name.clone()).collect(),
+            row_ids,
+            rows: data,
+            total,
+        })
+    }
+
+    /// Edits one cell of a data sheet in place, keyed by `_rid`.
+    pub fn update_cell(&mut self, table: &str, rid: i64, column: &str, text: &str) -> Result<()> {
+        let col = self.column(table, column)?;
+        // Refuse text that does not fit the column type instead of silently storing NULL.
+        if !text.trim().is_empty() {
+            let fits = self.scalar(
+                &format!("SELECT TRY_CAST(? AS {}) IS NOT NULL", col.sql_type),
+                &[duckdb::types::Value::Text(text.to_string())],
+            )?;
+            if fits != Scalar::Bool(true) {
+                return Err(CellxError::Bridge(format!(
+                    "'{text}'은(는) {} 열({})에 넣을 수 없습니다",
+                    col.name, col.sql_type
+                )));
+            }
+        }
+        let sql = format!(
+            "UPDATE {t} SET {c} = TRY_CAST(? AS {ty}) WHERE _rid = ?",
+            t = quote_ident(table),
+            c = quote_ident(&col.name),
+            ty = col.sql_type
+        );
+        self.conn.execute(
+            &sql,
+            [
+                duckdb::types::Value::Text(text.to_string()),
+                duckdb::types::Value::BigInt(rid),
+            ],
+        )?;
+        self.touch(table);
+        Ok(())
+    }
+
+    /// Writes a query result (or a whole table) to CSV or Parquet.
+    pub fn export(&self, table: &str, path: &Path) -> Result<()> {
+        let path_text = path
+            .to_str()
+            .ok_or_else(|| CellxError::InvalidName(path.display().to_string()))?
+            .replace('\'', "''");
+        let format = match path.extension().and_then(|e| e.to_str()) {
+            Some(e) if e.eq_ignore_ascii_case("parquet") => "FORMAT parquet",
+            _ => "FORMAT csv, HEADER true",
+        };
+        self.conn.execute_batch(&format!(
+            "COPY (SELECT * EXCLUDE (_rid) FROM {t} ORDER BY _rid) TO '{path_text}' ({format})",
+            t = quote_ident(table)
+        ))?;
+        Ok(())
+    }
+
+    /// Runs SQL written by CellX itself (never user input).
+    pub(crate) fn execute_internal(&self, sql: &str) -> Result<()> {
+        self.conn.execute_batch(sql)?;
+        Ok(())
+    }
+
+    pub fn checkpoint(&self) -> Result<()> {
+        self.conn.execute_batch("CHECKPOINT")?;
+        Ok(())
+    }
+}
+
+fn json_contains_table_function(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Object(map) => {
+            if map.get("type").and_then(|t| t.as_str()) == Some("TABLE_FUNCTION") {
+                return true;
+            }
+            map.values().any(json_contains_table_function)
+        }
+        serde_json::Value::Array(items) => items.iter().any(json_contains_table_function),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store_with_sales() -> DataStore {
+        let mut s = DataStore::open_in_memory().unwrap();
+        s.create_table_from_sql(
+            "sales",
+            "SELECT * FROM (VALUES
+                ('서울', 100.0::DOUBLE, DATE '2026-01-05', '정상'),
+                ('부산', 250.0, DATE '2026-02-01', '취소'),
+                ('서울', 300.0, DATE '2026-03-10', '정상'),
+                ('대구', NULL,  DATE '2026-03-11', '정상')
+             ) AS t(region, amount, order_date, status)",
+        )
+        .unwrap();
+        s
+    }
+
+    #[test]
+    fn import_assigns_row_ids_and_types() {
+        let mut s = store_with_sales();
+        let info = s.table_info("sales").unwrap();
+        assert_eq!(info.rows, 4);
+        assert_eq!(info.columns[1].kind, ColumnKind::Number);
+        assert_eq!(info.columns[2].kind, ColumnKind::Date);
+    }
+
+    #[test]
+    fn page_sorts_and_filters() {
+        let mut s = store_with_sales();
+        let page = s
+            .page(
+                "sales",
+                0,
+                10,
+                Some(&Sort { column: "amount".into(), descending: true }),
+                &[ColumnFilter { column: "region".into(), criterion: "서울".into() }],
+            )
+            .unwrap();
+        assert_eq!(page.total, 2);
+        assert_eq!(page.rows[0][1], Scalar::Number(300.0));
+    }
+
+    #[test]
+    fn user_sql_must_be_a_plain_select() {
+        let s = store_with_sales();
+        assert!(s.validate_user_select("SELECT region, sum(amount) FROM sales GROUP BY 1").is_ok());
+        assert!(s.validate_user_select("DROP TABLE sales").is_err());
+        assert!(s.validate_user_select("SELECT 1; DROP TABLE sales").is_err());
+        assert!(s.validate_user_select("SELECT * FROM read_csv('/etc/passwd')").is_err());
+        assert!(s.validate_user_select("COPY sales TO 'x.csv'").is_err());
+    }
+
+    #[test]
+    fn update_cell_by_row_id() {
+        let mut s = store_with_sales();
+        let before = s.version("sales");
+        s.update_cell("sales", 1, "amount", "111").unwrap();
+        assert!(s.version("sales") > before);
+        let v = s.scalar("SELECT amount FROM sales WHERE _rid = 1", &[]).unwrap();
+        assert_eq!(v, Scalar::Number(111.0));
+    }
+}

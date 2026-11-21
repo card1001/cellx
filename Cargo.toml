@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/cellx-core", "crates/cellx-cli", "apps/desktop/src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/card1001/cellx"
+
+[workspace.dependencies]
+ironcalc = "0.9.1"
+ironcalc_base = "0.9.1"
+duckdb = { version = "1.20001.0", features = ["bundled", "json", "parquet"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# DuckDB's C++ debug info is several GB and slows every build; keep it out of dev builds.
+[profile.dev.package.libduckdb-sys]
+debug = false
