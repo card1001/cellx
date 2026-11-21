@@ -43,6 +43,8 @@ apps/desktop          Tauri 2 데스크톱 앱 (React + Canvas 그리드)
 
 ## 빌드
 
+Rust 빌드는 저장소 루트에서 `cargo build --workspace`처럼 항상 `--workspace`로 하세요. `-p`로 크레이트 하나만 빌드하면 DuckDB의 기능 조합이 달라져 처음부터 다시 컴파일합니다(수 분). 계산 엔진 IronCalc는 Excel 기본값(맑은 고딕 11pt 등)과 편집 기능에 맞춰 일부 고친 사본을 `vendor/ironcalc_base`에 두고 씁니다. 고친 내용은 `vendor/ironcalc_base/VENDORED.md`에 있습니다.
+
 ### Windows
 
 1. [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) — "C++를 사용한 데스크톱 개발" 워크로드
@@ -134,12 +136,31 @@ cargo run -p cellx-cli -- make-demo orders.csv -o demo.cellx
 
 ## 앱 사용법
 
-- **데이터 가져오기**: CSV, TSV, Parquet을 데이터 시트로 엽니다. 하단 탭에 `DB` 표시로 나타납니다.
-- 데이터 시트: 열 머리글 클릭으로 정렬, 위쪽 필터 줄에 Excel 조건(`서울`, `>=100`, `*카드*`)으로 필터, 셀 더블클릭으로 수정.
-- 일반 시트에서 `=SUMIFS(orders[amount], orders[region], "서울")`처럼 데이터 시트를 참조합니다. 데이터 엔진이 계산한 셀은 왼쪽 위에 보라색 표시가 있습니다.
+화면과 조작은 Excel과 같게 맞췄습니다. 기본 글꼴은 맑은 고딕 11pt, 열 너비 8.43(72px), 행 높이 16.5pt(22px)로 한국어판 Excel 기본값과 같습니다. 강조색은 Excel의 초록 대신 CellX의 남색을 씁니다.
+
+**수식 입력**
+- `=` 다음에 셀을 클릭하거나 드래그하면 참조가 들어갑니다(참조 모드). 방향키, Shift+방향키로도 됩니다. 다른 시트 탭을 눌러 `Sheet2!A1`처럼 다른 시트를 참조할 수 있습니다.
+- 참조마다 색이 다르고 같은 색 테두리가 시트에 표시됩니다. F4는 `$A$1 → A$1 → $A1 → A1`을 차례로 바꿉니다.
+- 함수 이름을 치면 목록이 나오고 Tab으로 고릅니다. F2는 입력/편집 모드를 바꿉니다(편집 모드에서는 방향키가 글자 사이를 움직입니다).
+- Enter/Shift+Enter, Tab/Shift+Tab(Tab으로 옮긴 뒤 Enter를 누르면 시작한 열로 돌아감), Ctrl+Enter(선택 범위 전체에 입력), Alt+Enter(셀 안 줄바꿈), Esc(취소).
+- 데이터 시트 탭을 눌러 열을 클릭하면 `표[열]` 참조가 들어갑니다.
+
+**단축키**
+- 이동: Ctrl+방향키(데이터 끝), Ctrl+Shift+방향키, Home, Ctrl+Home, Ctrl+End, PageUp/PageDown, Alt+PageUp/PageDown, Ctrl+PageUp/PageDown(시트), Ctrl+G·F5(이름 상자)
+- 선택: Shift+Space(행), Ctrl+Space(열), Ctrl+A(현재 영역 → 전체)
+- 편집: F2, Delete, Backspace, Ctrl+D, Ctrl+R, Ctrl+;(날짜), Ctrl+Shift+;(시간), Alt+=(자동 합계), Ctrl+C/X/V(Excel과 텍스트 호환, 앱 안에서는 수식 참조 이동), 복사 후 Enter(붙여넣기), Ctrl+Z/Y
+- 서식: Ctrl+B/I/U, Ctrl+5(취소선), Ctrl+1(셀 서식), Ctrl+Shift+1/3/4/5/~(숫자/날짜/통화/백분율/일반), Ctrl+Shift+>/<(글꼴 크기)
+- 행·열: Ctrl++ / Ctrl+-(삽입/삭제), Ctrl+9 / Ctrl+0(숨기기), Ctrl+Shift+9 / 0(숨기기 취소), Shift+F11(새 시트)
+- 파일: Ctrl+N/O/S, F12(다른 이름으로 저장), Ctrl+F/H(찾기)
+
+**마우스**: 채우기 핸들 드래그(연속 데이터·수식 채우기), 열·행 경계 드래그와 더블클릭(자동 맞춤), 머리글·셀 오른쪽 클릭 메뉴, Ctrl+휠 확대/축소, 시트 탭 더블클릭(이름 바꾸기). 여러 셀을 선택하면 상태 표시줄에 평균, 개수, 합계가 나옵니다.
+
+**데이터 시트**
+- 데이터 탭 → 「데이터 가져오기」로 CSV, TSV, Parquet을 데이터 시트로 엽니다. 하단 탭에 `DB` 표시로 나타납니다.
+- 열 머리글 클릭으로 정렬, 아래쪽 필터 줄에 Excel 조건(`서울`, `>=100`, `*카드*`)으로 필터, 셀 더블클릭으로 수정.
+- 일반 시트에서 `=SUMIFS(orders[amount], orders[region], "서울")`처럼 데이터 시트를 참조합니다. 데이터 엔진이 계산한 셀은 오른쪽 위에 남색 표시가 있습니다.
 - **SQL** 패널: SELECT 결과를 새 데이터 시트로 만듭니다.
 - 저장: `.cellx`(데이터 시트 포함) 또는 `.xlsx`(일반 시트만, 데이터 엔진 결과는 값으로).
-- 단축키: 방향키, Enter/Tab, F2(편집), Delete, Ctrl+C/V(탭 구분 텍스트, Excel과 호환), Ctrl+Z/Y, Ctrl+S/O/N.
 
 ## 보안 원칙
 
@@ -152,9 +173,9 @@ cargo run -p cellx-cli -- make-demo orders.csv -o demo.cellx
 
 - 계산 엔진은 셀 하나를 바꿔도 전체를 다시 계산합니다(IronCalc 현재 구조). 증분·병렬 재계산은 다음 단계 과제입니다.
 - 수식→SQL 변환기의 인수는 문자열, 숫자, 셀 주소, `표[열]`, `&` 연결만 받습니다. 변환기 안에서 다른 함수를 중첩할 수는 없습니다(바깥에서는 가능: `=ROUND(SUMIFS(...),0)`).
-- 서식은 굵게, 기울임, 밑줄, 글자색, 채우기, 가로 정렬만 화면에 표시합니다. 테마 색, 테두리, 조건부 서식 표시는 아직입니다.
+- 조건부 서식, 데이터 유효성 검사, 메모는 아직 표시하지 않습니다.
 - 차트, 피벗, VBA는 지원하지 않습니다.
-- 행 높이는 고정(24px)입니다.
+- 붙여넣기 옵션(값만, 서식만 등)은 아직 없습니다.
 
 ## 이름
 

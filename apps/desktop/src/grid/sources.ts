@@ -1,7 +1,52 @@
 // Data sources for the grid: regular sheets (calculation engine) and data sheets (DuckDB).
-import { api, type ColumnFilter, type ColumnKind, type Page, type Scalar, type Sort, type TableInfo } from "../api";
-import type { CellData, GridSource } from "./Grid";
+import {
+  api,
+  type CellStyle,
+  type ColumnFilter,
+  type ColumnKind,
+  type Page,
+  type Scalar,
+  type SheetLayout,
+  type Sort,
+  type TableInfo,
+} from "../api";
+import { Axis } from "./axis";
 import { colName, MAX_COLS, MAX_ROWS } from "./model";
+
+export interface CellData {
+  text: string;
+  numeric?: boolean;
+  error?: boolean;
+  bridge?: boolean;
+  style?: CellStyle;
+}
+
+export interface Merge {
+  r: number;
+  c: number;
+  h: number;
+  w: number;
+}
+
+export interface GridSource {
+  readonly kind: "sheet" | "data";
+  rows: Axis;
+  cols: Axis;
+  frozenRows: number;
+  frozenCols: number;
+  showGrid: boolean;
+  /** Workbook default font: [family, size in points]. */
+  font: [string, number];
+  colHeader(c: number): string;
+  colSubHeader?(c: number): string;
+  rowHeader(r: number): string;
+  cell(r: number, c: number): CellData | undefined;
+  /** The merged range a cell belongs to, if any. */
+  mergeAt(r: number, c: number): Merge | undefined;
+  request(r0: number, c0: number, r1: number, c1: number): void;
+  grow?(r: number, c: number): void;
+  subscribe(cb: () => void): () => void;
+}
 
 type Listener = () => void;
 
@@ -23,11 +68,17 @@ const BLOCK_C = 16;
 
 /** A regular sheet. Cells are fetched in blocks around the viewport and cached. */
 export class SheetSource extends Emitter implements GridSource {
-  readonly rowHeight = 24;
-  private rows: number;
-  private cols: number;
+  readonly kind = "sheet" as const;
+  rows: Axis;
+  cols: Axis;
+  frozenRows = 0;
+  frozenCols = 0;
+  showGrid = true;
+  lastRow = 0;
+  lastCol = 0;
   private cells = new Map<number, CellData>();
-  private widths = new Map<number, number>();
+  private merges: Merge[] = [];
+  private mergeIndex = new Map<number, Merge>();
   private loaded = new Set<string>();
   private inflight = new Set<string>();
   private generation = 0;
@@ -35,31 +86,44 @@ export class SheetSource extends Emitter implements GridSource {
 
   constructor(
     readonly sheet: number,
-    usedRows: number,
-    usedCols: number,
+    layout: SheetLayout,
+    public font: [string, number],
   ) {
     super();
-    this.rows = Math.min(MAX_ROWS, Math.max(200, usedRows + 100));
-    this.cols = Math.min(MAX_COLS, Math.max(26, usedCols + 5));
+    this.rows = new Axis(200, layout.default_row_height);
+    this.cols = new Axis(26, layout.default_col_width);
+    this.applyLayout(layout);
   }
 
   private key(r: number, c: number) {
     return r * 20000 + c;
   }
 
-  rowCount() {
-    return this.rows;
-  }
-  colCount() {
-    return this.cols;
-  }
-  colWidth(c: number) {
-    return this.widths.get(c) ?? 100;
-  }
-  setColWidth(c: number, w: number) {
-    this.widths.set(c, w);
+  applyLayout(l: SheetLayout) {
+    const rowCount = Math.min(MAX_ROWS, Math.max(this.rows.count, 200, l.last_row + 100));
+    const colCount = Math.min(MAX_COLS, Math.max(this.cols.count, 26, l.last_col + 5));
+    this.rows = new Axis(rowCount, l.default_row_height, l.rows, l.hidden_rows);
+    const colSizes: [number, number][] = [];
+    for (const [a, b, w] of l.cols) {
+      // Ranges like 1..16384 with one width are common in xlsx; keep them compact.
+      const end = Math.min(b, Math.max(colCount, a + 200));
+      for (let c = a; c <= end; c++) colSizes.push([c, w]);
+    }
+    this.cols = new Axis(colCount, l.default_col_width, colSizes, l.hidden_cols);
+    this.frozenRows = l.frozen_rows;
+    this.frozenCols = l.frozen_cols;
+    this.showGrid = l.show_grid_lines;
+    this.lastRow = l.last_row;
+    this.lastCol = l.last_col;
+    this.merges = l.merges.map(([r, c, h, w]) => ({ r, c, h, w }));
+    this.mergeIndex.clear();
+    for (const m of this.merges) {
+      if (m.h * m.w > 100_000) continue;
+      for (let r = m.r; r < m.r + m.h; r++) for (let c = m.c; c < m.c + m.w; c++) this.mergeIndex.set(this.key(r, c), m);
+    }
     this.emit();
   }
+
   colHeader(c: number) {
     return colName(c);
   }
@@ -69,15 +133,18 @@ export class SheetSource extends Emitter implements GridSource {
   cell(r: number, c: number) {
     return this.cells.get(this.key(r, c));
   }
+  mergeAt(r: number, c: number) {
+    return this.mergeIndex.get(this.key(r, c));
+  }
 
   grow(r: number, c: number) {
     let changed = false;
-    if (r > this.rows - 50 && this.rows < MAX_ROWS) {
-      this.rows = Math.min(MAX_ROWS, r + 500);
+    if (r > this.rows.count - 50 && this.rows.count < MAX_ROWS) {
+      this.rows.count = Math.min(MAX_ROWS, r + 500);
       changed = true;
     }
-    if (c > this.cols - 3 && this.cols < MAX_COLS) {
-      this.cols = Math.min(MAX_COLS, c + 10);
+    if (c > this.cols.count - 3 && this.cols.count < MAX_COLS) {
+      this.cols.count = Math.min(MAX_COLS, c + 10);
       changed = true;
     }
     if (changed) this.emit();
@@ -109,10 +176,6 @@ export class SheetSource extends Emitter implements GridSource {
       if (gen !== this.generation) return;
       for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) this.cells.delete(this.key(r, c));
       for (const cell of vp.cells) this.cells.set(this.key(cell.row, cell.col), cell);
-      vp.col_widths.forEach((w, i) => {
-        const c = c0 + i;
-        if (!this.widths.has(c)) this.widths.set(c, w);
-      });
       this.loaded.add(k);
       this.emit();
     } finally {
@@ -120,17 +183,14 @@ export class SheetSource extends Emitter implements GridSource {
     }
   }
 
-  /** Drops cached cells after an edit and reloads what is on screen. */
-  invalidate() {
+  /** Reloads layout and the cells on screen after an edit. */
+  async invalidate() {
     this.generation++;
     this.loaded.clear();
     this.inflight.clear();
     const [r0, c0, r1, c1] = this.last;
     this.request(r0, c0, r1, c1);
-  }
-
-  displayText(r: number, c: number) {
-    return this.cell(r, c)?.text ?? "";
+    this.applyLayout(await api.layout(this.sheet));
   }
 }
 
@@ -177,39 +237,34 @@ const KIND_LABEL: Record<ColumnKind, string> = {
 
 /** A data sheet backed by DuckDB, paged on demand. */
 export class DataSource extends Emitter implements GridSource {
-  readonly rowHeight = 24;
+  readonly kind = "data" as const;
+  rows: Axis;
+  cols: Axis;
+  frozenRows = 0;
+  frozenCols = 0;
+  showGrid = true;
   private pages = new Map<number, Page>();
   private inflight = new Set<number>();
-  private widths = new Map<number, number>();
   private generation = 0;
   total: number;
   sort: Sort | null = null;
   filters: ColumnFilter[] = [];
   lastQueryMs = 0;
 
-  constructor(public info: TableInfo) {
+  constructor(
+    public info: TableInfo,
+    public font: [string, number],
+  ) {
     super();
     this.total = info.rows;
+    this.rows = new Axis(Math.max(1, info.rows), 22);
+    const widths: [number, number][] = info.columns.map((col, i) => {
+      const byKind = col.kind === "Text" ? 140 : col.kind === "Timestamp" ? 150 : 110;
+      return [i + 1, Math.max(byKind, col.name.length * 8 + 60)];
+    });
+    this.cols = new Axis(Math.max(1, info.columns.length), 100, widths);
   }
 
-  rowCount() {
-    return Math.max(1, this.total);
-  }
-  colCount() {
-    return Math.max(1, this.info.columns.length);
-  }
-  colWidth(c: number) {
-    const w = this.widths.get(c);
-    if (w) return w;
-    const col = this.info.columns[c - 1];
-    if (!col) return 100;
-    const byKind = col.kind === "Text" ? 150 : col.kind === "Timestamp" ? 160 : 120;
-    return Math.max(byKind, col.name.length * 9 + 60);
-  }
-  setColWidth(c: number, w: number) {
-    this.widths.set(c, w);
-    this.emit();
-  }
   colHeader(c: number) {
     const col = this.info.columns[c - 1];
     if (!col) return "";
@@ -225,6 +280,9 @@ export class DataSource extends Emitter implements GridSource {
   }
   column(c: number) {
     return this.info.columns[c - 1];
+  }
+  mergeAt() {
+    return undefined;
   }
 
   private rowAt(r: number): { page: Page; i: number } | undefined {
@@ -268,7 +326,10 @@ export class DataSource extends Emitter implements GridSource {
       const page = await api.dataPage(this.info.name, p * PAGE, PAGE, this.sort, this.filters);
       if (gen !== this.generation) return;
       this.lastQueryMs = performance.now() - t;
-      this.total = page.total;
+      if (page.total !== this.total) {
+        this.total = page.total;
+        this.rows.count = Math.max(1, page.total);
+      }
       this.pages.set(p, page);
       this.emit();
     } finally {

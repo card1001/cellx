@@ -238,8 +238,8 @@ pub fn clear_clipboard(state: State<'_, AppState>) -> CmdResult<()> {
 }
 
 #[tauri::command]
-pub fn paste(state: State<'_, AppState>, sheet: u32, row: i32, col: i32, text: String) -> CmdResult<RecalcStats> {
-    edit(&state, |wb| wb.paste(sheet, row, col, &text))
+pub fn paste(state: State<'_, AppState>, sheet: u32, row: i32, col: i32, text: String, internal: bool) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.paste_with(sheet, row, col, &text, internal))
 }
 
 #[tauri::command]
@@ -293,6 +293,11 @@ pub fn set_row_height(state: State<'_, AppState>, sheet: u32, r0: i32, r1: i32, 
 pub fn set_hidden(state: State<'_, AppState>, sheet: u32, rows: bool, from: i32, to: i32, hidden: bool) -> CmdResult<()> {
     let axis = if rows { Axis::Row } else { Axis::Column };
     edit(&state, |wb| wb.set_hidden(sheet, axis, from, to, hidden))
+}
+
+#[tauri::command]
+pub fn set_show_grid_lines(state: State<'_, AppState>, sheet: u32, show: bool) -> CmdResult<()> {
+    edit(&state, |wb| wb.set_show_grid_lines(sheet, show))
 }
 
 #[tauri::command]

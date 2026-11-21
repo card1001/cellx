@@ -53,6 +53,7 @@ fn main() {
             commands::set_row_height,
             commands::set_hidden,
             commands::set_frozen,
+            commands::set_show_grid_lines,
             commands::set_style,
             commands::set_border,
             commands::merge,

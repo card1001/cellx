@@ -603,11 +603,17 @@ impl Workbook {
     /// formulas, formats and references moved (Excel's paste). Otherwise the text is
     /// entered as values, tab-separated like Excel's clipboard format.
     pub fn paste(&mut self, sheet: u32, at_row: i32, at_col: i32, text: &str) -> Result<RecalcStats> {
+        self.paste_with(sheet, at_row, at_col, text, false)
+    }
+
+    /// Like [`Self::paste`]; `from_app` = the UI knows the text came from CellX's own copy
+    /// (its rendering of the clipboard text may differ from the engine's).
+    pub fn paste_with(&mut self, sheet: u32, at_row: i32, at_col: i32, text: &str, from_app: bool) -> Result<RecalcStats> {
         let normalize = |s: &str| s.replace("\r\n", "\n").trim_end_matches('\n').to_string();
         let internal = self
             .clipboard
             .as_ref()
-            .is_some_and(|c| normalize(c.clip.csv()) == normalize(text));
+            .is_some_and(|c| from_app || normalize(c.clip.csv()) == normalize(text));
         let start = self.begin();
         if internal {
             let stored = self.clipboard.take().expect("checked above");
@@ -769,6 +775,13 @@ impl Workbook {
             Axis::Row => self.um.set_rows_hidden(sheet, from.min(to), from.max(to), hidden)?,
             Axis::Column => self.um.set_columns_hidden(sheet, from.min(to), from.max(to), hidden)?,
         }
+        self.commit(start)?;
+        Ok(())
+    }
+
+    pub fn set_show_grid_lines(&mut self, sheet: u32, show: bool) -> Result<()> {
+        let start = self.begin();
+        self.um.set_show_grid_lines(sheet, show)?;
         self.commit(start)?;
         Ok(())
     }
