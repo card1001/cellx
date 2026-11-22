@@ -61,6 +61,12 @@ interface Props {
   onHover?(hit: Hit | null): void;
   /** Floating objects (charts) drawn over the cells; positions relative to the cell area. */
   renderOverlay?(geo: OverlayGeometry): ReactNode;
+  /** AutoFilter buttons in a header row; `active` columns show the filtered icon. */
+  filterButtons?: { row: number; c0: number; c1: number; active: number[] } | null;
+  onFilterButton?(col: number, x: number, y: number): void;
+  /** In-cell list arrow (data validation) next to this cell. */
+  listButton?: Pos | null;
+  onListButton?(x: number, y: number): void;
 }
 
 export interface OverlayGeometry {
@@ -267,6 +273,19 @@ export function Grid(props: Props) {
     const b = cellRect(rg.r1, rg.c1);
     return { x: a.x, y: a.y, w: b.x + b.w - a.x, h: b.y + b.h - a.y };
   };
+
+  const filterButtonRect = (r: number, c: number): CellRect | null => {
+    const rc = cellRect(r, c);
+    const size = Math.min(17 * z, rc.h - 2, rc.w - 2);
+    if (size < 6) return null;
+    return { x: rc.x + rc.w - size - 1, y: rc.y + rc.h - size - 1, w: size, h: size };
+  };
+  const listButtonRect = (p: Pos): CellRect | null => {
+    const rc = cellRect(p.r, p.c, source.mergeAt(p.r, p.c));
+    const size = Math.min(17 * z, rc.h);
+    return { x: rc.x + rc.w + 1, y: rc.y + rc.h - size, w: size, h: size };
+  };
+  const inside = (b: CellRect | null, x: number, y: number) => !!b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
 
   /** A selection grown to cover any merged cell it touches (Excel behaviour). */
   const expandForMerges = (rg: Range): Range => {
@@ -656,6 +675,49 @@ export function Grid(props: Props) {
       ctx.setLineDash([]);
       ctx.lineDashOffset = 0;
     }
+
+    // AutoFilter buttons and the validation list arrow, drawn over the cells like Excel's.
+    const drawButton = (x: number, y: number, size: number, active: boolean) => {
+      ctx.fillStyle = active ? "#e0e7ff" : "#ffffff";
+      ctx.fillRect(x, y, size, size);
+      ctx.strokeStyle = active ? ACCENT : "#a1a1aa";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x + 0.5, y + 0.5, size - 1, size - 1);
+      ctx.fillStyle = active ? ACCENT : "#52525b";
+      const cx = x + size / 2;
+      const cy = y + size / 2;
+      if (active) {
+        // A funnel: this column is filtered.
+        ctx.beginPath();
+        ctx.moveTo(cx - size * 0.3, cy - size * 0.28);
+        ctx.lineTo(cx + size * 0.3, cy - size * 0.28);
+        ctx.lineTo(cx + size * 0.06, cy + 0.02 * size);
+        ctx.lineTo(cx + size * 0.06, cy + size * 0.3);
+        ctx.lineTo(cx - size * 0.06, cy + size * 0.22);
+        ctx.lineTo(cx - size * 0.06, cy + 0.02 * size);
+        ctx.closePath();
+        ctx.fill();
+      } else {
+        ctx.beginPath();
+        ctx.moveTo(cx - size * 0.22, cy - size * 0.1);
+        ctx.lineTo(cx + size * 0.22, cy - size * 0.1);
+        ctx.lineTo(cx, cy + size * 0.16);
+        ctx.closePath();
+        ctx.fill();
+      }
+    };
+    const fb = props.filterButtons;
+    if (fb) {
+      for (let c = fb.c0; c <= fb.c1; c++) {
+        if (cols.size(c) === 0 || rows.size(fb.row) === 0) continue;
+        const b = filterButtonRect(fb.row, c);
+        if (b) drawButton(b.x, b.y, b.w, fb.active.includes(c));
+      }
+    }
+    if (props.listButton) {
+      const b = listButtonRect(props.listButton);
+      if (b) drawButton(b.x, b.y, b.w, false);
+    }
     ctx.restore();
 
     // Column headers.
@@ -824,6 +886,21 @@ export function Grid(props: Props) {
         return;
       }
     }
+    if (h.area === "cell" && props.listButton && inside(listButtonRect(props.listButton), h.x, h.y)) {
+      e.preventDefault();
+      const b = listButtonRect(props.listButton)!;
+      const host = scrollRef.current!.getBoundingClientRect();
+      props.onListButton?.(host.left + b.x, host.top + b.y + b.h);
+      return;
+    }
+    const fbs = props.filterButtons;
+    if (h.area === "cell" && fbs && h.r === fbs.row && h.c >= fbs.c0 && h.c <= fbs.c1 && inside(filterButtonRect(h.r, h.c), h.x, h.y)) {
+      e.preventDefault();
+      const b = filterButtonRect(h.r, h.c)!;
+      const host = scrollRef.current!.getBoundingClientRect();
+      props.onFilterButton?.(h.c, host.left + b.x, host.top + b.y + b.h + 1);
+      return;
+    }
     if (h.area === "cell" && onFillHandle(h.x, h.y)) {
       e.preventDefault();
       gesture.current = { kind: "fill", source: expandForMerges(normalize(selection.anchor, selection.focus)) };
@@ -845,6 +922,13 @@ export function Grid(props: Props) {
       if (h.area === "colHeader") cursor = props.onColumnResize && colBorderAt(h.x) !== null ? "col-resize" : "s-resize";
       else if (h.area === "rowHeader") cursor = props.onRowResize && rowBorderAt(h.y) !== null ? "row-resize" : "e-resize";
       else if (h.area === "cell" && onFillHandle(h.x, h.y)) cursor = "crosshair";
+      else if (h.area === "cell" && source.cell(h.r, h.c)?.link) cursor = "pointer";
+      else if (
+        h.area === "cell" &&
+        ((props.filterButtons && h.r === props.filterButtons.row && inside(filterButtonRect(h.r, h.c), h.x, h.y)) ||
+          (props.listButton && inside(listButtonRect(props.listButton), h.x, h.y)))
+      )
+        cursor = "default";
       el.style.cursor = cursor;
       return;
     }

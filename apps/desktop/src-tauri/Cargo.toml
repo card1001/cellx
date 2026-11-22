@@ -12,5 +12,6 @@ tauri-build = { version = "2.7", features = [] }
 cellx-core = { path = "../../../crates/cellx-core" }
 tauri = { version = "2.12", features = [] }
 tauri-plugin-dialog = "2.8"
+tauri-plugin-opener = "2"
 serde.workspace = true
 serde_json.workspace = true

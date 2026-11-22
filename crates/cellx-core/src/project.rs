@@ -142,7 +142,7 @@ pub fn open_project(path: &Path) -> Result<Workbook> {
 
     let mut wb = Workbook::from_model(model, store, Some(data_path))?;
     wb.set_bridges(bridges);
-    wb.import_charts(&xlsx);
+    wb.import_extras(&xlsx);
     // Older projects have no pivots.json.
     if let Ok(bytes) = read_entry(&mut zip, "pivots.json") {
         let pivots: Vec<PivotDef> = serde_json::from_slice(&bytes).map_err(json_err)?;

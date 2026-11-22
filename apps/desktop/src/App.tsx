@@ -2,7 +2,10 @@ import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialo
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  type AutoFilter,
   type BookInfo,
+  type NameView,
+  type ValidationFailure,
   type CellDetail,
   type Chart,
   type ChartKind,
@@ -17,7 +20,23 @@ import {
 } from "./api";
 import { colorScaleRule, dataBarRule, highlightRule, type HighlightKind, ICON_SETS, iconSetRule, ratingRule } from "./cf";
 import { CHART_KINDS, ChartLayer } from "./components/Chart";
-import { FindDialog, type FormatResult, FormatCellsDialog, PromptDialog } from "./components/Dialogs";
+import {
+  type ColumnChoice,
+  DuplicatesDialog,
+  FilterMenu,
+  type FindOptions,
+  FindReplaceDialog,
+  GoalSeekDialog,
+  HyperlinkDialog,
+  ListDropdown,
+  NameManagerDialog,
+  SortDialog,
+  TextToColumnsDialog,
+  ValidationAlert,
+  ValidationDialog,
+} from "./components/DataDialogs";
+import { type FormatResult, FormatCellsDialog, PromptDialog } from "./components/Dialogs";
+import { type PrintJob, type PrintOptions, PrintDialog, PrintView } from "./components/Print";
 import { CfManagerDialog, ChartDialog, HighlightDialog, MemoBox, PasteSpecialDialog, PivotDialog } from "./components/ObjectDialogs";
 import { FormulaText } from "./components/FormulaText";
 import { ContextMenu, type MenuItem } from "./components/Menu";
@@ -25,7 +44,7 @@ import { Ribbon, type RibbonActions } from "./components/Ribbon";
 import { decreaseDecimals, increaseDecimals } from "./formats";
 import { canPointAt, completeFunctions, cycleAbsolute, functionPrefixAt, insertRef, type PointRef, quoteSheet, refSpans } from "./formula";
 import { fontCss, Grid, type Hit, type RefBox, type Selection } from "./grid/Grid";
-import { addr, formatCount, normalize, parseAddr, type Pos, type Range, rangeLabel, toTsv } from "./grid/model";
+import { addr, colName, formatCount, normalize, parseAddr, type Pos, type Range, rangeLabel, toTsv } from "./grid/model";
 import { DataSource, SheetSource } from "./grid/sources";
 
 type Tab = { kind: "sheet"; index: number } | { kind: "data"; name: string };
@@ -53,6 +72,14 @@ type Dialog =
   | { kind: "cfManager" }
   | { kind: "pivot"; def: PivotDef }
   | { kind: "chart"; chart: Chart }
+  | { kind: "sort"; range: Range; header: boolean }
+  | { kind: "textToColumns"; range: Range; samples: string[] }
+  | { kind: "duplicates"; range: Range; header: boolean }
+  | { kind: "validation"; current: import("./api").Validation | null }
+  | { kind: "names"; list: NameView[]; startNew: boolean }
+  | { kind: "hyperlink"; text: string; current: { target: string; internal: boolean } | null }
+  | { kind: "goalSeek" }
+  | { kind: "print" }
   | null;
 
 const ARROWS: Record<string, Direction> = { ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right" };
@@ -89,6 +116,21 @@ export default function App() {
   const [showSql, setShowSql] = useState(false);
   const [dialog, setDialog] = useState<Dialog>(null);
   const [findOpen, setFindOpen] = useState(false);
+  const [findTab, setFindTab] = useState<"찾기" | "바꾸기">("찾기");
+  const [filter, setFilter] = useState<AutoFilter | null>(null);
+  const [filterMenu, setFilterMenu] = useState<{
+    col: number;
+    x: number;
+    y: number;
+    values: import("./api").FilterValue[];
+    numeric: boolean;
+  } | null>(null);
+  const [listItems, setListItems] = useState<string[] | null>(null);
+  const [listOpen, setListOpen] = useState<{ x: number; y: number } | null>(null);
+  const [inputTip, setInputTip] = useState<{ title: string; message: string } | null>(null);
+  const [vAlert, setVAlert] = useState<{ failure: ValidationFailure; session: Session } | null>(null);
+  const [printJob, setPrintJob] = useState<PrintJob | null>(null);
+  const linkClick = useRef<{ r: number; c: number; t: number } | null>(null);
   const [findMsg, setFindMsg] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
   const [copyMark, setCopyMark] = useState<{ tab: string; range: Range; cut: boolean } | null>(null);
@@ -238,6 +280,51 @@ export default function App() {
     return () => clearTimeout(id);
   }, [selection, tab, stats]);
 
+  // AutoFilter of the sheet on screen.
+  useEffect(() => {
+    if (tab.kind !== "sheet") {
+      setFilter(null);
+      return;
+    }
+    let live = true;
+    api
+      .autoFilter(tab.index)
+      .then((f) => live && setFilter(f))
+      .catch(() => live && setFilter(null));
+    return () => {
+      live = false;
+    };
+  }, [tab, info, chartVersion]);
+
+  // Data validation of the active cell: list arrow and input message.
+  useEffect(() => {
+    setListOpen(null);
+    if (tab.kind !== "sheet") {
+      setListItems(null);
+      setInputTip(null);
+      return;
+    }
+    const f = selection.focus;
+    let live = true;
+    api
+      .validationAt(tab.index, f.r, f.c)
+      .then(async (v) => {
+        if (!live) return;
+        setInputTip(v && v.show_input && (v.input_title || v.input_message) ? { title: v.input_title, message: v.input_message } : null);
+        if (v && v.kind === "List" && v.in_cell_dropdown) {
+          const items = await api.listItems(tab.index, f.r, f.c);
+          if (live) setListItems(items);
+        } else setListItems(null);
+      })
+      .catch(() => {
+        setListItems(null);
+        setInputTip(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [selection.focus, tab, chartVersion]);
+
   // Charts of the sheet on screen.
   useEffect(() => {
     if (tab.kind !== "sheet") {
@@ -334,6 +421,17 @@ export default function App() {
     if (move !== "none" && !fill) moveAfterEntry(s.pos, move);
     focusGrid();
     if (s.text === s.original && !fill) return;
+    if (s.tab.kind === "sheet" && !fill) {
+      const failure = await api.validateInput(s.tab.index, s.pos.r, s.pos.c, s.text).catch(() => null);
+      if (failure) {
+        setVAlert({ failure, session: s });
+        return;
+      }
+    }
+    await writeSession(s, fill);
+  };
+
+  const writeSession = async (s: Session, fill: boolean) => {
     if (s.tab.kind === "sheet") {
       const sheet = s.tab.index;
       const st = await run("계산 중", () => (fill ? api.fillRange(sheet, range(), s.text) : api.setCell(sheet, s.pos.r, s.pos.c, s.text)));
@@ -813,15 +911,206 @@ export default function App() {
     if (st) await afterChange(st);
   };
 
-  const find = async (q: string, matchCase: boolean) => {
+  const find = async (o: FindOptions) => {
+    const t = tabRef.current;
+    if (t.kind !== "sheet" || !o.find) return;
+    const f = selectionRef.current.focus;
+    const matches = async (sheet: number, at: [number, number]) => {
+      if (!o.wholeCell) return true;
+      const d = await api.cellDetail(sheet, at[0], at[1]);
+      const eq = (a: string) => (o.matchCase ? a === o.find : a.toLowerCase() === o.find.toLowerCase());
+      return eq(d.input) || eq(d.text);
+    };
+    // Whole-cell matches: step through the contains-matches of the sheet.
+    const searchSheet = async (sheet: number, from: Pos, wrap: boolean): Promise<[number, number] | null> => {
+      let cur = from;
+      for (let guard = 0; guard < 2000; guard++) {
+        const at = await api.find(sheet, o.find, cur.r, cur.c, o.matchCase).catch(() => null);
+        if (!at) return null;
+        const wrapped = at[0] < from.r || (at[0] === from.r && at[1] <= from.c);
+        if (wrapped && !wrap) return null;
+        if (await matches(sheet, at)) return at;
+        if (guard > 0 && at[0] === from.r && at[1] === from.c) return null;
+        cur = { r: at[0], c: at[1] };
+      }
+      return null;
+    };
+    const here = await searchSheet(t.index, f, !o.workbook);
+    if (here) {
+      moveTo({ r: here[0], c: here[1] });
+      setFindMsg(null);
+      return;
+    }
+    if (o.workbook) {
+      const n = info?.sheets.length ?? 1;
+      for (let k = 1; k <= n; k++) {
+        const sh = (t.index + k) % n;
+        const at = await searchSheet(sh, { r: 0, c: 0 }, false);
+        if (at) {
+          switchTab({ kind: "sheet", index: sh });
+          setSelection({ anchor: { r: at[0], c: at[1] }, focus: { r: at[0], c: at[1] } });
+          setFindMsg(null);
+          return;
+        }
+      }
+    }
+    setFindMsg("찾는 내용이 없습니다.");
+  };
+
+  const replaceOne = async (o: FindOptions) => {
+    const t = tabRef.current;
+    if (t.kind !== "sheet" || !o.find) return;
+    const f = selectionRef.current.focus;
+    const done = await api.replaceInCell(t.index, f.r, f.c, o.find, o.replace, o.matchCase, o.wholeCell).catch(() => false);
+    if (done) await afterChange();
+    await find(o);
+  };
+
+  const replaceAll = async (o: FindOptions) => {
+    const t = tabRef.current;
+    if (!o.find) return;
+    const r = await run("바꾸는 중", () => api.replaceAll(o.workbook ? null : t.kind === "sheet" ? t.index : 0, o.find, o.replace, o.matchCase, o.wholeCell));
+    if (!r) return;
+    await afterChange(r[1]);
+    setFindMsg(r[0] ? `${formatCount(r[0])}개 항목이 바뀌었습니다.` : "찾는 내용이 없습니다.");
+  };
+
+  // ---------------------------------------------------------------- data tools
+  const sheetOrSay = () => {
+    const t = tabRef.current;
+    if (t.kind !== "sheet") {
+      say("이 기능은 일반 시트에서 씁니다. 데이터 시트는 아래 필터 줄과 열 머리글로 정렬·필터합니다.", true);
+      return null;
+    }
+    return t.index;
+  };
+
+  /** Excel's guess: a first row of text above rows holding numbers (or in bold) is a header. */
+  const guessHeader = (rg: Range): boolean => {
+    if (filter && filter.range.r0 === rg.r0 && filter.range.c0 === rg.c0) return true;
+    const src = sourceRef.current;
+    if (!src || rg.r1 <= rg.r0) return false;
+    let anyText = false;
+    let bold = false;
+    for (let c = rg.c0; c <= rg.c1; c++) {
+      const cell = src.cell(rg.r0, c);
+      if (cell?.numeric) return false;
+      if (cell?.text) anyText = true;
+      if (cell?.style?.bold) bold = true;
+    }
+    if (!anyText) return false;
+    if (bold) return true;
+    for (let r = rg.r0 + 1; r <= Math.min(rg.r1, rg.r0 + 20); r++)
+      for (let c = rg.c0; c <= rg.c1; c++) if (src.cell(r, c)?.numeric) return true;
+    return false;
+  };
+
+  const columnChoices = (rg: Range) => (hasHeader: boolean): ColumnChoice[] => {
+    const src = sourceRef.current;
+    const out: ColumnChoice[] = [];
+    for (let c = rg.c0; c <= rg.c1; c++) {
+      const head = hasHeader ? src?.cell(rg.r0, c)?.text : "";
+      out.push({ col: c, label: head || `열 ${colName(c)}` });
+    }
+    return out;
+  };
+
+  /** The range a data command works on: the selection, or the current region for one cell. */
+  const workRange = async (): Promise<Range> => {
+    const rg = range();
+    const t = tabRef.current;
+    if (t.kind === "sheet" && rg.r0 === rg.r1 && rg.c0 === rg.c1) {
+      if (filter && rg.r0 >= filter.range.r0 && rg.r0 <= filter.range.r1 && rg.c0 >= filter.range.c0 && rg.c0 <= filter.range.c1) return filter.range;
+      return api.currentRegion(t.index, rg.r0, rg.c0);
+    }
+    return rg;
+  };
+
+  const quickSort = async (descending: boolean) => {
+    const sheet = sheetOrSay();
+    if (sheet === null) return;
+    const rg = await workRange();
+    const st = await run("정렬", () => api.sortRange(sheet, rg, [{ col: selectionRef.current.focus.c, descending }], guessHeader(rg)));
+    if (st) await afterChange(st);
+  };
+
+  const toggleFilter = async () => {
+    const sheet = sheetOrSay();
+    if (sheet === null) return;
+    const f = await run("필터", () => api.toggleAutoFilter(sheet, range()));
+    if (f !== undefined) await afterChange();
+  };
+
+  const openFilterMenu = async (col: number, x: number, y: number) => {
+    const sheet = sheetOrSay();
+    if (sheet === null) return;
+    const values = await api.filterValues(sheet, col).catch(fail);
+    if (!values) return;
+    const nonBlank = values.filter((v) => v.text !== "");
+    const numeric = nonBlank.length > 0 && nonBlank.every((v) => !Number.isNaN(Number(v.text.replace(/,/g, ""))));
+    setFilterMenu({ col, x, y, values, numeric });
+  };
+
+  const followLink = async (p: Pos) => {
     const t = tabRef.current;
     if (t.kind !== "sheet") return;
-    const f = selectionRef.current.focus;
-    const at = await api.find(t.index, q, f.r, f.c, matchCase).catch(fail);
-    if (at) {
-      moveTo({ r: at[0], c: at[1] });
-      setFindMsg(null);
-    } else setFindMsg("찾는 내용이 없습니다.");
+    const l = await api.linkAt(t.index, p.r, p.c).catch(() => null);
+    if (!l) return;
+    if (!l.internal) {
+      await api.openLink(l.target).catch(fail);
+      return;
+    }
+    goTo(l.target);
+  };
+
+  /** Jumps to `Sheet!A1`, `A1:B5` or a defined name (이름 상자, F5, internal links). */
+  const goTo = async (ref: string): Promise<boolean> => {
+    let text = ref.trim().replace(/^=/, "");
+    const named = (await api.names().catch(() => [] as NameView[])).find((n) => n.name.toLowerCase() === text.toLowerCase());
+    if (named) text = named.formula.replace(/^=/, "");
+    const m = /^(?:'?(.+?)'?!)?(\$?[A-Za-z]{1,3}\$?\d+)(?::(\$?[A-Za-z]{1,3}\$?\d+))?$/.exec(text);
+    if (!m) return false;
+    const a = parseAddr(m[2].replace(/\$/g, ""));
+    const b = m[3] ? parseAddr(m[3].replace(/\$/g, "")) : a;
+    if (!a || !b) return false;
+    if (m[1]) {
+      const i = (info?.sheets ?? []).findIndex((n) => n.toLowerCase() === m[1].replace(/''/g, "'").toLowerCase());
+      if (i < 0) return false;
+      if (tabRef.current.kind !== "sheet" || tabRef.current.index !== i) switchTab({ kind: "sheet", index: i });
+    }
+    setSelection({ anchor: a, focus: b });
+    focusGrid();
+    return true;
+  };
+
+  const startPrint = async (o: PrintOptions) => {
+    const src = sourceRef.current;
+    const t = tabRef.current;
+    if (!(src instanceof SheetSource) || t.kind !== "sheet") return say("일반 시트만 인쇄할 수 있습니다", true);
+    const rg = o.scope === "selection" ? range() : { r0: 1, c0: 1, r1: Math.max(1, src.lastRow), c1: Math.max(1, src.lastCol) };
+    const r1 = Math.min(rg.r1, rg.r0 + 20000);
+    const [vp, layout] = await Promise.all([api.viewport(t.index, rg.r0, rg.c0, r1, rg.c1), api.layout(t.index)]);
+    const cells = new Map(vp.cells.map((c) => [`${c.row}:${c.col}`, c]));
+    const job: PrintJob = {
+      title: sheetName(t.index),
+      options: o,
+      r0: rg.r0,
+      c0: rg.c0,
+      r1,
+      c1: rg.c1,
+      colWidths: Array.from({ length: rg.c1 - rg.c0 + 1 }, (_, i) => src.cols.size(rg.c0 + i)),
+      rowHeights: Array.from({ length: r1 - rg.r0 + 1 }, (_, i) => src.rows.size(rg.r0 + i)),
+      cells,
+      merges: layout.merges.map(([r, c, h, w]) => ({ r, c, h, w })),
+      font: src.font,
+    };
+    setPrintJob(job);
+    // Two frames: the print view must be laid out before the dialog snapshots it.
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        api.printPage().catch(() => window.print());
+      }),
+    );
   };
 
   // ---------------------------------------------------------------- charts, memos, pivots
@@ -930,6 +1219,13 @@ export default function App() {
       actions.refreshAll();
       return;
     }
+    if (e.altKey && e.key === "ArrowDown" && listItems) {
+      // Alt+↓ opens the list of a validation rule, like the arrow next to the cell.
+      e.preventDefault();
+      const rect = document.querySelector(".cell-editor-host")?.getBoundingClientRect();
+      if (rect) setListOpen({ x: rect.left, y: rect.bottom });
+      return;
+    }
     const dir = ARROWS[e.key];
     if (dir) {
       e.preventDefault();
@@ -1018,6 +1314,26 @@ export default function App() {
       void autosum("SUM");
     } else if (mod) {
       const lower = k.toLowerCase();
+      if (lower === "l" && e.shiftKey) {
+        handled();
+        void toggleFilter();
+        return;
+      }
+      if (lower === "e" && !e.shiftKey) {
+        handled();
+        actions.flashFill();
+        return;
+      }
+      if (lower === "k") {
+        handled();
+        actions.hyperlink();
+        return;
+      }
+      if (k === "F3") {
+        handled();
+        actions.nameManager();
+        return;
+      }
       if (lower === "z") {
         handled();
         void undo();
@@ -1090,6 +1406,7 @@ export default function App() {
         void hide(false, !e.shiftKey);
       } else if (lower === "f" || lower === "h") {
         handled();
+        setFindTab(lower === "h" ? "바꾸기" : "찾기");
         setFindOpen(true);
       } else if (lower === "g") {
         handled();
@@ -1227,6 +1544,8 @@ export default function App() {
     } else {
       drag.current = "cell";
       moveTo({ r: h.r, c: h.c }, e.shiftKey);
+      // A click on a hyperlink follows it; holding the button selects the cell (Excel).
+      linkClick.current = sourceRef.current?.cell(h.r, h.c)?.link && !e.shiftKey && !e.ctrlKey ? { r: h.r, c: h.c, t: Date.now() } : null;
     }
     focusGrid();
   };
@@ -1337,6 +1656,9 @@ export default function App() {
       } else if (mod && k === "n") {
         e.preventDefault();
         void newBook();
+      } else if (mod && k === "p") {
+        e.preventDefault();
+        setDialog({ kind: "print" });
       } else if (e.key === "F12") {
         e.preventDefault();
         void saveAs();
@@ -1472,6 +1794,72 @@ export default function App() {
       if (st) await afterChange(st);
     },
     toggleMemos: () => setShowMemos((v) => !v),
+    sortAsc: () => void quickSort(false),
+    sortDesc: () => void quickSort(true),
+    sortDialog: async () => {
+      if (sheetOrSay() === null) return;
+      const rg = await workRange();
+      setDialog({ kind: "sort", range: rg, header: guessHeader(rg) });
+    },
+    toggleFilter: () => void toggleFilter(),
+    clearFilter: async () => {
+      const sheet = sheetOrSay();
+      if (sheet === null) return;
+      const st = await run("필터 지우기", () => api.clearFilters(sheet));
+      if (st) await afterChange(st);
+    },
+    reapplyFilter: async () => {
+      const sheet = sheetOrSay();
+      if (sheet === null) return;
+      const st = await run("다시 적용", () => api.applyFilter(sheet));
+      if (st) await afterChange(st);
+    },
+    hasFilter: () => !!filter,
+    textToColumns: async () => {
+      const sheet = sheetOrSay();
+      if (sheet === null) return;
+      const rg = range();
+      if (rg.c0 !== rg.c1) return say("텍스트 나누기는 한 번에 한 열만 할 수 있습니다", true);
+      const samples: string[] = [];
+      for (let r = rg.r0; r <= Math.min(rg.r1, rg.r0 + 7); r++) samples.push(sourceRef.current?.cell(r, rg.c0)?.text ?? "");
+      setDialog({ kind: "textToColumns", range: rg, samples });
+    },
+    flashFill: async () => {
+      const sheet = sheetOrSay();
+      if (sheet === null) return;
+      const f = selectionRef.current.focus;
+      const r = await run("빠른 채우기", () => api.flashFill(sheet, f.r, f.c));
+      if (!r) return;
+      await afterChange(r[1]);
+      say(r[0] ? `빠른 채우기: ${formatCount(r[0])}개 셀을 채웠습니다` : "빠른 채우기: 채울 셀이 없습니다");
+    },
+    removeDuplicates: async () => {
+      if (sheetOrSay() === null) return;
+      const rg = await workRange();
+      setDialog({ kind: "duplicates", range: rg, header: guessHeader(rg) });
+    },
+    validation: async () => {
+      const sheet = sheetOrSay();
+      if (sheet === null) return;
+      const f = selectionRef.current.focus;
+      setDialog({ kind: "validation", current: await api.validationAt(sheet, f.r, f.c).catch(() => null) });
+    },
+    goalSeek: () => sheetOrSay() !== null && setDialog({ kind: "goalSeek" }),
+    replace: () => {
+      setFindTab("바꾸기");
+      setFindOpen(true);
+    },
+    goToDialog: () => nameBox.current?.focus(),
+    hyperlink: async () => {
+      const sheet = sheetOrSay();
+      if (sheet === null) return;
+      const f = selectionRef.current.focus;
+      const current = await api.linkAt(sheet, f.r, f.c).catch(() => null);
+      setDialog({ kind: "hyperlink", text: sourceRef.current?.cell(f.r, f.c)?.text ?? "", current });
+    },
+    nameManager: async () => setDialog({ kind: "names", list: await api.names().catch(() => []), startNew: false }),
+    defineName: async () => setDialog({ kind: "names", list: await api.names().catch(() => []), startNew: true }),
+    print: () => setDialog({ kind: "print" }),
     zoomToSelection: () => {
       const src = sourceRef.current;
       if (!src) return;
@@ -1559,6 +1947,7 @@ export default function App() {
         functions={functions}
         showMemos={showMemos}
         hasMemo={onSheetTab && !!memoAt(selection.focus)}
+        filterOn={!!filter}
       />
 
       <div className="formula-bar">
@@ -1571,12 +1960,23 @@ export default function App() {
             if (e.key === "Escape") return focusGrid();
             if (e.key !== "Enter") return;
             const v = (e.target as HTMLInputElement).value.trim();
-            const [a, b] = v.split(":");
-            const pa = parseAddr(a ?? "");
-            const pb = b ? parseAddr(b) : pa;
-            if (pa && pb) setSelection({ anchor: pa, focus: pb });
-            else say(`셀 주소가 올바르지 않습니다: ${v}`, true);
-            focusGrid();
+            void (async () => {
+              if (await goTo(v)) return;
+              // A new name in the name box names the selection, as in Excel.
+              const t = tabRef.current;
+              if (t.kind === "sheet" && /^[\p{L}_\\][\p{L}\p{N}_.]*$/u.test(v)) {
+                const rg = range();
+                const ref = `${quoteSheet(sheetName(t.index))}!$${colName(rg.c0)}$${rg.r0}${rg.r0 === rg.r1 && rg.c0 === rg.c1 ? "" : `:$${colName(rg.c1)}$${rg.r1}`}`;
+                try {
+                  await api.addName(v, null, `=${ref}`);
+                  say(`이름 「${v}」을(를) 정의했습니다: ${ref}`);
+                  await refreshInfo();
+                } catch (err) {
+                  fail(err);
+                }
+              } else say(`셀 주소나 이름이 올바르지 않습니다: ${v}`, true);
+              focusGrid();
+            })();
           }}
           onFocus={(e) => e.target.select()}
         />
@@ -1680,7 +2080,17 @@ export default function App() {
               onCellDrag={onCellDrag}
               onCellUp={() => {
                 drag.current = null;
+                const lc = linkClick.current;
+                linkClick.current = null;
+                const f = selectionRef.current.focus;
+                if (lc && Date.now() - lc.t < 500 && f.r === lc.r && f.c === lc.c && selectionRef.current.anchor.r === lc.r) void followLink(lc);
               }}
+              filterButtons={
+                filter && onSheetTab ? { row: filter.range.r0, c0: filter.range.c0, c1: filter.range.c1, active: filter.columns.map((c) => c.col) } : null
+              }
+              onFilterButton={(c, x, y) => void openFilterMenu(c, x, y)}
+              listButton={listItems && !session ? selection.focus : null}
+              onListButton={(x, y) => setListOpen({ x, y })}
               onDoubleClick={async (h) => {
                 if (sessionRef.current) return;
                 moveTo({ r: h.r, c: h.c });
@@ -1777,6 +2187,18 @@ export default function App() {
                       const b = box(p);
                       return <MemoBox key={`m${p.r}:${p.c}`} x={b.x} y={b.y} text={m.text} author={m.author} editing={false} />;
                     })}
+                    {inputTip && !editMemo && !vAlert && (
+                      <div
+                        className="input-tip"
+                        style={{
+                          left: geo.cellRect(selection.focus.r, selection.focus.c).x + 12,
+                          top: geo.cellRect(selection.focus.r, selection.focus.c).y + geo.cellRect(selection.focus.r, selection.focus.c).h + 4,
+                        }}
+                      >
+                        {inputTip.title && <b>{inputTip.title}</b>}
+                        <div>{inputTip.message}</div>
+                      </div>
+                    )}
                     {editMemo && (
                       <MemoBox
                         key={`edit${editMemo.r}:${editMemo.c}`}
@@ -1798,9 +2220,12 @@ export default function App() {
             />
           )}
           {findOpen && (
-            <FindDialog
+            <FindReplaceDialog
+              initialTab={findTab}
               message={findMsg}
-              onFind={find}
+              onFind={(o) => void find(o)}
+              onReplace={(o) => void replaceOne(o)}
+              onReplaceAll={(o) => void replaceAll(o)}
               onClose={() => {
                 setFindOpen(false);
                 setFindMsg(null);
@@ -1890,6 +2315,14 @@ export default function App() {
           </span>
         )}
         {stats && onSheetTab && stats.bridge_calls > 0 && <span title="데이터 엔진 계산 시간">데이터 엔진 {stats.bridge_ms.toFixed(0)} ms</span>}
+        {filter && filter.columns.length > 0 && source instanceof SheetSource && (
+          <span>
+            {formatCount(filter.range.r1 - filter.range.r0)}개 중 {formatCount(
+              Array.from({ length: filter.range.r1 - filter.range.r0 }, (_, i) => filter.range.r0 + 1 + i).filter((r) => source.rows.size(r) > 0).length,
+            )}
+            개의 레코드가 있습니다
+          </span>
+        )}
         {selStats && selStats.count > 1 && (
           <>
             {selStats.average !== null && <span>평균: {formatNumber(selStats.average)}</span>}
@@ -1920,6 +2353,241 @@ export default function App() {
           }}
         />
       )}
+      {filterMenu && filter && (
+        <FilterMenu
+          key={filterMenu.col}
+          x={filterMenu.x}
+          y={filterMenu.y}
+          col={filterMenu.col}
+          values={filterMenu.values}
+          numeric={filterMenu.numeric}
+          current={filter.columns.find((c) => c.col === filterMenu.col) ?? null}
+          onClose={() => {
+            setFilterMenu(null);
+            focusGrid();
+          }}
+          onSort={async (descending) => {
+            setFilterMenu(null);
+            const st = await onSheetOnly("정렬", (s) => api.sortRange(s, filter.range, [{ col: filterMenu.col, descending }], true));
+            if (st) await afterChange(st);
+            focusGrid();
+          }}
+          onApply={async (f) => {
+            const col = filterMenu.col;
+            setFilterMenu(null);
+            const st = await onSheetOnly("필터", (s) => api.setFilterColumn(s, f ?? { col, values: null, conditions: [], and: true }));
+            if (st) await afterChange(st);
+            focusGrid();
+          }}
+        />
+      )}
+      {listOpen && listItems && (
+        <ListDropdown
+          x={listOpen.x}
+          y={listOpen.y}
+          items={listItems}
+          current={detail?.text ?? ""}
+          onClose={() => {
+            setListOpen(null);
+            focusGrid();
+          }}
+          onPick={async (v) => {
+            setListOpen(null);
+            const f = selectionRef.current.focus;
+            const st = await onSheetOnly("입력", (s) => api.setCell(s, f.r, f.c, v));
+            if (st) await afterChange(st);
+            focusGrid();
+          }}
+        />
+      )}
+      {vAlert && (
+        <ValidationAlert
+          failure={vAlert.failure}
+          onDone={async (choice) => {
+            const s = vAlert.session;
+            setVAlert(null);
+            if (tabKey(tabRef.current) !== tabKey(s.tab)) switchTab(s.tab, true);
+            if (choice === "accept") {
+              await writeSession(s, false);
+              return;
+            }
+            setSelection({ anchor: s.pos, focus: s.pos });
+            if (choice === "retry") {
+              // Back into the cell with the rejected entry selected, as in Excel.
+              setSession({ ...s, mode: "edit", point: null });
+              requestAnimationFrame(() => {
+                const el = cellInput.current;
+                el?.focus({ preventScroll: true });
+                el?.setSelectionRange(0, s.text.length);
+              });
+            } else focusGrid();
+          }}
+        />
+      )}
+      {dialog?.kind === "sort" && (
+        <SortDialog
+          columns={columnChoices(dialog.range)}
+          initialHeader={dialog.header}
+          initialCol={selection.focus.c}
+          onDone={async (r) => {
+            const rg = dialog.range;
+            setDialog(null);
+            focusGrid();
+            if (!r) return;
+            const st = await onSheetOnly("정렬", (s) => api.sortRange(s, rg, r.keys, r.hasHeader));
+            if (st) await afterChange(st);
+          }}
+        />
+      )}
+      {dialog?.kind === "textToColumns" && (
+        <TextToColumnsDialog
+          samples={dialog.samples}
+          dest={addr({ r: dialog.range.r0, c: dialog.range.c0 })}
+          onDone={async (o) => {
+            const rg = dialog.range;
+            setDialog(null);
+            focusGrid();
+            if (!o) return;
+            const d = parseAddr(o.destText.replace(/\$/g, "").split("!").pop() ?? "") ?? { r: rg.r0, c: rg.c0 };
+            const { destText: _ignored, ...opts } = o;
+            const st = await onSheetOnly("텍스트 나누기", (s) => api.textToColumns(s, rg, { ...opts, dest_row: d.r, dest_col: d.c }));
+            if (st) await afterChange(st);
+          }}
+        />
+      )}
+      {dialog?.kind === "duplicates" && (
+        <DuplicatesDialog
+          columns={columnChoices(dialog.range)}
+          initialHeader={dialog.header}
+          onDone={async (r) => {
+            const rg = dialog.range;
+            setDialog(null);
+            focusGrid();
+            if (!r) return;
+            const res = await onSheetOnly("중복 제거", (s) => api.removeDuplicates(s, rg, r.cols, r.hasHeader));
+            if (!res) return;
+            await afterChange();
+            say(
+              res.removed
+                ? `중복된 값 ${formatCount(res.removed)}개를 찾아 제거했습니다. 고유한 값 ${formatCount(res.remaining)}개가 남아 있습니다.`
+                : "중복된 값이 없습니다.",
+            );
+          }}
+        />
+      )}
+      {dialog?.kind === "validation" && (
+        <ValidationDialog
+          initial={dialog.current}
+          onDone={async (v) => {
+            setDialog(null);
+            focusGrid();
+            if (!v) return;
+            const st =
+              v === "clear" || v.kind === "Any"
+                ? await onSheetOnly("유효성 검사", (s) => api.clearValidation(s, range()))
+                : await onSheetOnly("유효성 검사", (s) => api.setValidation(s, range(), v));
+            if (st) await afterChange(st);
+          }}
+        />
+      )}
+      {dialog?.kind === "names" && (
+        <NameManagerDialog
+          names={dialog.list}
+          sheets={info?.sheets ?? []}
+          startNew={dialog.startNew}
+          suggestion={(() => {
+            const rg = range();
+            const t = tabRef.current;
+            const sn = t.kind === "sheet" ? quoteSheet(sheetName(t.index)) : "Sheet1";
+            return `=${sn}!$${colName(rg.c0)}$${rg.r0}${rg.r0 === rg.r1 && rg.c0 === rg.c1 ? "" : `:$${colName(rg.c1)}$${rg.r1}`}`;
+          })()}
+          onAdd={async (name, scope, formula) => {
+            try {
+              await api.addName(name, scope, formula);
+              setDialog({ kind: "names", list: await api.names(), startNew: false });
+              await afterChange();
+              return true;
+            } catch (e) {
+              fail(e);
+              return false;
+            }
+          }}
+          onUpdate={async (old, name, scope, formula) => {
+            try {
+              await api.updateName(old.name, old.scope, name, scope, formula);
+              setDialog({ kind: "names", list: await api.names(), startNew: false });
+              await afterChange();
+              return true;
+            } catch (e) {
+              fail(e);
+              return false;
+            }
+          }}
+          onDelete={async (n) => {
+            await api.deleteName(n.name, n.scope).catch(fail);
+            setDialog({ kind: "names", list: await api.names(), startNew: false });
+            await afterChange();
+          }}
+          onClose={() => {
+            setDialog(null);
+            focusGrid();
+          }}
+        />
+      )}
+      {dialog?.kind === "hyperlink" && (
+        <HyperlinkDialog
+          text={dialog.text}
+          current={dialog.current}
+          sheets={info?.sheets ?? []}
+          onDone={async (r) => {
+            setDialog(null);
+            focusGrid();
+            if (!r) return;
+            const f = selectionRef.current.focus;
+            const st =
+              r === "remove"
+                ? await onSheetOnly("링크 제거", (s) => api.deleteLink(s, f.r, f.c))
+                : await onSheetOnly("링크", (s) => api.setLink(s, f.r, f.c, r.target, r.internal, r.text || null));
+            if (st) await afterChange(st);
+          }}
+        />
+      )}
+      {dialog?.kind === "goalSeek" && (
+        <GoalSeekDialog
+          setCell={addr(selection.focus)}
+          onDone={async (r) => {
+            setDialog(null);
+            focusGrid();
+            if (!r) return;
+            const a = parseAddr(r.setCell.replace(/\$/g, ""));
+            const b = parseAddr(r.changing.replace(/\$/g, ""));
+            if (!a || !b) return say("셀 주소가 올바르지 않습니다", true);
+            const res = await onSheetOnly("목표값 찾기", (s) => api.goalSeek(s, [a.r, a.c], r.target, [b.r, b.c]));
+            if (!res) return;
+            await afterChange();
+            say(
+              res.found
+                ? `셀 ${r.setCell.toUpperCase()}에 대한 목표값 찾기: 답을 찾았습니다. 목표값 ${r.target}, 현재값 ${formatNumber(res.result)} (${r.changing.toUpperCase()} = ${formatNumber(res.value)})`
+                : `셀 ${r.setCell.toUpperCase()}의 목표값을 찾지 못했습니다. 가장 가까운 값: ${formatNumber(res.result)}`,
+              !res.found,
+            );
+          }}
+        />
+      )}
+      {dialog?.kind === "print" && (
+        <PrintDialog
+          hasSelection={(() => {
+            const rg = range();
+            return rg.r0 !== rg.r1 || rg.c0 !== rg.c1;
+          })()}
+          onDone={(o) => {
+            setDialog(null);
+            focusGrid();
+            if (o) void startPrint(o);
+          }}
+        />
+      )}
+      {printJob && <PrintView job={printJob} />}
       {dialog?.kind === "pasteSpecial" && (
         <PasteSpecialDialog
           onDone={(o) => {

@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use crate::bridge::{self, BridgeValue, CellRef, CellResolver};
 use crate::data::{ColumnFilter, DataStore, Page, Sort, TableInfo};
 use crate::error::{CellxError, Result};
+use crate::datatools::{AutoFilter, Validation};
 use crate::extras::{Chart, PivotDef};
 use crate::refs::{self, Axis};
 use crate::value::{from_ironcalc, Scalar};
@@ -157,6 +158,9 @@ pub struct CellView {
     pub numeric: bool,
     pub error: bool,
     pub bridge: bool,
+    /// The cell holds a hyperlink.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub link: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style: Option<CellStyle>,
 }
@@ -245,6 +249,8 @@ pub(crate) struct Side {
     charts: Vec<Chart>,
     pivots: Vec<PivotDef>,
     comments: Vec<Vec<Comment>>,
+    filters: Vec<AutoFilter>,
+    validations: Vec<Validation>,
 }
 
 #[derive(Debug, Clone)]
@@ -300,6 +306,8 @@ pub struct Workbook {
     pub(crate) clipboard: Option<StoredClipboard>,
     pub(crate) charts: Vec<Chart>,
     pub(crate) pivots: Vec<PivotDef>,
+    pub(crate) filters: Vec<AutoFilter>,
+    pub(crate) validations: Vec<Validation>,
     pub(crate) next_object_id: u32,
     pub last_recalc: RecalcStats,
 }
@@ -321,7 +329,7 @@ impl Workbook {
         let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Book1".into());
         let model = model_from_xlsx_bytes(&bytes, &name)?;
         let mut wb = Self::from_model(model, DataStore::open_in_memory()?, None)?;
-        wb.import_charts(&bytes);
+        wb.import_extras(&bytes);
         Ok(wb)
     }
 
@@ -343,6 +351,8 @@ impl Workbook {
             clipboard: None,
             charts: Vec::new(),
             pivots: Vec::new(),
+            filters: Vec::new(),
+            validations: Vec::new(),
             next_object_id: 1,
             last_recalc: RecalcStats::default(),
         })
@@ -400,6 +410,8 @@ impl Workbook {
             charts: self.charts.clone(),
             pivots: self.pivots.clone(),
             comments: self.model().workbook.worksheets.iter().map(|w| w.comments.clone()).collect(),
+            filters: self.filters.clone(),
+            validations: self.validations.clone(),
         }
     }
 
@@ -407,6 +419,8 @@ impl Workbook {
         self.bridges = side.bridges.clone();
         self.charts = side.charts.clone();
         self.pivots = side.pivots.clone();
+        self.filters = side.filters.clone();
+        self.validations = side.validations.clone();
         for (ws, c) in self.model_mut().workbook.worksheets.iter_mut().zip(side.comments.iter()) {
             ws.comments = c.clone();
         }
@@ -1281,6 +1295,7 @@ impl Workbook {
     pub fn viewport(&self, sheet: u32, row0: i32, col0: i32, row1: i32, col1: i32) -> Result<Viewport> {
         let ws = self.model().workbook.worksheet(sheet)?;
         let default_font = self.default_font();
+        let links = self.um.get_links(sheet)?;
         let mut cells = Vec::new();
         for row in row0..=row1 {
             for col in col0..=col1 {
@@ -1300,6 +1315,7 @@ impl Workbook {
                     numeric: matches!(scalar, Scalar::Number(_)),
                     error: matches!(scalar, Scalar::Error(_)),
                     bridge: self.bridges.contains_key(&(sheet, row, col)),
+                    link: links.contains_key(&(row, col)),
                     style,
                 });
             }
@@ -1395,7 +1411,7 @@ impl Workbook {
     pub fn xlsx_bytes(&self) -> Result<Vec<u8>> {
         let mut xlsx = std::io::Cursor::new(Vec::new());
         ironcalc::export::save_xlsx_to_writer(self.model(), &mut xlsx).map_err(|e| CellxError::Xlsx(e.to_string()))?;
-        crate::ooxml::add_extras(xlsx.get_ref(), &self.sheet_parts())
+        crate::ooxml::add_extras(xlsx.get_ref(), &self.sheet_parts(), &self.sheet_names())
     }
 
     pub fn bridge_formula_count(&self) -> usize {

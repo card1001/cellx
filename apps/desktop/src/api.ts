@@ -87,6 +87,105 @@ export interface PasteSpecial {
   transpose: boolean;
 }
 
+export interface SortKey {
+  col: number;
+  descending: boolean;
+}
+
+export type FilterOp =
+  | "Equal"
+  | "NotEqual"
+  | "GreaterThan"
+  | "GreaterThanOrEqual"
+  | "LessThan"
+  | "LessThanOrEqual"
+  | "Contains"
+  | "NotContains"
+  | "BeginsWith"
+  | "EndsWith";
+
+export interface SheetColumnFilter {
+  col: number;
+  values: string[] | null;
+  conditions: { op: FilterOp; value: string }[];
+  and: boolean;
+}
+
+export interface AutoFilter {
+  sheet: number;
+  range: Range;
+  columns: SheetColumnFilter[];
+}
+
+export interface FilterValue {
+  text: string;
+  checked: boolean;
+}
+
+export type ValidationKind = "Any" | "WholeNumber" | "Decimal" | "List" | "Date" | "Time" | "TextLength" | "Custom";
+export type ValidationOp =
+  | "Between"
+  | "NotBetween"
+  | "Equal"
+  | "NotEqual"
+  | "GreaterThan"
+  | "LessThan"
+  | "GreaterThanOrEqual"
+  | "LessThanOrEqual";
+export type ErrorStyle = "Stop" | "Warning" | "Information";
+
+export interface Validation {
+  sheet: number;
+  range: string;
+  kind: ValidationKind;
+  op: ValidationOp;
+  formula1: string;
+  formula2: string;
+  allow_blank: boolean;
+  in_cell_dropdown: boolean;
+  show_input: boolean;
+  input_title: string;
+  input_message: string;
+  show_error: boolean;
+  error_style: ErrorStyle;
+  error_title: string;
+  error_message: string;
+}
+
+export interface ValidationFailure {
+  style: ErrorStyle;
+  title: string;
+  message: string;
+}
+
+export interface SplitOptions {
+  delimiters: string;
+  consecutive: boolean;
+  qualifier: string | null;
+  widths: number[] | null;
+  dest_row: number;
+  dest_col: number;
+}
+
+export interface NameView {
+  name: string;
+  scope: number | null;
+  formula: string;
+}
+
+export interface LinkView {
+  target: string;
+  internal: boolean;
+  tooltip: string | null;
+}
+
+export interface GoalSeekResult {
+  found: boolean;
+  value: number;
+  result: number;
+  iterations: number;
+}
+
 /** IronCalc's conditional formatting rule input (tagged by `type`). */
 export type CfRule = { type: string; [k: string]: unknown };
 export interface CfView {
@@ -103,6 +202,7 @@ export interface CellView {
   numeric: boolean;
   error: boolean;
   bridge: boolean;
+  link?: boolean;
   style?: CellStyle;
 }
 
@@ -272,6 +372,41 @@ export const api = {
   savePivot: (def: PivotDef, newSheet: boolean) => invoke<PivotDef>("save_pivot", { def, newSheet }),
   refreshPivots: () => invoke<RecalcStats>("refresh_pivots"),
   deletePivot: (id: number) => invoke<RecalcStats>("delete_pivot", { id }),
+  sortRange: (sheet: number, range: Range, keys: SortKey[], hasHeader: boolean) =>
+    invoke<RecalcStats>("sort_range", { sheet, range, keys, hasHeader }),
+  toggleAutoFilter: (sheet: number, range: Range) => invoke<AutoFilter | null>("toggle_auto_filter", { sheet, range }),
+  autoFilter: (sheet: number) => invoke<AutoFilter | null>("auto_filter", { sheet }),
+  setFilterColumn: (sheet: number, filter: SheetColumnFilter) => invoke<RecalcStats>("set_filter_column", { sheet, filter }),
+  clearFilters: (sheet: number) => invoke<RecalcStats>("clear_filters", { sheet }),
+  applyFilter: (sheet: number) => invoke<RecalcStats>("apply_filter", { sheet }),
+  filterValues: (sheet: number, col: number) => invoke<FilterValue[]>("filter_values", { sheet, col }),
+  textToColumns: (sheet: number, range: Range, options: SplitOptions) => invoke<RecalcStats>("text_to_columns", { sheet, range, options }),
+  removeDuplicates: (sheet: number, range: Range, cols: number[], hasHeader: boolean) =>
+    invoke<{ removed: number; remaining: number }>("remove_duplicates", { sheet, range, cols, hasHeader }),
+  validationAt: (sheet: number, row: number, col: number) => invoke<Validation | null>("validation_at", { sheet, row, col }),
+  setValidation: (sheet: number, range: Range, validation: Validation) => invoke<RecalcStats>("set_validation", { sheet, range, validation }),
+  clearValidation: (sheet: number, range: Range) => invoke<RecalcStats>("clear_validation", { sheet, range }),
+  validateInput: (sheet: number, row: number, col: number, input: string) =>
+    invoke<ValidationFailure | null>("validate_input", { sheet, row, col, input }),
+  listItems: (sheet: number, row: number, col: number) => invoke<string[] | null>("list_items", { sheet, row, col }),
+  flashFill: (sheet: number, row: number, col: number) => invoke<[number, RecalcStats]>("flash_fill", { sheet, row, col }),
+  replaceAll: (sheet: number | null, find: string, replace: string, matchCase: boolean, wholeCell: boolean) =>
+    invoke<[number, RecalcStats]>("replace_all", { sheet, find, replace, matchCase, wholeCell }),
+  replaceInCell: (sheet: number, row: number, col: number, find: string, replace: string, matchCase: boolean, wholeCell: boolean) =>
+    invoke<boolean>("replace_in_cell", { sheet, row, col, find, replace, matchCase, wholeCell }),
+  names: () => invoke<NameView[]>("names"),
+  addName: (name: string, scope: number | null, formula: string) => invoke<void>("add_name", { name, scope, formula }),
+  updateName: (name: string, scope: number | null, newName: string, newScope: number | null, formula: string) =>
+    invoke<void>("update_name", { name, scope, newName, newScope, formula }),
+  deleteName: (name: string, scope: number | null) => invoke<void>("delete_name", { name, scope }),
+  linkAt: (sheet: number, row: number, col: number) => invoke<LinkView | null>("link_at", { sheet, row, col }),
+  setLink: (sheet: number, row: number, col: number, target: string, internal: boolean, text: string | null) =>
+    invoke<RecalcStats>("set_link", { sheet, row, col, target, internal, text }),
+  deleteLink: (sheet: number, row: number, col: number) => invoke<RecalcStats>("delete_link", { sheet, row, col }),
+  goalSeek: (sheet: number, setCell: [number, number], target: number, changing: [number, number]) =>
+    invoke<GoalSeekResult>("goal_seek", { sheet, setCell, target, changing }),
+  openLink: (url: string) => invoke<void>("open_link", { url }),
+  printPage: () => invoke<void>("print_page"),
   redo: () => invoke<RecalcStats>("redo"),
 
   insertRows: (sheet: number, at: number, count: number) => invoke<RecalcStats>("insert_rows", { sheet, at, count }),

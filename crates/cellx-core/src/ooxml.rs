@@ -8,8 +8,10 @@ use std::io::{Cursor, Read, Write};
 
 use zip::write::SimpleFileOptions;
 
+use crate::datatools::{AutoFilter, ColumnFilter, ErrorStyle, FilterCondition, FilterOp, Validation, ValidationKind, ValidationOp};
 use crate::error::{CellxError, Result};
 use crate::extras::{ChartData, ChartKind};
+use crate::workbook::CellRange;
 use crate::refs::column_name;
 
 /// EMU per pixel at 96 dpi.
@@ -45,12 +47,114 @@ pub struct ChartXml {
 pub struct SheetParts {
     pub memos: Vec<MemoXml>,
     pub charts: Vec<ChartXml>,
+    pub filter: Option<AutoFilter>,
+    pub validations: Vec<Validation>,
 }
 
 impl SheetParts {
     fn is_empty(&self) -> bool {
-        self.memos.is_empty() && self.charts.is_empty()
+        self.memos.is_empty() && self.charts.is_empty() && self.filter.is_none() && self.validations.is_empty()
     }
+}
+
+fn a1(r: CellRange) -> String {
+    format!("{}{}:{}{}", column_name(r.c0), r.r0, column_name(r.c1), r.r1)
+}
+
+fn auto_filter_xml(f: &AutoFilter) -> String {
+    let mut cols = String::new();
+    for cf in &f.columns {
+        let id = cf.col - f.range.c0;
+        if id < 0 {
+            continue;
+        }
+        let mut inner = String::new();
+        if let Some(vals) = &cf.values {
+            let blank = vals.iter().any(|v| v.trim().is_empty());
+            let items: String = vals.iter().filter(|v| !v.trim().is_empty()).map(|v| format!(r#"<filter val="{}"/>"#, esc(v))).collect();
+            inner.push_str(&format!("<filters{}>{items}</filters>", if blank { r#" blank="1""# } else { "" }));
+        } else if !cf.conditions.is_empty() {
+            let items: String = cf
+                .conditions
+                .iter()
+                .map(|c| {
+                    let (op, val) = match c.op {
+                        FilterOp::Equal => ("equal", c.value.clone()),
+                        FilterOp::NotEqual => ("notEqual", c.value.clone()),
+                        FilterOp::GreaterThan => ("greaterThan", c.value.clone()),
+                        FilterOp::GreaterThanOrEqual => ("greaterThanOrEqual", c.value.clone()),
+                        FilterOp::LessThan => ("lessThan", c.value.clone()),
+                        FilterOp::LessThanOrEqual => ("lessThanOrEqual", c.value.clone()),
+                        FilterOp::Contains => ("equal", format!("*{}*", c.value)),
+                        FilterOp::NotContains => ("notEqual", format!("*{}*", c.value)),
+                        FilterOp::BeginsWith => ("equal", format!("{}*", c.value)),
+                        FilterOp::EndsWith => ("equal", format!("*{}", c.value)),
+                    };
+                    format!(r#"<customFilter operator="{op}" val="{}"/>"#, esc(&val))
+                })
+                .collect();
+            inner.push_str(&format!("<customFilters{}>{items}</customFilters>", if cf.and && cf.conditions.len() > 1 { r#" and="1""# } else { "" }));
+        }
+        if !inner.is_empty() {
+            cols.push_str(&format!(r#"<filterColumn colId="{id}">{inner}</filterColumn>"#));
+        }
+    }
+    format!(r#"<autoFilter ref="{}">{cols}</autoFilter>"#, a1(f.range))
+}
+
+fn validations_xml(vs: &[Validation]) -> String {
+    let items: String = vs
+        .iter()
+        .map(|v| {
+            let kind = match v.kind {
+                ValidationKind::Any => "none",
+                ValidationKind::WholeNumber => "whole",
+                ValidationKind::Decimal => "decimal",
+                ValidationKind::List => "list",
+                ValidationKind::Date => "date",
+                ValidationKind::Time => "time",
+                ValidationKind::TextLength => "textLength",
+                ValidationKind::Custom => "custom",
+            };
+            let op = match v.op {
+                ValidationOp::Between => "between",
+                ValidationOp::NotBetween => "notBetween",
+                ValidationOp::Equal => "equal",
+                ValidationOp::NotEqual => "notEqual",
+                ValidationOp::GreaterThan => "greaterThan",
+                ValidationOp::LessThan => "lessThan",
+                ValidationOp::GreaterThanOrEqual => "greaterThanOrEqual",
+                ValidationOp::LessThanOrEqual => "lessThanOrEqual",
+            };
+            let style = match v.error_style {
+                ErrorStyle::Stop => "stop",
+                ErrorStyle::Warning => "warning",
+                ErrorStyle::Information => "information",
+            };
+            let uses_op = !matches!(v.kind, ValidationKind::List | ValidationKind::Custom | ValidationKind::Any);
+            let f2 = if uses_op && matches!(v.op, ValidationOp::Between | ValidationOp::NotBetween) && !v.formula2.is_empty() {
+                format!("<formula2>{}</formula2>", esc(&v.formula2))
+            } else {
+                String::new()
+            };
+            let f1 = if v.formula1.is_empty() { String::new() } else { format!("<formula1>{}</formula1>", esc(&v.formula1)) };
+            format!(
+                r#"<dataValidation type="{kind}" errorStyle="{style}"{op_attr} allowBlank="{}" showDropDown="{}" showInputMessage="{}" showErrorMessage="{}" errorTitle="{}" error="{}" promptTitle="{}" prompt="{}" sqref="{}">{f1}{f2}</dataValidation>"#,
+                v.allow_blank as u8,
+                // In xlsx showDropDown="1" *hides* the in-cell arrow.
+                (!v.in_cell_dropdown) as u8,
+                v.show_input as u8,
+                v.show_error as u8,
+                esc(&v.error_title),
+                esc(&v.error_message),
+                esc(&v.input_title),
+                esc(&v.input_message),
+                esc(&v.range),
+                op_attr = if uses_op { format!(r#" operator="{op}""#) } else { String::new() },
+            )
+        })
+        .collect();
+    format!(r#"<dataValidations count="{}">{items}</dataValidations>"#, vs.len())
 }
 
 fn zerr<T>(r: std::result::Result<T, zip::result::ZipError>) -> Result<T> {
@@ -82,7 +186,7 @@ fn abs_range(sheet: &str, (a, b): ((i32, i32), (i32, i32))) -> String {
 }
 
 /// Adds memos and charts (`parts[i]` belongs to sheet i+1) to an xlsx made by IronCalc.
-pub fn add_extras(xlsx: &[u8], parts: &[SheetParts]) -> Result<Vec<u8>> {
+pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> Result<Vec<u8>> {
     if parts.iter().all(SheetParts::is_empty) {
         return Ok(xlsx.to_vec());
     }
@@ -179,6 +283,27 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts]) -> Result<Vec<u8>> {
             tags.push_str(r#"<legacyDrawing r:id="rIdCxVml"/>"#);
         }
 
+        let mut sheet_xml = sheet_xml;
+        // autoFilter comes right after sheetData, dataValidations before hyperlinks.
+        if let Some(f) = &p.filter {
+            let xml = auto_filter_xml(f);
+            let at = sheet_xml
+                .find("</sheetData>")
+                .map(|i| i + "</sheetData>".len())
+                .or_else(|| sheet_xml.find("<sheetData/>").map(|i| i + "<sheetData/>".len()));
+            if let Some(at) = at {
+                sheet_xml.insert_str(at, &xml);
+            }
+        }
+        if !p.validations.is_empty() {
+            let xml = validations_xml(&p.validations);
+            let at = sheet_xml
+                .find("<hyperlinks")
+                .or_else(|| sheet_xml.rfind("<extLst"))
+                .or_else(|| sheet_xml.rfind("</worksheet>"))
+                .unwrap_or(sheet_xml.len());
+            sheet_xml.insert_str(at, &xml);
+        }
         // drawing and legacyDrawing come before extLst in a worksheet.
         let at = sheet_xml
             .rfind("<extLst")
@@ -187,6 +312,9 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts]) -> Result<Vec<u8>> {
         let new_sheet = format!("{}{}{}", &sheet_xml[..at], tags, &sheet_xml[at..]);
         put(&mut map, &mut order, sheet_path, new_sheet.into_bytes());
 
+        if rels.is_empty() {
+            continue;
+        }
         let new_rels = match map.get(&rels_path) {
             Some(old) => {
                 let old = String::from_utf8_lossy(old).to_string();
@@ -196,6 +324,36 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts]) -> Result<Vec<u8>> {
             None => relationships(&rels),
         };
         put(&mut map, &mut order, rels_path, new_rels.into_bytes());
+    }
+
+    // Excel and LibreOffice keep the AutoFilter range in a hidden name as well.
+    let filter_names: String = parts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| p.filter.as_ref().map(|f| (i, f)))
+        .filter_map(|(i, f)| {
+            let names = sheet_names.get(i)?;
+            let r = f.range;
+            Some(format!(
+                r#"<definedName name="_xlnm._FilterDatabase" localSheetId="{i}" hidden="1">{}!${}${}:${}${}</definedName>"#,
+                esc(&sheet_ref(names)),
+                column_name(r.c0),
+                r.r0,
+                column_name(r.c1),
+                r.r1
+            ))
+        })
+        .collect();
+    if !filter_names.is_empty() {
+        if let Some(wb) = map.get("xl/workbook.xml") {
+            let mut wb = String::from_utf8_lossy(wb).to_string();
+            if let Some(at) = wb.find("</definedNames>") {
+                wb.insert_str(at, &filter_names);
+            } else if let Some(at) = wb.find("<calcPr").or_else(|| wb.find("</workbook>")) {
+                wb.insert_str(at, &format!("<definedNames>{filter_names}</definedNames>"));
+            }
+            map.insert("xl/workbook.xml".into(), wb.into_bytes());
+        }
     }
 
     if let Some(ct) = map.get("[Content_Types].xml") {
@@ -596,6 +754,128 @@ fn parse_chart(xml: &str) -> Option<ImportedChart> {
         to: None,
         ext: None,
     })
+}
+
+/// AutoFilter and data validation rules of every sheet, read from the sheet XML.
+pub fn read_sheet_rules(xlsx: &[u8]) -> Vec<(usize, Option<AutoFilter>, Vec<Validation>)> {
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(xlsx)) else { return Vec::new() };
+    let Some(wb_xml) = read_part(&mut zip, "xl/workbook.xml") else { return Vec::new() };
+    let wb_rels = rels_of(&mut zip, "xl/workbook.xml");
+    let Ok(wb_doc) = roxmltree::Document::parse(&wb_xml) else { return Vec::new() };
+    let parts: Vec<String> = wb_doc
+        .descendants()
+        .filter(|n| n.has_tag_name("sheet"))
+        .filter_map(|n| n.attribute((R_NS, "id")).and_then(|id| wb_rels.get(id)).map(|(_, t)| t.clone()))
+        .collect();
+    let mut out = Vec::new();
+    for (si, part) in parts.iter().enumerate() {
+        let Some(xml) = read_part(&mut zip, part) else { continue };
+        if !xml.contains("<autoFilter") && !xml.contains("<dataValidation") {
+            continue;
+        }
+        let Ok(doc) = roxmltree::Document::parse(&xml) else { continue };
+        let root = doc.root_element();
+        let filter = root.children().find(|n| n.has_tag_name("autoFilter")).and_then(|af| {
+            let (_, r0, c0, r1, c1) = crate::extras::parse_range(af.attribute("ref")?)?;
+            let mut columns = Vec::new();
+            for fc in af.children().filter(|n| n.has_tag_name("filterColumn")) {
+                let col = c0 + fc.attribute("colId").and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+                if let Some(fs) = fc.children().find(|n| n.has_tag_name("filters")) {
+                    let mut values: Vec<String> = fs
+                        .children()
+                        .filter(|n| n.has_tag_name("filter"))
+                        .filter_map(|n| n.attribute("val").map(str::to_string))
+                        .collect();
+                    if fs.attribute("blank") == Some("1") {
+                        values.push(String::new());
+                    }
+                    columns.push(ColumnFilter { col, values: Some(values), conditions: vec![], and: true });
+                } else if let Some(cfs) = fc.children().find(|n| n.has_tag_name("customFilters")) {
+                    let conditions = cfs
+                        .children()
+                        .filter(|n| n.has_tag_name("customFilter"))
+                        .map(|n| {
+                            let val = n.attribute("val").unwrap_or("").to_string();
+                            let op = n.attribute("operator").unwrap_or("equal");
+                            let (op, value) = match op {
+                                "notEqual" if val.starts_with('*') && val.ends_with('*') && val.len() > 1 => {
+                                    (FilterOp::NotContains, val[1..val.len() - 1].to_string())
+                                }
+                                "notEqual" => (FilterOp::NotEqual, val),
+                                "greaterThan" => (FilterOp::GreaterThan, val),
+                                "greaterThanOrEqual" => (FilterOp::GreaterThanOrEqual, val),
+                                "lessThan" => (FilterOp::LessThan, val),
+                                "lessThanOrEqual" => (FilterOp::LessThanOrEqual, val),
+                                _ if val.starts_with('*') && val.ends_with('*') && val.len() > 1 => {
+                                    (FilterOp::Contains, val[1..val.len() - 1].to_string())
+                                }
+                                _ if val.ends_with('*') && !val.starts_with('*') => (FilterOp::BeginsWith, val[..val.len() - 1].to_string()),
+                                _ if val.starts_with('*') && !val.ends_with('*') => (FilterOp::EndsWith, val[1..].to_string()),
+                                _ => (FilterOp::Equal, val),
+                            };
+                            FilterCondition { op, value }
+                        })
+                        .collect();
+                    columns.push(ColumnFilter { col, values: None, conditions, and: cfs.attribute("and") == Some("1") });
+                }
+            }
+            Some(AutoFilter { sheet: si as u32, range: CellRange { r0, c0, r1, c1 }, columns })
+        });
+        let mut validations = Vec::new();
+        for dv in root.descendants().filter(|n| n.has_tag_name("dataValidation")) {
+            let attr = |k: &str| dv.attribute(k).unwrap_or("").to_string();
+            let flag = |k: &str, default: bool| dv.attribute(k).map(|v| v == "1" || v == "true").unwrap_or(default);
+            let kind = match dv.attribute("type").unwrap_or("none") {
+                "whole" => ValidationKind::WholeNumber,
+                "decimal" => ValidationKind::Decimal,
+                "list" => ValidationKind::List,
+                "date" => ValidationKind::Date,
+                "time" => ValidationKind::Time,
+                "textLength" => ValidationKind::TextLength,
+                "custom" => ValidationKind::Custom,
+                _ => ValidationKind::Any,
+            };
+            let op = match dv.attribute("operator").unwrap_or("between") {
+                "notBetween" => ValidationOp::NotBetween,
+                "equal" => ValidationOp::Equal,
+                "notEqual" => ValidationOp::NotEqual,
+                "greaterThan" => ValidationOp::GreaterThan,
+                "lessThan" => ValidationOp::LessThan,
+                "greaterThanOrEqual" => ValidationOp::GreaterThanOrEqual,
+                "lessThanOrEqual" => ValidationOp::LessThanOrEqual,
+                _ => ValidationOp::Between,
+            };
+            let formula = |tag: &str| {
+                dv.descendants()
+                    .find(|n| n.has_tag_name(tag))
+                    .map(|n| n.children().filter(|c| c.is_text()).filter_map(|c| c.text()).collect::<String>())
+                    .unwrap_or_default()
+            };
+            validations.push(Validation {
+                sheet: si as u32,
+                range: attr("sqref"),
+                kind,
+                op,
+                formula1: formula("formula1"),
+                formula2: formula("formula2"),
+                allow_blank: flag("allowBlank", false),
+                in_cell_dropdown: !flag("showDropDown", false),
+                show_input: flag("showInputMessage", false),
+                input_title: attr("promptTitle"),
+                input_message: attr("prompt"),
+                show_error: flag("showErrorMessage", false),
+                error_style: match dv.attribute("errorStyle") {
+                    Some("warning") => ErrorStyle::Warning,
+                    Some("information") => ErrorStyle::Information,
+                    _ => ErrorStyle::Stop,
+                },
+                error_title: attr("errorTitle"),
+                error_message: attr("error"),
+            });
+        }
+        out.push((si, filter, validations));
+    }
+    out
 }
 
 #[cfg(test)]

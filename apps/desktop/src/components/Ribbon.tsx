@@ -65,6 +65,24 @@ export interface RibbonActions {
   newMemo(): void;
   deleteMemo(): void;
   toggleMemos(): void;
+  sortAsc(): void;
+  sortDesc(): void;
+  sortDialog(): void;
+  toggleFilter(): void;
+  clearFilter(): void;
+  reapplyFilter(): void;
+  hasFilter(): boolean;
+  textToColumns(): void;
+  flashFill(): void;
+  removeDuplicates(): void;
+  validation(): void;
+  goalSeek(): void;
+  replace(): void;
+  goToDialog(): void;
+  hyperlink(): void;
+  nameManager(): void;
+  defineName(): void;
+  print(): void;
 }
 
 interface Props {
@@ -78,6 +96,7 @@ interface Props {
   functions: string[];
   showMemos: boolean;
   hasMemo: boolean;
+  filterOn: boolean;
 }
 
 const TABS = ["파일", "홈", "삽입", "수식", "데이터", "검토", "보기"] as const;
@@ -184,6 +203,9 @@ export function Ribbon(props: Props) {
               </Btn>
               <Btn big title="다른 이름으로 저장 (F12)" onClick={a.saveAs}>
                 <span className="ic">🖫</span>다른 이름으로 저장
+              </Btn>
+              <Btn big title="인쇄 / PDF로 저장 (Ctrl+P)" onClick={a.print}>
+                <span className="ic">🖨</span>인쇄
               </Btn>
             </Group>
           </>
@@ -470,9 +492,26 @@ export function Ribbon(props: Props) {
                       { label: "내용 지우기", shortcut: "Delete", onClick: () => a.clear("contents") },
                     ]}
                   />
-                  <Btn title="찾기 (Ctrl+F)" onClick={a.find}>
-                    🔍 찾기
-                  </Btn>
+                  <Dropdown
+                    label="⇅ 정렬 및 필터"
+                    items={[
+                      { label: "텍스트 오름차순 정렬", icon: "↑", onClick: a.sortAsc },
+                      { label: "텍스트 내림차순 정렬", icon: "↓", onClick: a.sortDesc },
+                      { label: "사용자 지정 정렬...", onClick: a.sortDialog },
+                      { separator: true },
+                      { label: "필터", shortcut: "Ctrl+Shift+L", checked: props.filterOn, onClick: a.toggleFilter },
+                      { label: "지우기", disabled: !props.filterOn, onClick: a.clearFilter },
+                      { label: "다시 적용", disabled: !props.filterOn, onClick: a.reapplyFilter },
+                    ]}
+                  />
+                  <Dropdown
+                    label="🔍 찾기 및 선택"
+                    items={[
+                      { label: "찾기...", shortcut: "Ctrl+F", onClick: a.find },
+                      { label: "바꾸기...", shortcut: "Ctrl+H", onClick: a.replace },
+                      { label: "이동...", shortcut: "Ctrl+G", onClick: a.goToDialog },
+                    ]}
+                  />
                 </div>
               </div>
             </Group>
@@ -504,6 +543,11 @@ export function Ribbon(props: Props) {
                 </Btn>
               ))}
             </Group>
+            <Group label="링크">
+              <Btn big title="하이퍼링크 (Ctrl+K)" onClick={a.hyperlink}>
+                <span className="ic">🔗</span>링크
+              </Btn>
+            </Group>
             <Group label="메모">
               <Btn big title="새 메모 (Shift+F2)" onClick={a.newMemo}>
                 <span className="ic">🗨</span>메모
@@ -526,6 +570,14 @@ export function Ribbon(props: Props) {
                 <Dropdown key={label} label={label} items={fnItems(names)} />
               ))}
             </Group>
+            <Group label="정의된 이름">
+              <Btn big title="이름 관리자 (Ctrl+F3)" onClick={a.nameManager}>
+                <span className="ic">🏷</span>이름 관리자
+              </Btn>
+              <Btn big title="선택 영역에 이름을 붙입니다" onClick={a.defineName}>
+                <span className="ic">✎</span>이름 정의
+              </Btn>
+            </Group>
           </>
         )}
         {tab === "데이터" && (
@@ -540,6 +592,47 @@ export function Ribbon(props: Props) {
               <Btn big title="데이터 시트를 CSV·Parquet으로" disabled={!props.onDataSheet} onClick={a.exportTable}>
                 <span className="ic">⇪</span>내보내기
               </Btn>
+            </Group>
+            <Group label="정렬 및 필터">
+              <div className="col">
+                <Btn title="텍스트 오름차순 정렬" onClick={a.sortAsc}>
+                  ↑ 오름차순
+                </Btn>
+                <Btn title="텍스트 내림차순 정렬" onClick={a.sortDesc}>
+                  ↓ 내림차순
+                </Btn>
+              </div>
+              <Btn big title="정렬 기준을 여러 개 지정합니다" onClick={a.sortDialog}>
+                <span className="ic">⇅</span>정렬
+              </Btn>
+              <Btn big title="필터 (Ctrl+Shift+L)" on={props.filterOn} onClick={a.toggleFilter}>
+                <span className="ic">⏷</span>필터
+              </Btn>
+              <div className="col">
+                <Btn title="필터 지우기" disabled={!props.filterOn} onClick={a.clearFilter}>
+                  ⊘ 지우기
+                </Btn>
+                <Btn title="다시 적용" disabled={!props.filterOn} onClick={a.reapplyFilter}>
+                  ⟳ 다시 적용
+                </Btn>
+              </div>
+            </Group>
+            <Group label="데이터 도구">
+              <Btn big title="한 열의 텍스트를 여러 열로 나눕니다" onClick={a.textToColumns}>
+                <span className="ic">⫼</span>텍스트 나누기
+              </Btn>
+              <Btn big title="빠른 채우기 (Ctrl+E)" onClick={a.flashFill}>
+                <span className="ic">⚡</span>빠른 채우기
+              </Btn>
+              <Btn big title="중복된 행을 삭제합니다" onClick={a.removeDuplicates}>
+                <span className="ic">⧉</span>중복된 항목 제거
+              </Btn>
+              <Btn big title="셀에 입력할 수 있는 값을 제한합니다" onClick={a.validation}>
+                <span className="ic">☑</span>데이터 유효성 검사
+              </Btn>
+            </Group>
+            <Group label="예측">
+              <Dropdown label={<span className="dd-big"><span className="ic">❓</span>가상 분석</span>} className="big-dd" items={[{ label: "목표값 찾기...", onClick: a.goalSeek }]} />
             </Group>
             <Group label="쿼리 및 연결">
               <Btn big title="피벗 테이블을 모두 새로 고침 (Ctrl+Alt+F5)" onClick={a.refreshAll}>

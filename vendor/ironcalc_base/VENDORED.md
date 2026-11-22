@@ -13,3 +13,4 @@ CellX에서 바꾼 부분:
 5. `UserModel::undo_depth` 추가 — CellX의 실행 취소 기록(데이터 엔진 수식)을 IronCalc 기록과 맞추기 위해.
 6. `supported_function_names()` 추가 — 수식 자동완성 목록.
 7. `ClipboardCell`의 `text()`, `style()` 접근자 추가와 공개 — 선택하여 붙여넣기(값만, 서식만, 행/열 바꿈).
+8. 이름 정의의 첫 글자에 한글 등 유니코드 문자 허용(Excel과 같음) — `is_valid_a1_identifier`.

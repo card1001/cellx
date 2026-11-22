@@ -19,6 +19,7 @@ export interface CellData {
   numeric?: boolean;
   error?: boolean;
   bridge?: boolean;
+  link?: boolean;
   style?: CellStyle;
 }
 

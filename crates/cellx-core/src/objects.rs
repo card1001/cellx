@@ -84,7 +84,7 @@ fn shift_index(v: i32, at: i32, count: i32) -> Option<i32> {
     }
 }
 
-fn range_a1(r: CellRange) -> String {
+pub(crate) fn range_a1(r: CellRange) -> String {
     let r = r.normalized();
     if r.r0 == r.r1 && r.c0 == r.c1 {
         format!("{}{}", column_name(r.c0), r.r0)
@@ -179,6 +179,18 @@ impl Workbook {
     pub(crate) fn objects_after_sheet_delete(&mut self, sheet: u32) {
         self.charts.retain(|c| c.sheet != sheet);
         self.pivots.retain(|p| p.sheet != sheet);
+        self.filters.retain(|f| f.sheet != sheet);
+        self.validations.retain(|v| v.sheet != sheet);
+        for f in &mut self.filters {
+            if f.sheet > sheet {
+                f.sheet -= 1;
+            }
+        }
+        for v in &mut self.validations {
+            if v.sheet > sheet {
+                v.sheet -= 1;
+            }
+        }
         for c in &mut self.charts {
             if c.sheet > sheet {
                 c.sheet -= 1;
@@ -217,6 +229,34 @@ impl Workbook {
             if p.sheet == sheet {
                 let v = if axis == Axis::Row { &mut p.row } else { &mut p.col };
                 *v = shift_index(*v, at, count).unwrap_or(at).max(1);
+            }
+        }
+        for v in self.validations.iter_mut().filter(|v| v.sheet == sheet) {
+            let parts: Vec<String> = v
+                .range
+                .split_whitespace()
+                .map(|p| shift_range(p, sheet))
+                .filter(|p| !p.contains("#REF!") && !p.is_empty())
+                .collect();
+            v.range = parts.join(" ");
+        }
+        self.validations.retain(|v| !v.range.is_empty());
+        for f in self.filters.iter_mut().filter(|f| f.sheet == sheet) {
+            let a1 = shift_range(&range_a1(f.range), sheet);
+            match parse_range(&a1) {
+                Some((_, r0, c0, r1, c1)) => {
+                    let old_c0 = f.range.c0;
+                    f.range = CellRange { r0, c0, r1, c1 };
+                    if axis == Axis::Column {
+                        let delta = c0 - old_c0;
+                        for cf in &mut f.columns {
+                            cf.col = shift_index(cf.col, at, count).unwrap_or(-1);
+                        }
+                        let _ = delta;
+                        f.columns.retain(|cf| cf.col > 0);
+                    }
+                }
+                None => f.columns.clear(),
             }
         }
         if let Some(ws) = self.model_mut().workbook.worksheets.get_mut(sheet as usize) {
@@ -411,6 +451,16 @@ impl Workbook {
                     .collect();
             }
         }
+        for f in &self.filters {
+            if let Some(p) = parts.get_mut(f.sheet as usize) {
+                p.filter = Some(f.clone());
+            }
+        }
+        for v in &self.validations {
+            if let Some(p) = parts.get_mut(v.sheet as usize) {
+                p.validations.push(v.clone());
+            }
+        }
         for c in &self.charts {
             let Ok(data) = self.resolve_chart(c) else { continue };
             let Some(p) = parts.get_mut(c.sheet as usize) else { continue };
@@ -425,6 +475,20 @@ impl Workbook {
             });
         }
         parts
+    }
+
+    /// Objects IronCalc does not read from xlsx: charts, AutoFilter, data validation.
+    pub(crate) fn import_extras(&mut self, xlsx: &[u8]) {
+        self.import_charts(xlsx);
+        // CellX writes the AutoFilter name itself on save.
+        self.model_mut().workbook.defined_names.retain(|d| !d.name.eq_ignore_ascii_case("_xlnm._FilterDatabase"));
+        for (_, filter, validations) in ooxml::read_sheet_rules(xlsx) {
+            if let Some(f) = filter {
+                self.filters.retain(|x| x.sheet != f.sheet);
+                self.filters.push(f);
+            }
+            self.validations.extend(validations.into_iter().filter(|v| v.kind != crate::datatools::ValidationKind::Any));
+        }
     }
 
     /// Charts read from an xlsx become CellX charts over the same cells.
@@ -1207,6 +1271,30 @@ mod tests {
         line.anchor.row = 17;
         wb.update_chart(line).unwrap();
         wb.set_memo(0, 2, 1, Some("본사 포함")).unwrap();
+        wb.toggle_auto_filter(0, CellRange { r0: 1, c0: 1, r1: 5, c1: 3 }).unwrap();
+        wb.set_filter_column(
+            0,
+            crate::datatools::ColumnFilter { col: 1, values: Some(vec!["서울".into()]), conditions: vec![], and: true },
+        )
+        .unwrap();
+        let v = crate::datatools::Validation {
+            sheet: 0,
+            range: String::new(),
+            kind: crate::datatools::ValidationKind::List,
+            op: crate::datatools::ValidationOp::Between,
+            formula1: "\"A,B,C\"".into(),
+            formula2: String::new(),
+            allow_blank: true,
+            in_cell_dropdown: true,
+            show_input: false,
+            input_title: String::new(),
+            input_message: String::new(),
+            show_error: true,
+            error_style: crate::datatools::ErrorStyle::Stop,
+            error_title: String::new(),
+            error_message: String::new(),
+        };
+        wb.set_validation(0, CellRange { r0: 2, c0: 2, r1: 5, c1: 2 }, v).unwrap();
         wb.save_xlsx(std::path::Path::new(&path)).unwrap();
     }
 

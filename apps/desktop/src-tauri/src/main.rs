@@ -17,6 +17,7 @@ fn main() {
     };
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .manage(commands::AppState(Mutex::new(book)))
         .invoke_handler(tauri::generate_handler![
             commands::book_info,
@@ -82,6 +83,33 @@ fn main() {
             commands::save_pivot,
             commands::refresh_pivots,
             commands::delete_pivot,
+            commands::sort_range,
+            commands::toggle_auto_filter,
+            commands::auto_filter,
+            commands::set_filter_column,
+            commands::clear_filters,
+            commands::apply_filter,
+            commands::filter_values,
+            commands::text_to_columns,
+            commands::remove_duplicates,
+            commands::validation_at,
+            commands::set_validation,
+            commands::clear_validation,
+            commands::validate_input,
+            commands::list_items,
+            commands::flash_fill,
+            commands::replace_all,
+            commands::replace_in_cell,
+            commands::names,
+            commands::add_name,
+            commands::update_name,
+            commands::delete_name,
+            commands::link_at,
+            commands::set_link,
+            commands::delete_link,
+            commands::goal_seek,
+            commands::open_link,
+            commands::print_page,
         ])
         .run(tauri::generate_context!())
         .expect("CellX를 실행하지 못했습니다");

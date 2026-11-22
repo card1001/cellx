@@ -9,6 +9,7 @@
 pub mod bridge;
 pub mod criteria;
 pub mod data;
+pub mod datatools;
 pub mod error;
 pub mod extras;
 pub mod objects;

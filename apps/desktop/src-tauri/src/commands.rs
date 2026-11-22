@@ -470,3 +470,185 @@ pub fn refresh_pivots(state: State<'_, AppState>) -> CmdResult<RecalcStats> {
 pub fn delete_pivot(state: State<'_, AppState>, id: u32) -> CmdResult<RecalcStats> {
     edit(&state, |wb| wb.delete_pivot(id))
 }
+
+// ---------------------------------------------------------------- data tools
+
+use cellx_core::datatools::{
+    AutoFilter, ColumnFilter as SheetColumnFilter, DuplicateResult, FilterValue, GoalSeekResult, LinkView, NameView, SortKey, SplitOptions,
+    Validation, ValidationFailure,
+};
+
+#[tauri::command]
+pub fn sort_range(state: State<'_, AppState>, sheet: u32, range: CellRange, keys: Vec<SortKey>, has_header: bool) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.sort_range(sheet, range, &keys, has_header))
+}
+
+#[tauri::command]
+pub fn toggle_auto_filter(state: State<'_, AppState>, sheet: u32, range: CellRange) -> CmdResult<Option<AutoFilter>> {
+    edit(&state, |wb| wb.toggle_auto_filter(sheet, range))
+}
+
+#[tauri::command]
+pub fn auto_filter(state: State<'_, AppState>, sheet: u32) -> CmdResult<Option<AutoFilter>> {
+    read(&state, |wb| Ok(wb.auto_filter(sheet)))
+}
+
+#[tauri::command]
+pub fn set_filter_column(state: State<'_, AppState>, sheet: u32, filter: SheetColumnFilter) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.set_filter_column(sheet, filter))
+}
+
+#[tauri::command]
+pub fn clear_filters(state: State<'_, AppState>, sheet: u32) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.clear_filters(sheet))
+}
+
+#[tauri::command]
+pub fn apply_filter(state: State<'_, AppState>, sheet: u32) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.apply_filter(sheet))
+}
+
+#[tauri::command]
+pub fn filter_values(state: State<'_, AppState>, sheet: u32, col: i32) -> CmdResult<Vec<FilterValue>> {
+    read(&state, |wb| wb.filter_values(sheet, col))
+}
+
+#[tauri::command]
+pub fn text_to_columns(state: State<'_, AppState>, sheet: u32, range: CellRange, options: SplitOptions) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.text_to_columns(sheet, range, &options))
+}
+
+#[tauri::command]
+pub fn remove_duplicates(state: State<'_, AppState>, sheet: u32, range: CellRange, cols: Vec<i32>, has_header: bool) -> CmdResult<DuplicateResult> {
+    edit(&state, |wb| wb.remove_duplicates(sheet, range, &cols, has_header))
+}
+
+#[tauri::command]
+pub fn validation_at(state: State<'_, AppState>, sheet: u32, row: i32, col: i32) -> CmdResult<Option<Validation>> {
+    read(&state, |wb| Ok(wb.validation_at(sheet, row, col)))
+}
+
+#[tauri::command]
+pub fn set_validation(state: State<'_, AppState>, sheet: u32, range: CellRange, validation: Validation) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.set_validation(sheet, range, validation))
+}
+
+#[tauri::command]
+pub fn clear_validation(state: State<'_, AppState>, sheet: u32, range: CellRange) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.clear_validation(sheet, range))
+}
+
+#[tauri::command]
+pub fn validate_input(state: State<'_, AppState>, sheet: u32, row: i32, col: i32, input: String) -> CmdResult<Option<ValidationFailure>> {
+    read(&state, |wb| Ok(wb.validate_input(sheet, row, col, &input)))
+}
+
+#[tauri::command]
+pub fn list_items(state: State<'_, AppState>, sheet: u32, row: i32, col: i32) -> CmdResult<Option<Vec<String>>> {
+    read(&state, |wb| Ok(wb.list_items(sheet, row, col)))
+}
+
+#[tauri::command]
+pub fn flash_fill(state: State<'_, AppState>, sheet: u32, row: i32, col: i32) -> CmdResult<(usize, RecalcStats)> {
+    edit(&state, |wb| wb.flash_fill(sheet, row, col))
+}
+
+#[tauri::command]
+pub fn replace_all(
+    state: State<'_, AppState>,
+    sheet: Option<u32>,
+    find: String,
+    replace: String,
+    match_case: bool,
+    whole_cell: bool,
+) -> CmdResult<(usize, RecalcStats)> {
+    edit(&state, |wb| wb.replace_all(sheet, &find, &replace, match_case, whole_cell))
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub fn replace_in_cell(
+    state: State<'_, AppState>,
+    sheet: u32,
+    row: i32,
+    col: i32,
+    find: String,
+    replace: String,
+    match_case: bool,
+    whole_cell: bool,
+) -> CmdResult<bool> {
+    edit(&state, |wb| wb.replace_in_cell(sheet, row, col, &find, &replace, match_case, whole_cell))
+}
+
+#[tauri::command]
+pub fn names(state: State<'_, AppState>) -> CmdResult<Vec<NameView>> {
+    read(&state, |wb| Ok(wb.names()))
+}
+
+#[tauri::command]
+pub fn add_name(state: State<'_, AppState>, name: String, scope: Option<u32>, formula: String) -> CmdResult<()> {
+    edit(&state, |wb| wb.add_name(&name, scope, &formula))
+}
+
+#[tauri::command]
+pub fn update_name(
+    state: State<'_, AppState>,
+    name: String,
+    scope: Option<u32>,
+    new_name: String,
+    new_scope: Option<u32>,
+    formula: String,
+) -> CmdResult<()> {
+    edit(&state, |wb| wb.update_name(&name, scope, &new_name, new_scope, &formula))
+}
+
+#[tauri::command]
+pub fn delete_name(state: State<'_, AppState>, name: String, scope: Option<u32>) -> CmdResult<()> {
+    edit(&state, |wb| wb.delete_name(&name, scope))
+}
+
+#[tauri::command]
+pub fn link_at(state: State<'_, AppState>, sheet: u32, row: i32, col: i32) -> CmdResult<Option<LinkView>> {
+    read(&state, |wb| wb.link_at(sheet, row, col))
+}
+
+#[tauri::command]
+pub fn set_link(
+    state: State<'_, AppState>,
+    sheet: u32,
+    row: i32,
+    col: i32,
+    target: String,
+    internal: bool,
+    text: Option<String>,
+) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.set_link(sheet, row, col, &target, internal, text.as_deref()))
+}
+
+#[tauri::command]
+pub fn delete_link(state: State<'_, AppState>, sheet: u32, row: i32, col: i32) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.delete_link(sheet, row, col))
+}
+
+#[tauri::command]
+pub fn goal_seek(state: State<'_, AppState>, sheet: u32, set_cell: (i32, i32), target: f64, changing: (i32, i32)) -> CmdResult<GoalSeekResult> {
+    edit(&state, |wb| wb.goal_seek(sheet, set_cell, target, changing))
+}
+
+/// Opens a hyperlink in the default browser or mail app. Only web and mail links:
+/// a link in a file must never start a program.
+#[tauri::command]
+pub fn open_link(app: tauri::AppHandle, url: String) -> CmdResult<()> {
+    use tauri_plugin_opener::OpenerExt;
+    let lower = url.trim().to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")) {
+        return Err("웹 주소(http, https)와 메일 주소(mailto)만 열 수 있습니다".into());
+    }
+    app.opener().open_url(url.trim(), None::<&str>).map_err(err)
+}
+
+/// Ctrl+P: the system print dialog (PDF is one of its printers).
+#[tauri::command]
+pub fn print_page(window: tauri::WebviewWindow) -> CmdResult<()> {
+    window.print().map_err(err)
+}
