@@ -361,7 +361,7 @@ input.tiny { width: 28px !important; min-width: 0 !important; height: 20px; marg
 .eval-last { font-style: italic; }
 
 /* 도형, 텍스트 상자 */
-.shape-box { position: absolute; z-index: 3; cursor: move; }
+.shape-box { position: absolute; z-index: 3; cursor: move; pointer-events: auto; }
 .shape-box.line { pointer-events: none; }
 .shape-box.line .shape-svg line { pointer-events: stroke; stroke-linecap: round; }
 .shape-box.line .shape-svg { pointer-events: none; }
@@ -381,11 +381,11 @@ input.tiny { width: 28px !important; min-width: 0 !important; height: 20px; marg
 .shape-menu button:hover { border-color: #9aa3e8; background: #eef0ff; }
 
 /* 스파크라인 */
-.sparkline-cell { position: absolute; pointer-events: none; z-index: 1; }
+.sparkline-cell { position: absolute; pointer-events: none; }
 .sparkline-svg { display: block; }
 
 /* 슬라이서 */
-.slicer { position: absolute; z-index: 3; background: #fff; border: 1px solid #c8c8c8; box-shadow: 0 1px 3px rgba(0,0,0,.15); display: flex; flex-direction: column; overflow: hidden; }
+.slicer { position: absolute; z-index: 3; pointer-events: auto; background: #fff; border: 1px solid #c8c8c8; box-shadow: 0 1px 3px rgba(0,0,0,.15); display: flex; flex-direction: column; overflow: hidden; }
 .slicer.selected { outline: 2px solid #5a64d6; }
 .slicer-head { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; font-weight: 600; cursor: move; border-bottom: 1px solid #e3e3e3; }
 .slicer-clear { border: none; background: none; cursor: pointer; font-size: 14px; color: #5a64d6; }
@@ -403,7 +403,7 @@ input.tiny { width: 28px !important; min-width: 0 !important; height: 20px; marg
 .scenario-main { display: flex; gap: 8px; }
 .scenario-list { flex: 1; min-height: 150px; max-height: 220px; overflow: auto; border: 1px solid #c8c8c8; }
 .scenario-list .list-item { padding: 2px 6px; cursor: default; }
-.scenario-list .list-item.on { background: #dfe3ff; }
+.scenario-list .list-item.on { background: #dfe3ff; color: #1f1f1f; }
 .scenario-buttons { display: flex; flex-direction: column; gap: 6px; }
 .scenario-buttons button { min-width: 90px; }
 .scenario-values { max-height: 260px; overflow: auto; }

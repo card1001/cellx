@@ -49,6 +49,7 @@ pub use crate::constants::ROW_HEIGHT_FACTOR;
 mod actions;
 pub mod audit;
 mod structured;
+mod parallel;
 mod arithmetic;
 mod cast;
 mod conditional_formatting;

@@ -435,3 +435,90 @@ fn columns_inserted_and_deleted_move_references_like_excel() {
     assert_eq!(input(&wb, 0, 2, 3), "=$C$1+B1");
     check(&mut wb, "delete undone");
 }
+
+#[test]
+fn spilled_arrays_recalculate_incrementally() {
+    let mut wb = Workbook::new().unwrap();
+    wb.add_sheet().unwrap();
+    let mut cells = Vec::new();
+    for r in 1..=10 {
+        cells.push((r, 1, format!("{}", (r * 7) % 11)));
+        cells.push((r, 2, format!("{}", r)));
+    }
+    // Arrays: a sort of column A, a filter, a sequence, and formulas reading their areas.
+    cells.push((1, 4, "=SORT(A1:A10)".into()));
+    cells.push((1, 5, "=FILTER(B1:B10,A1:A10>5)".into()));
+    cells.push((1, 6, "=SEQUENCE(3,2)".into()));
+    cells.push((12, 1, "=SUM(D1:D10)".into()));
+    cells.push((13, 1, "=D1+D10".into()));
+    cells.push((14, 1, "=COUNT(E1:E10)".into()));
+    cells.push((15, 1, "=SUM(D1#)".into()));
+    cells.push((16, 1, "=G3*10".into()));
+    cells.push((17, 1, "=B3*2".into()));
+    wb.set_inputs(0, &cells).unwrap();
+    wb.set_input(1, 1, 1, "=Sheet1!D2*100").unwrap();
+    check(&mut wb, "start");
+    // A value the sort reads (the filter keeps its size): readers of the area follow.
+    let st = wb.set_input(0, 3, 1, "8").unwrap();
+    check(&mut wb, "sorted value changed");
+    assert!(st.evaluated.is_some(), "an edit inside the sort's inputs stays incremental");
+    // A value nothing spilled reads: only its own readers run.
+    let st = wb.set_input(0, 3, 2, "30").unwrap();
+    check(&mut wb, "unrelated value changed");
+    assert!(st.evaluated.is_some_and(|n| n < 8), "{:?}", st.evaluated);
+    // The filter grows: its area changes, which a full evaluation handles.
+    wb.set_input(0, 1, 1, "9").unwrap();
+    check(&mut wb, "filter grows");
+    // Something typed into an area blocks it; clearing it frees it again.
+    wb.set_input(0, 2, 7, "x").unwrap();
+    check(&mut wb, "blocked");
+    assert_eq!(wb.model().get_formatted_cell_value(0, 1, 6).unwrap(), "#SPILL!");
+    wb.clear_contents(0, cellx_core::workbook::CellRange { r0: 2, c0: 7, r1: 2, c1: 7 }).unwrap();
+    check(&mut wb, "freed");
+    assert_eq!(wb.model().get_formatted_cell_value(0, 3, 7).unwrap(), "6");
+    // A new array, then an array that stops spilling.
+    wb.set_input(0, 20, 4, "=SEQUENCE(2)").unwrap();
+    check(&mut wb, "new array");
+    wb.set_input(0, 20, 4, "=1+1").unwrap();
+    check(&mut wb, "array gone");
+    let st = wb.set_input(0, 10, 2, "11").unwrap();
+    check(&mut wb, "after arrays changed");
+    assert!(st.evaluated.is_some());
+}
+
+#[test]
+fn random_edits_next_to_arrays_match_full_recalculation() {
+    let mut wb = Workbook::new().unwrap();
+    wb.add_sheet().unwrap();
+    let mut cells = Vec::new();
+    for r in 1..=12 {
+        cells.push((r, 1, format!("{}", (r * 5) % 9)));
+        cells.push((r, 2, format!("=A{r}*2")));
+    }
+    cells.push((1, 4, "=SORT(B1:B12,1,-1)".into()));
+    cells.push((1, 5, "=UNIQUE(A1:A12)".into()));
+    cells.push((1, 6, "=TRANSPOSE(A1:A3)".into()));
+    cells.push((14, 1, "=SUM(D1:D12)+SUM(E1:E12)".into()));
+    cells.push((15, 1, "=INDEX(D1#,2)".into()));
+    cells.push((16, 1, "=F1+G1+H1".into()));
+    cells.push((17, 1, "=XLOOKUP(4,A1:A12,B1:B12)".into()));
+    wb.set_inputs(0, &cells).unwrap();
+    check(&mut wb, "start");
+    let mut seed: u64 = 12345;
+    let mut next = |m: u64| {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        (seed >> 33) % m
+    };
+    for i in 0..150 {
+        let row = next(14) as i32 + 1;
+        let col = [1, 1, 1, 2, 7, 4, 5][next(7) as usize];
+        let input = match next(6) {
+            0 => String::new(),
+            1 => "=SEQUENCE(2)".into(),
+            2 => format!("=A{}+1", next(12) + 1),
+            _ => format!("{}", next(9)),
+        };
+        wb.set_input(0, row, col, &input).unwrap();
+        check(&mut wb, &format!("edit {i}: {}{row} = {input}", ["", "A", "B", "C", "D", "E", "F", "G"][col as usize]));
+    }
+}

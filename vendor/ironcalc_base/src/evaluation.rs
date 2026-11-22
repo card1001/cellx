@@ -424,6 +424,14 @@ pub(crate) struct Evaluation {
     /// CellX: during an incremental pass, the formulas to evaluate. Every other
     /// formula keeps the value it has.
     pub(crate) only: Option<HashSet<CellKey, KeyBuild>>,
+    /// CellX: threads a full evaluation may use (see `parallel.rs`).
+    pub(crate) threads: usize,
+    /// Threads the last full evaluation used.
+    pub(crate) last_threads: usize,
+    /// How long the last full evaluation took on one thread (ms, estimated
+    /// for a parallel one).
+    pub(crate) last_full_ms: f64,
+    pub(crate) parallel_min_ms: f64,
     /// CellX: which formulas read which cells (see `dependencies`).
     pub(crate) deps: Option<crate::dependencies::DepIndex>,
     /// CellX: how many formulas the last evaluation ran, and whether it was incremental.
@@ -481,6 +489,10 @@ impl Default for Evaluation {
             stack_base: 0,
             unwinding: false,
             only: None,
+            threads: 1,
+            last_threads: 1,
+            last_full_ms: 0.0,
+            parallel_min_ms: crate::parallel::MIN_SERIAL_MS,
             deps: None,
             last_partial: None,
             lookup_cache: HashMap::new(),
@@ -518,6 +530,11 @@ impl<'a> Model<'a> {
     /// is marked, so there is nothing of it to read or to contradict.
     pub fn evaluate(&mut self) {
         self.evaluation.last_partial = None;
+        self.evaluation.last_threads = 1;
+        if self.evaluate_in_parallel() {
+            return;
+        }
+        let started = std::time::Instant::now();
         self.sync_anchor_order();
         // Every pass starts from the same sheet: what an abandoned pass wrote
         // is undone. This is what makes a pass a function of the anchor order.
@@ -545,6 +562,7 @@ impl<'a> Model<'a> {
         }
         self.evaluation.restarts_in_last_evaluation = log.restarts;
         self.evaluate_conditional_formatting();
+        self.evaluation.last_full_ms = started.elapsed().as_secs_f64() * 1000.0;
     }
 
     /// CellX: forgets which formulas read which cells. Call it after anything
@@ -569,19 +587,18 @@ impl<'a> Model<'a> {
             Some(d) if d.still_valid(self) => d,
             _ => crate::dependencies::DepIndex::build(self),
         };
+        // CellX: spilled arrays. What they cover, before the edit.
+        let areas = self.array_areas(&deps);
         for c in changed {
             deps.update_cell(self, *c);
         }
-        if !deps.arrays.is_empty() {
-            self.evaluate();
-            // Arrays that no longer spill stop forcing full evaluations.
-            deps.arrays.retain(|&(sheet, row, column)| {
-                matches!(
-                    self.fetch_cell(CellReferenceIndex { sheet, row, column }).as_deref(),
-                    Some(Cell::ArrayFormula { r, kind, .. }) if *r != (1, 1) || *kind == ArrayKind::Cse
-                )
-            });
+        // An edit inside another array's area blocks or frees it: that, and an
+        // array that could not spill (#SPILL!) and may now, is the full
+        // evaluation's business.
+        let inside = changed.iter().any(|&(s, r, c)| areas.iter().any(|(a, (w, h))| a.0 == s && (a.1, a.2) != (r, c) && r >= a.1 && r < a.1 + h && c >= a.2 && c < a.2 + w));
+        if inside || self.has_blocked_arrays() {
             self.evaluation.deps = Some(deps);
+            self.evaluate();
             return;
         }
         let total = deps.formula_count();
@@ -593,44 +610,119 @@ impl<'a> Model<'a> {
             }
             queue.push(*c);
         }
+        // An array that runs again rewrites its whole area: whatever reads a
+        // cell of it runs again too.
+        let mut spread: HashSet<CellKey, KeyBuild> = HashSet::default();
+        for d in dirty.clone() {
+            if let Some((w, h)) = areas.iter().find(|(a, _)| *a == d).map(|(_, s)| *s) {
+                if spread.insert(d) {
+                    for r in d.1..d.1 + h {
+                        for c in d.2..d.2 + w {
+                            queue.push((d.0, r, c));
+                        }
+                    }
+                }
+            }
+        }
         let limit = total / 2 + 64;
         while let Some(cell) = queue.pop() {
-            deps.dependents(cell, |d| {
+            let mut found = Vec::new();
+            deps.dependents(cell, |d| found.push(d));
+            for d in found {
                 if dirty.insert(d) {
                     queue.push(d);
+                    if let Some((w, h)) = areas.iter().find(|(a, _)| *a == d).map(|(_, s)| *s) {
+                        if spread.insert(d) {
+                            for r in d.1..d.1 + h {
+                                for c in d.2..d.2 + w {
+                                    if (r, c) != (d.1, d.2) {
+                                        queue.push((d.0, r, c));
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
-            });
-            if dirty.len() > limit {
+            }
+            if dirty.len() > limit || queue.len() > 4 * limit + 100_000 {
                 break;
             }
         }
-        if dirty.len() > limit {
+        if dirty.len() > limit || queue.len() > 4 * limit + 100_000 {
             self.evaluation.deps = Some(deps);
             self.evaluate();
             return;
         }
         self.evaluation.deps = Some(deps);
-        let mut order: Vec<CellKey> = dirty.iter().copied().collect();
+        // The arrays first, in the order complete evaluations found for them,
+        // so that whatever reads their areas finds them already run.
+        let mut order: Vec<CellKey> = dirty.iter().copied().filter(|k| !spread.contains(k)).collect();
         order.sort_unstable();
+        let mut first: Vec<CellKey> = self
+            .evaluation
+            .anchor_order
+            .iter()
+            .map(|a| (a.sheet, a.row, a.column))
+            .filter(|k| spread.contains(k))
+            .collect();
+        let mut rest: Vec<CellKey> = spread.iter().copied().filter(|k| !first.contains(k)).collect();
+        rest.sort_unstable();
+        first.extend(rest);
+        first.extend(order);
+        let order = first;
         let count = order.len();
+        let before: Vec<(CellKey, Option<(i32, i32)>)> = order.iter().map(|k| (*k, self.array_size(*k))).collect();
         let restart = self.run_partial_pass(order.clone(), dirty);
-        // A formula that now returns an array spills over other cells, which
-        // formulas outside this pass may read: that is the full evaluation's job.
-        let spilled = order.iter().any(|&(sheet, row, column)| {
-            matches!(
-                self.fetch_cell(CellReferenceIndex { sheet, row, column }).as_deref(),
-                Some(Cell::ArrayFormula { r, kind, .. }) if *r != (1, 1) || *kind == ArrayKind::Cse
-            )
-        });
-        if restart.is_some() || spilled {
+        // A formula that spills now, or over another area than before, writes
+        // cells formulas outside this pass may read: that is the full
+        // evaluation's job.
+        let reshaped = before.iter().any(|(k, size)| self.array_size(*k) != *size);
+        if restart.is_some() || reshaped || self.has_blocked_arrays() {
             self.evaluate();
             return;
+        }
+        // Arrays that no longer spill are ordinary formulas again.
+        let gone: Vec<CellKey> = self.evaluation.deps.as_ref().map(|d| d.arrays.iter().copied().filter(|k| self.array_size(*k).is_none()).collect()).unwrap_or_default();
+        if let Some(d) = self.evaluation.deps.as_mut() {
+            for k in gone {
+                d.arrays.remove(&k);
+            }
         }
         self.evaluate_conditional_formatting();
         self.evaluation.last_partial = Some(count);
     }
 
-    fn run_partial_pass(
+    /// The area of the array anchored at `key` (width, height), when it covers
+    /// more than its own cell or is a CSE array.
+    fn array_size(&self, key: CellKey) -> Option<(i32, i32)> {
+        let (sheet, row, column) = key;
+        match self.fetch_cell(CellReferenceIndex { sheet, row, column }).as_deref() {
+            Some(Cell::ArrayFormula { r, kind, .. }) if *r != (1, 1) || *kind == ArrayKind::Cse => Some(*r),
+            _ => None,
+        }
+    }
+
+    /// Every array the index knows of, with its area now.
+    fn array_areas(&self, deps: &crate::dependencies::DepIndex) -> Vec<(CellKey, (i32, i32))> {
+        deps.arrays.iter().filter_map(|k| self.array_size(*k).map(|s| (*k, s))).collect()
+    }
+
+    /// Some dynamic array holds #SPILL! (it may spill once its area is free),
+    /// or was reset by an edit inside its area and has not run since.
+    fn has_blocked_arrays(&self) -> bool {
+        self.evaluation.anchor_order.iter().any(|a| {
+            matches!(
+                self.fetch_cell(*a).as_deref(),
+                Some(Cell::ArrayFormula {
+                    kind: ArrayKind::Dynamic,
+                    v: crate::types::FormulaValue::Error { ei: Error::SPILL, .. } | crate::types::FormulaValue::Unevaluated,
+                    ..
+                })
+            )
+        })
+    }
+
+    pub(crate) fn run_partial_pass(
         &mut self,
         order: Vec<CellKey>,
         only: HashSet<CellKey, KeyBuild>,
@@ -789,7 +881,7 @@ impl<'a> Model<'a> {
     /// Brings `anchor_order` in line with the dynamic anchors that exist now:
     /// anchors that are gone are dropped, new ones are appended in natural
     /// order, the rest keep their relative order.
-    fn sync_anchor_order(&mut self) {
+    pub(crate) fn sync_anchor_order(&mut self) {
         let current = self.dynamic_anchors_in_natural_order();
         let current_set: HashSet<CellReferenceIndex> = current.iter().copied().collect();
         let order = &mut self.evaluation.anchor_order;
@@ -933,6 +1025,13 @@ impl<'a> Model<'a> {
             (ArrayKind::Dynamic, Some(CellState::Evaluating)) => {
                 self.record_seen(cell_reference, Seen::Empty);
                 CalcResult::EmptyCell
+            }
+            // CellX: an incremental pass leaves the anchors it does not run as
+            // the last complete evaluation left them, cells and all.
+            (ArrayKind::Dynamic, None)
+                if self.evaluation.only.as_ref().is_some_and(|o| !o.contains(&key(anchor_reference))) =>
+            {
+                self.stored_value(cell_reference)
             }
             // Left over from a previous evaluation: the anchor should have run
             // before anyone read its cells. Restart with it before the reader.

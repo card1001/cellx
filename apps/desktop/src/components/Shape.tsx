@@ -235,10 +235,21 @@ export function ShapeLayer(props: {
     };
   });
 
+  const lastDown = useRef<{ id: number; at: number } | null>(null);
   const begin = (s: Shape, mode: string, e: React.MouseEvent) => {
     if (e.button !== 0 || props.editing === s.id) return;
     e.stopPropagation();
     e.preventDefault();
+    // A second press soon after the first types into the shape (the grid
+    // takes focus between them, so the browser's dblclick is not reliable).
+    const now = Date.now();
+    const last = lastDown.current;
+    lastDown.current = { id: s.id, at: now };
+    if (mode === "move" && last && last.id === s.id && now - last.at < 450 && !isLine(s.kind)) {
+      lastDown.current = null;
+      props.onEdit(s.id);
+      return;
+    }
     props.onSelect(s.id);
     drag.current = { mode, x: e.clientX, y: e.clientY, start: s };
   };

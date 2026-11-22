@@ -389,6 +389,8 @@ impl Workbook {
         um.pause_evaluation();
         // No collaboration: the change queue would only grow and cost a copy of every change.
         um.set_send_queue_enabled(false);
+        // Full recalculations share independent formulas out over the cores.
+        um.get_model_mut().set_evaluation_threads(calc_threads());
         Ok(Workbook {
             um,
             data,
@@ -427,6 +429,16 @@ impl Workbook {
 
     pub(crate) fn bridges(&self) -> &BridgeMap {
         &self.bridges
+    }
+
+    /// Threads for full recalculations (1: one thread).
+    pub fn set_calc_threads(&mut self, threads: usize) {
+        self.um.get_model_mut().set_evaluation_threads(threads);
+    }
+
+    /// Share out a full recalculation only when the last one took at least `ms`.
+    pub fn set_parallel_threshold_ms(&mut self, ms: f64) {
+        self.um.get_model_mut().set_parallel_threshold_ms(ms);
     }
 
     pub fn model(&self) -> &Model<'_> {
@@ -1646,6 +1658,14 @@ impl Workbook {
     pub fn bridge_formula_count(&self) -> usize {
         self.bridges.len()
     }
+}
+
+/// Threads for full recalculations: the cores, at most 8; `CELLX_THREADS` overrides.
+pub fn calc_threads() -> usize {
+    if let Some(n) = std::env::var("CELLX_THREADS").ok().and_then(|v| v.parse::<usize>().ok()) {
+        return n.max(1);
+    }
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(8)
 }
 
 pub(crate) fn quote_sheet(name: &str) -> String {

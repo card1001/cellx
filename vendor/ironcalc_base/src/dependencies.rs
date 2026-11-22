@@ -91,6 +91,9 @@ pub(crate) struct DepIndex {
     wide: Vec<(Area, CellKey)>,
     pub(crate) volatile: HashSet<CellKey, KeyBuild>,
     pub(crate) arrays: HashSet<CellKey, KeyBuild>,
+    /// CellX: the split for parallel evaluation (see `parallel.rs`), until a
+    /// formula changes.
+    pub(crate) groups: Option<(Vec<Vec<CellKey>>, Vec<CellKey>)>,
     /// The parsed formulas the index was built against: the address of the
     /// first one of each sheet (0 for a sheet that had none). New formulas are
     /// only ever appended, so a sheet whose first one changed was re-parsed
@@ -217,6 +220,10 @@ pub(crate) fn collect(node: &Node, out: &mut Vec<RelArea>) -> bool {
 }
 
 impl DepIndex {
+    pub(crate) fn formula_keys(&self) -> Vec<CellKey> {
+        self.formulas.keys().copied().collect()
+    }
+
     pub(crate) fn formula_count(&self) -> usize {
         self.formulas.len()
     }
@@ -362,6 +369,9 @@ impl DepIndex {
 
     /// Brings the entry of one cell in line with what the cell holds now.
     pub(crate) fn update_cell(&mut self, model: &Model, key: CellKey) {
+        if self.formulas.contains_key(&key) || model.workbook.worksheets.get(key.0 as usize).and_then(|w| w.sheet_data.cell(key.1, key.2)).is_some_and(|c| FormulaCell::of(&c).is_some()) {
+            self.groups = None;
+        }
         self.remove(key);
         let (sheet, row, column) = key;
         let formula = model
