@@ -237,6 +237,13 @@ export function Ribbon(props: Props) {
                 <span className="ic">🖨</span>인쇄
               </Btn>
             </Group>
+            <Group label="정보">
+              <div className="about">
+                <b>CellX</b>
+                <span>버전 {__APP_VERSION__}</span>
+                <span>엑셀 호환 고성능 스프레드시트</span>
+              </div>
+            </Group>
           </>
         )}
         {tab === "홈" && (

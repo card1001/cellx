@@ -5,6 +5,7 @@
 //! cellx gen-data --rows 1000000 -o x.csv  합성 주문 데이터 생성
 //! cellx bench-data x.csv                  데이터 시트 + 수식→SQL 성능 측정
 //! cellx bench-calc --rows 25000           계산 엔진 성능 측정
+//! cellx bench-sheet --rows 100000         큰 시트 작업(저장·열기·정렬·필터…) 측정
 //! cellx eval <파일.xlsx> <셀>             파일을 열어 한 셀의 값 확인
 //! ```
 
@@ -64,6 +65,14 @@ enum Command {
         #[arg(long, default_value_t = 25_000)]
         rows: i32,
     },
+    /// 큰 일반 시트에서 저장·열기·정렬·필터·행 삽입 등 작업 시간을 측정합니다.
+    BenchSheet {
+        #[arg(long, default_value_t = 100_000)]
+        rows: i32,
+        /// 측정용 xlsx를 잠시 저장할 폴더
+        #[arg(long, default_value = ".")]
+        dir: PathBuf,
+    },
     /// CSV를 데이터 시트로 넣은 예제 프로젝트(.cellx)를 만듭니다.
     MakeDemo {
         csv: PathBuf,
@@ -98,6 +107,7 @@ fn main() -> Result<()> {
         }
         Command::BenchData { csv, runs } => bench::bench_data(&csv, runs)?,
         Command::BenchCalc { rows } => bench::bench_calc(rows)?,
+        Command::BenchSheet { rows, dir } => bench::bench_sheet(rows, &dir)?,
         Command::MakeDemo { csv, out } => bench::make_demo(&csv, &out)?,
         Command::Eval { file, cell } => {
             let mut wb = cellx_core::Workbook::open_xlsx(&file)?;

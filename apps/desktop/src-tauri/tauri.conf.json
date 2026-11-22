@@ -38,7 +38,34 @@
       "icons/icon.ico"
     ],
     "fileAssociations": [
-      { "ext": ["cellx"], "name": "CellX 프로젝트", "role": "Editor" }
-    ]
+      {
+        "ext": [
+          "cellx"
+        ],
+        "name": "CellX 프로젝트",
+        "role": "Editor"
+      }
+    ],
+    "copyright": "© 2026 card1001",
+    "longDescription": "Excel과 호환되는 고성능 스프레드시트. 수식·서식·차트·피벗을 xlsx로 그대로 읽고 저장하며, 큰 데이터는 DuckDB로 계산합니다.",
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "wix": {
+        "language": [
+          "ko-KR"
+        ]
+      },
+      "nsis": {
+        "languages": [
+          "Korean"
+        ],
+        "installMode": "currentUser",
+        "startMenuFolder": "CellX",
+        "installerIcon": "icons/icon.ico"
+      }
+    }
   }
 }

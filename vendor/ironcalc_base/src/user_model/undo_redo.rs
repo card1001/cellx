@@ -255,7 +255,9 @@ impl<'a> UserModel<'a> {
                     for (i, row_data) in old_data.iter().enumerate() {
                         let r = *row + i as i32;
                         if let Some(row_style) = row_data.row.clone() {
-                            worksheet.rows.push(row_style);
+                            let r = row_style.r;
+                            let fresh = row_style.clone();
+                            *worksheet.row_entry_mut(r, || fresh) = row_style;
                         }
                         worksheet.sheet_data.set_row(r, row_data.data.clone());
                     }

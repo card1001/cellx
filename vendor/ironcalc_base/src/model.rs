@@ -1808,7 +1808,11 @@ impl<'a> Model<'a> {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn from_workbook(workbook: Workbook, language_id: &str) -> Result<Model<'_>, String> {
+    pub fn from_workbook(mut workbook: Workbook, language_id: &str) -> Result<Model<'_>, String> {
+        // CellX: row entries are looked up by binary search, so they must be in order.
+        for worksheet in &mut workbook.worksheets {
+            worksheet.sort_rows();
+        }
         let parsed_formulas = Vec::new();
         let worksheets = &workbook.worksheets;
 
@@ -3375,13 +3379,9 @@ impl<'a> Model<'a> {
         match cell {
             Some(cell) => Ok(cell.get_style()),
             None => {
-                let rows = &self.workbook.worksheet(sheet)?.rows;
-                for r in rows {
-                    if r.r == row {
-                        if r.custom_format {
-                            return Ok(r.s);
-                        }
-                        break;
+                if let Some(r) = self.workbook.worksheet(sheet)?.row_entry(row) {
+                    if r.custom_format {
+                        return Ok(r.s);
                     }
                 }
                 let cols = &self.workbook.worksheet(sheet)?.cols;
@@ -3818,14 +3818,10 @@ impl<'a> Model<'a> {
     /// Returns the style object of a row, if any
     pub fn get_row_style(&self, sheet: u32, row: i32) -> Result<Option<Style>, String> {
         if let Some(worksheet) = self.workbook.worksheets.get(sheet as usize) {
-            let rows = &worksheet.rows;
-            for r in rows {
-                if row == r.r {
-                    let style = self.workbook.styles.get_style(r.s)?;
-                    return Ok(Some(style));
-                }
+            match worksheet.row_entry(row) {
+                Some(r) => Ok(Some(self.workbook.styles.get_style(r.s)?)),
+                None => Ok(None),
             }
-            Ok(None)
         } else {
             Err("Invalid sheet".to_string())
         }

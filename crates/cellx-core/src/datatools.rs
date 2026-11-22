@@ -3,7 +3,7 @@
 //! goal seek.
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use ironcalc_base::types::{Link, Style};
 use serde::{Deserialize, Serialize};
@@ -582,15 +582,17 @@ impl Workbook {
         self.model().get_formatted_cell_value(sheet, row, col).unwrap_or_default()
     }
 
-    fn row_block(&self, sheet: u32, r: CellRange) -> Result<(Vec<Vec<String>>, Vec<Vec<Style>>)> {
-        let mut inputs = Vec::new();
-        let mut styles = Vec::new();
+    /// Inputs and style indexes of every cell in `r`, row by row.
+    fn row_block(&self, sheet: u32, r: CellRange) -> Result<(Vec<Vec<String>>, Vec<Vec<i32>>)> {
+        let model = self.model();
+        let mut inputs = Vec::with_capacity((r.r1 - r.r0 + 1) as usize);
+        let mut styles = Vec::with_capacity(inputs.capacity());
         for row in r.r0..=r.r1 {
-            let mut ins = Vec::new();
-            let mut sts = Vec::new();
+            let mut ins = Vec::with_capacity((r.c1 - r.c0 + 1) as usize);
+            let mut sts = Vec::with_capacity(ins.capacity());
             for col in r.c0..=r.c1 {
                 ins.push(self.input(sheet, row, col)?);
-                sts.push(self.um.get_cell_style(sheet, row, col)?);
+                sts.push(model.get_cell_style_index(sheet, row, col).map_err(CellxError::Calc)?);
             }
             inputs.push(ins);
             styles.push(sts);
@@ -598,29 +600,76 @@ impl Workbook {
         Ok((inputs, styles))
     }
 
-    /// Writes whole rows back in a new order; `order[i]` is the original row now at
+    /// Writes whole rows back in a new order; `rows[i]` holds the original row now at
     /// position i. Formulas move their relative references with the row, as Excel's sort does.
-    fn write_rows(&mut self, sheet: u32, r: CellRange, rows: &[(i32, Vec<String>, Vec<Style>)]) -> Result<()> {
-        self.um.range_clear_contents(&r.area(sheet))?;
-        self.bridges.retain(|(s, row, col), _| !(*s == sheet && r.contains(*row, *col)));
-        let mut styles: Vec<Vec<Style>> = Vec::new();
-        for (i, (orig, ins, sts)) in rows.iter().enumerate() {
+    /// Formatting is rewritten only when some cell actually ends up with a different style.
+    /// `before` is what the block held when it was read: cells that end up with the same
+    /// entry (a column of row-relative formulas, repeated values) are not rewritten.
+    fn write_rows(
+        &mut self,
+        sheet: u32,
+        r: CellRange,
+        before: &[Vec<String>],
+        rows: &[(i32, Vec<String>, Vec<i32>)],
+    ) -> Result<()> {
+        let width = (r.c1 - r.c0 + 1) as usize;
+        let height = (r.r1 - r.r0 + 1) as usize;
+        for i in 0..height {
             let row = r.r0 + i as i32;
-            for (j, input) in ins.iter().enumerate() {
-                if input.is_empty() {
+            for j in 0..width {
+                let col = r.c0 + j as i32;
+                let text = match rows.get(i) {
+                    Some((orig, ins, _)) if ins[j].starts_with('=') => refs::offset_refs(&ins[j], row - orig, 0),
+                    Some((_, ins, _)) => ins[j].clone(),
+                    None => String::new(),
+                };
+                let old = before.get(i).map_or("", |b| b[j].as_str());
+                if text == old {
                     continue;
                 }
-                let text = if input.starts_with('=') { refs::offset_refs(input, row - orig, 0) } else { input.clone() };
-                self.write_input(sheet, row, r.c0 + j as i32, &text, true)?;
+                if text.is_empty() {
+                    let one = CellRange { r0: row, c0: col, r1: row, c1: col };
+                    self.um.range_clear_contents(&one.area(sheet))?;
+                    self.bridges.remove(&(sheet, row, col));
+                } else {
+                    self.write_input(sheet, row, col, &text, true)?;
+                }
             }
-            styles.push(sts.clone());
         }
         // Rows past the kept ones (remove duplicates) get the default style.
-        let width = (r.c1 - r.c0 + 1) as usize;
-        while styles.len() < (r.r1 - r.r0 + 1) as usize {
-            styles.push(vec![Style::default(); width]);
+        let wanted = |i: usize, j: usize| rows.get(i).map_or(0, |x| x.2[j]);
+        let model = self.model();
+        let mut differs = false;
+        'scan: for i in 0..height {
+            for j in 0..width {
+                let now = model
+                    .get_cell_style_index(sheet, r.r0 + i as i32, r.c0 + j as i32)
+                    .map_err(CellxError::Calc)?;
+                if now != wanted(i, j) {
+                    differs = true;
+                    break 'scan;
+                }
+            }
         }
-        if !styles.is_empty() {
+        if differs {
+            let mut cache: HashMap<i32, Style> = HashMap::new();
+            let mut styles: Vec<Vec<Style>> = Vec::with_capacity(height);
+            for i in 0..height {
+                let mut line = Vec::with_capacity(width);
+                for j in 0..width {
+                    let idx = wanted(i, j);
+                    let style = match cache.get(&idx) {
+                        Some(s) => s.clone(),
+                        None => {
+                            let s = model.workbook.styles.get_style(idx).map_err(CellxError::Calc)?;
+                            cache.insert(idx, s.clone());
+                            s
+                        }
+                    };
+                    line.push(style);
+                }
+                styles.push(line);
+            }
             self.select(sheet, r)?;
             self.um.on_paste_styles(&styles)?;
         }
@@ -644,8 +693,9 @@ impl Workbook {
         }
         let start = self.begin();
         let (inputs, styles) = self.row_block(sheet, r)?;
-        let mut rows: Vec<(i32, Vec<String>, Vec<Style>, Vec<Scalar>)> = inputs
-            .into_iter()
+        let mut rows: Vec<(i32, Vec<String>, Vec<i32>, Vec<Scalar>)> = inputs
+            .iter()
+            .cloned()
             .zip(styles)
             .enumerate()
             .map(|(i, (ins, sts))| {
@@ -663,8 +713,8 @@ impl Workbook {
             }
             Ordering::Equal
         });
-        let rows: Vec<(i32, Vec<String>, Vec<Style>)> = rows.into_iter().map(|(a, b, c, _)| (a, b, c)).collect();
-        self.write_rows(sheet, r, &rows)?;
+        let rows: Vec<(i32, Vec<String>, Vec<i32>)> = rows.into_iter().map(|(a, b, c, _)| (a, b, c)).collect();
+        self.write_rows(sheet, r, &inputs, &rows)?;
         let out = self.commit(start)?;
         if self.filters.iter().any(|f| f.sheet == sheet) {
             self.apply_filter(sheet)?;
@@ -864,7 +914,7 @@ impl Workbook {
         let (inputs, styles) = self.row_block(sheet, r)?;
         let mut seen = HashSet::new();
         let mut kept = Vec::new();
-        for (i, (ins, sts)) in inputs.into_iter().zip(styles).enumerate() {
+        for (i, (ins, sts)) in inputs.iter().cloned().zip(styles).enumerate() {
             let row = r.r0 + i as i32;
             let key: Vec<String> = cols
                 .iter()
@@ -881,7 +931,7 @@ impl Workbook {
         let total = (r.r1 - r.r0 + 1) as usize;
         let result = DuplicateResult { removed: total - kept.len(), remaining: kept.len() };
         if result.removed > 0 {
-            self.write_rows(sheet, r, &kept)?;
+            self.write_rows(sheet, r, &inputs, &kept)?;
         }
         self.commit(start)?;
         Ok(result)
@@ -1328,6 +1378,61 @@ fn replace_text(input: &str, find: &str, replace: &str, match_case: bool, whole:
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn row_entries_stay_ordered() {
+        use crate::refs::Axis;
+        let mut wb = Workbook::new().unwrap();
+        // Out of order on purpose: entries are created from the bottom up.
+        for r in (2..=40).rev().step_by(3) {
+            wb.set_hidden(0, Axis::Row, r, r, true).unwrap();
+        }
+        wb.set_row_height(0, 10, 12, 33.0).unwrap();
+        let ws = &wb.model().workbook.worksheets[0];
+        assert!(ws.rows.windows(2).all(|w| w[0].r < w[1].r));
+        assert!(ws.is_row_hidden(40).unwrap() && ws.is_row_hidden(37).unwrap() && !ws.is_row_hidden(39).unwrap());
+        assert_eq!(ws.row_height(11).unwrap(), 33.0);
+        assert_eq!(ws.row_height(40).unwrap(), 0.0);
+
+        wb.insert_rows(0, 5, 2).unwrap();
+        let ws = &wb.model().workbook.worksheets[0];
+        assert!(ws.rows.windows(2).all(|w| w[0].r < w[1].r));
+        assert!(ws.is_row_hidden(42).unwrap() && !ws.is_row_hidden(40).unwrap());
+        assert_eq!(ws.row_height(13).unwrap(), 33.0);
+        wb.undo().unwrap();
+        let ws = &wb.model().workbook.worksheets[0];
+        assert!(ws.is_row_hidden(40).unwrap() && !ws.is_row_hidden(42).unwrap());
+        assert_eq!(ws.row_height(11).unwrap(), 33.0);
+
+        wb.delete_rows(0, 1, 3).unwrap();
+        wb.undo().unwrap();
+        let ws = &wb.model().workbook.worksheets[0];
+        assert!(ws.rows.windows(2).all(|w| w[0].r < w[1].r));
+        assert!(ws.is_row_hidden(4).unwrap() && ws.is_row_hidden(40).unwrap());
+    }
+
+    #[test]
+    fn sort_keeps_formats_and_formulas() {
+        let mut wb = Workbook::new().unwrap();
+        let cells: Vec<(i32, i32, String)> = vec![
+            (1, 1, "3".into()), (1, 2, "=A1*10".into()),
+            (2, 1, "1".into()), (2, 2, "=A2*10".into()),
+            (3, 1, "2".into()), (3, 2, "=A3*10".into()),
+        ];
+        wb.set_inputs(0, &cells).unwrap();
+        // Only the row holding 1 is bold: its format has to travel with it.
+        wb.set_style(0, CellRange { r0: 2, c0: 1, r1: 2, c1: 1 }, "font.b", "true").unwrap();
+        wb.sort_range(0, CellRange { r0: 1, c0: 1, r1: 3, c1: 2 }, &[SortKey { col: 1, descending: false }], false).unwrap();
+        let shown = |wb: &Workbook, r, c| wb.model().get_formatted_cell_value(0, r, c).unwrap();
+        assert_eq!((shown(&wb, 1, 1), shown(&wb, 2, 1), shown(&wb, 3, 1)), ("1".into(), "2".into(), "3".into()));
+        assert_eq!((shown(&wb, 1, 2), shown(&wb, 3, 2)), ("10".into(), "30".into()));
+        assert_eq!(wb.input(0, 1, 2).unwrap(), "=A1*10");
+        let bold = |wb: &Workbook, r| wb.model().get_style_for_cell(0, r, 1).unwrap().font.b;
+        assert!(bold(&wb, 1) && !bold(&wb, 2) && !bold(&wb, 3));
+        wb.undo().unwrap();
+        assert_eq!(shown(&wb, 2, 1), "1");
+        assert!(bold(&wb, 2) && !bold(&wb, 1));
+    }
+
     use super::*;
 
     fn book(rows: &[&[&str]]) -> Workbook {

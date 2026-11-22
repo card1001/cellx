@@ -1496,6 +1496,7 @@ impl<'a> Model<'a> {
             }
         }
         worksheet.rows = new_rows;
+        worksheet.sort_rows();
 
         // Re-attach the moved links, discarding any link the rebuild auto-created
         let worksheet = self.workbook.worksheet_mut(sheet)?;

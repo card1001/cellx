@@ -15,3 +15,5 @@ CellX에서 바꾼 부분:
 7. `ClipboardCell`의 `text()`, `style()` 접근자 추가와 공개 — 선택하여 붙여넣기(값만, 서식만, 행/열 바꿈).
 8. 이름 정의의 첫 글자에 한글 등 유니코드 문자 허용(Excel과 같음) — `is_valid_a1_identifier`.
 9. `Parser::set_tables`, `Model::refresh_parser_tables` — 불러온 뒤에 만든 표의 구조적 참조(`표1[금액]`) 해석.
+10. 행 정보(`Worksheet::rows`)를 행 번호 순으로 유지하고 이진 탐색 — 행 숨기기·높이·스타일 조회가 행마다 전체를 훑어 필터·윤곽에서 O(n²)이던 문제.
+11. `Styles::get_style` 공개 — 정렬·중복 제거에서 서식을 인덱스로 비교하고 필요할 때만 다시 씀.

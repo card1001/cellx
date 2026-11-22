@@ -97,6 +97,27 @@ Xcode Command Line Tools(`xcode-select --install`), Rust, Node.js 22, pnpm을 �
 
 GitHub Actions(`.github/workflows/ci.yml`)가 push마다 엔진 테스트, 화면 테스트, 호환성 측정을 돌리고, `main`에서는 Windows(msi, exe)와 macOS(dmg) 설치 파일을 만들어 아티팩트로 올립니다.
 
+### 릴리스
+
+```bash
+node scripts/bump-version.mjs 0.2.0      # Cargo.toml·Cargo.lock·tauri.conf.json·package.json 버전을 한 번에
+git commit -am "v0.2.0" && git tag v0.2.0
+git push && git push origin v0.2.0
+```
+
+태그를 푸시하면 `.github/workflows/release.yml`이 태그와 앱 버전이 같은지 확인하고, 엔진 테스트 후 설치 파일을 빌드해 **GitHub Release 초안**에 올립니다. 초안을 확인하고 「Publish」를 누르면 공개됩니다(0.x 버전은 사전 릴리스로 표시).
+
+| 파일 | 용도 |
+| --- | --- |
+| `CellX_x.y.z_x64-setup.exe` | Windows 권장. 관리자 권한 없이 사용자 계정에 설치, 한국어 설치 화면 |
+| `CellX_x.y.z_x64_ko-KR.msi` | Windows 관리자·그룹 정책 배포용 |
+| `CellX_x.y.z_universal.dmg` | macOS (Apple Silicon·Intel 공용) |
+| `SHA256SUMS.txt` | 설치 파일 체크섬 |
+
+WebView2가 없는 PC(오래된 Windows 10)에서는 설치 중에 자동으로 받아 설치합니다(인터넷 필요). 앱 버전은 파일 탭 → 정보에 표시됩니다.
+
+아직 코드 서명을 하지 않아 Windows SmartScreen 경고(「추가 정보 → 실행」)와 macOS Gatekeeper 경고가 뜹니다. 코드 서명 인증서와 Apple 개발자 계정이 생기면 워크플로 비밀값만 추가하면 됩니다.
+
 ## 측정 도구 (`cellx`)
 
 ```bash
@@ -109,6 +130,9 @@ cargo run --release -p cellx-cli -- bench-data orders.csv
 
 # 3) 계산 엔진: 일반 수식 10만 개 + VLOOKUP 성능
 cargo run --release -p cellx-cli -- bench-calc --rows 25000
+
+# 4) 큰 일반 시트 작업: 저장·열기·화면 그리기·정렬·필터·행 삽입·서식·복사/붙여넣기·찾기
+cargo run --release -p cellx-cli -- bench-sheet --rows 100000
 
 # xlsx 한 셀의 값 확인
 cargo run --release -p cellx-cli -- eval 파일.xlsx "Sheet1!B3"
@@ -154,6 +178,26 @@ cargo run --release -p cellx-cli -- eval 파일.xlsx "Sheet1!B3"
 | VLOOKUP 2,500개 × 범위 25,000행 | 2.6초 | **느림**, 범위 인덱스 필요 |
 
 IronCalc는 셀 하나를 바꿔도 전체를 다시 계산하고, VLOOKUP은 매번 범위를 처음부터 훑습니다. 2단계에서 가장 먼저 손볼 부분입니다.
+
+**큰 일반 시트** — 10만 행 × 8열(값 60만, 수식 20만), 릴리스 빌드, 2026-11-22
+
+| 작업 | 처음 | 개선 후 | 원인과 조치 |
+| --- | --- | --- | --- |
+| 입력 + 전체 계산 | 1.5초 | 1.4초 | |
+| xlsx 저장 (5.0 MB) / 열기 | 0.9초 / 2.4초 | 0.9초 / 1.9초 | |
+| 화면 한 장(50행×20열) | 1.2 ms | 0.6 ms | 스크롤은 충분히 빠름 |
+| 셀 하나 수정 + 재계산 | 0.16초 | 0.19초 | 전체 재계산 — **미해결** |
+| 정렬 (키 2개) | 5.1초 | **1.8초** | 서식을 인덱스로 비교, 그대로인 셀은 다시 쓰지 않음 |
+| 정렬 실행 취소 | 2.1초 | **0.4초** | 〃 |
+| 자동 필터 | 6.5초 | **0.6초** | 행 정보 탐색이 O(n²) → 이진 탐색(IronCalc 패치 10) |
+| 맨 위에 행 삽입 | 24.5초 | **2.1초** | 〃 (필터를 한 번 쓴 시트에서 특히 느렸음) |
+| 열 전체 서식 | 0.4초 | 0.4초 | |
+| 1만 행 × 8열 복사 + 붙여넣기 | 1.1초 | 0.7초 | |
+| 찾기 (시트 전체) | 0.8초 | 0.8초 | |
+
+남은 병목은 ① 수정할 때마다 하는 전체 재계산, ② 행 삽입 때 IronCalc가 수식을 하나씩 텍스트로 바꿨다 다시 해석하는 구조, ③ 정확히 일치 VLOOKUP의 선형 탐색입니다. Excel은 이 작업들이 대부분 0.5초 안에 끝나므로 ①②③이 다음 성능 과제입니다.
+
+**데이터 엔진** 재측정(100만 행, 68.6 MB, DuckDB 2.0.1): 가져오기 0.42초, SUM 2.4 ms, SUMIFS 6~8 ms, COUNTIFS 와일드카드 11.5 ms, DQUERY GROUP BY 9 ms.
 
 ## 예제 프로젝트
 
@@ -202,7 +246,6 @@ cargo run -p cellx-cli -- make-demo orders.csv -o demo.cellx
 
 - 계산 엔진은 셀 하나를 바꿔도 전체를 다시 계산합니다(IronCalc 현재 구조). 증분·병렬 재계산은 다음 단계 과제입니다.
 - 수식→SQL 변환기의 인수는 문자열, 숫자, 셀 주소, `표[열]`, `&` 연결만 받습니다. 변환기 안에서 다른 함수를 중첩할 수는 없습니다(바깥에서는 가능: `=ROUND(SUMIFS(...),0)`).
-- 조건부 서식, 데이터 유효성 검사, 메모는 아직 표시하지 않습니다.
 - VBA(매크로)는 지원하지 않습니다.
 - 표의 구조적 참조(`표1[금액]`)는 입력할 때 실제 범위로 바뀌어 저장됩니다(IronCalc 방식). 표에 행을 추가해도 기존 수식의 범위는 늘어나지 않습니다.
 - 셀 잠금 해제는 xlsx에 「편집 가능 범위」(protectedRanges)로 저장됩니다. Excel에서 연 파일의 잠금 해제 셀은 불러옵니다.
@@ -210,7 +253,6 @@ cargo run -p cellx-cli -- make-demo orders.csv -o demo.cellx
 - 통합 문서 보호, 시트 보기(사용자 지정 보기), 매크로는 지원하지 않습니다.
 - xlsx로 저장한 피벗 테이블은 Excel에서 일반 셀(값)로 보입니다. 피벗 정의는 .cellx 프로젝트에만 남습니다.
 - 차트는 기본 서식만 저장합니다(계열 색, 제목, 범례). Excel에서 꾸민 세부 서식(3차원, 추세선, 보조 축)은 불러올 때 기본 모양으로 바뀝니다.
-- 붙여넣기 옵션(값만, 서식만 등)은 아직 없습니다.
 
 ## 이름
 

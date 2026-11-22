@@ -312,3 +312,7 @@ input.tiny { width: 28px !important; min-width: 0 !important; height: 20px; marg
   .print-page { page-break-after: always; }
   .print-page:last-child { page-break-after: auto; }
 }
+
+/* 파일 탭 정보 */
+.about { display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 0 12px; font-size: 12px; color: #555; }
+.about b { font-size: 14px; color: #222; }

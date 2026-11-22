@@ -61,15 +61,40 @@ impl Worksheet {
         Ok(())
     }
 
+    /// CellX: `rows` is kept sorted by row number so every lookup is a binary search
+    /// (it used to be a linear scan, quadratic when filtering or hiding many rows).
+    pub(crate) fn row_entry(&self, row: i32) -> Option<&Row> {
+        self.rows
+            .binary_search_by_key(&row, |r| r.r)
+            .ok()
+            .map(|i| &self.rows[i])
+    }
+
+    /// The row entry for `row`, inserted from `make` in order when there is none.
+    pub(crate) fn row_entry_mut(&mut self, row: i32, make: impl FnOnce() -> Row) -> &mut Row {
+        let i = match self.rows.binary_search_by_key(&row, |r| r.r) {
+            Ok(i) => i,
+            Err(i) => {
+                self.rows.insert(i, make());
+                i
+            }
+        };
+        &mut self.rows[i]
+    }
+
+    /// Restores the sort order after `rows` was rebuilt or loaded.
+    pub(crate) fn sort_rows(&mut self) {
+        if !self.rows.windows(2).all(|w| w[0].r < w[1].r) {
+            self.rows.sort_by_key(|r| r.r);
+            self.rows.dedup_by_key(|r| r.r);
+        }
+    }
+
     // See: get_style_for_cell
     fn get_row_column_style(&self, row_index: i32, column_index: i32) -> i32 {
-        let rows = &self.rows;
-        for row in rows {
-            if row.r == row_index {
-                if row.custom_format {
-                    return row.s;
-                }
-                break;
+        if let Some(row) = self.row_entry(row_index) {
+            if row.custom_format {
+                return row.s;
             }
         }
         let cols = &self.cols;
@@ -113,14 +138,7 @@ impl Worksheet {
     pub fn set_row_style(&mut self, row: i32, style_index: i32) -> Result<(), String> {
         // FIXME: This is a HACK
         let custom_format = style_index != 0;
-        for r in self.rows.iter_mut() {
-            if r.r == row {
-                r.s = style_index;
-                r.custom_format = custom_format;
-                return Ok(());
-            }
-        }
-        self.rows.push(Row {
+        let r = self.row_entry_mut(row, || Row {
             height: constants::DEFAULT_ROW_HEIGHT / constants::ROW_HEIGHT_FACTOR,
             r: row,
             custom_format,
@@ -128,22 +146,16 @@ impl Worksheet {
             s: style_index,
             hidden: false,
         });
+        r.s = style_index;
+        r.custom_format = custom_format;
         Ok(())
     }
 
     pub fn delete_row_style(&mut self, row: i32) -> Result<(), String> {
-        let mut index = None;
-        for (i, r) in self.rows.iter().enumerate() {
-            if r.r == row {
-                index = Some(i);
-                break;
-            }
-        }
-        if let Some(i) = index {
-            if let Some(r) = self.rows.get_mut(i) {
-                r.s = 0;
-                r.custom_format = false;
-            }
+        if let Ok(i) = self.rows.binary_search_by_key(&row, |r| r.r) {
+            let r = &mut self.rows[i];
+            r.s = 0;
+            r.custom_format = false;
         }
         Ok(())
     }
@@ -396,21 +408,15 @@ impl Worksheet {
             return Err(format!("Row number '{row}' is not valid."));
         }
 
-        let rows = &mut self.rows;
-        for r in rows.iter_mut() {
-            if r.r == row {
-                r.hidden = hidden;
-                return Ok(());
-            }
-        }
-        rows.push(Row {
+        self.row_entry_mut(row, || Row {
             height: constants::DEFAULT_ROW_HEIGHT / constants::ROW_HEIGHT_FACTOR,
             r: row,
             custom_format: false,
             custom_height: false,
             s: 0,
             hidden,
-        });
+        })
+        .hidden = hidden;
         Ok(())
     }
 
@@ -426,23 +432,16 @@ impl Worksheet {
         if height < 0.0 {
             return Err(format!("Can not set a negative height: {height}"));
         }
-        let hidden = self.is_row_hidden(row)?;
-        let rows = &mut self.rows;
-        for r in rows.iter_mut() {
-            if r.r == row {
-                r.height = height / constants::ROW_HEIGHT_FACTOR;
-                r.custom_height = true;
-                return Ok(());
-            }
-        }
-        rows.push(Row {
+        let r = self.row_entry_mut(row, || Row {
             height: height / constants::ROW_HEIGHT_FACTOR,
             r: row,
             custom_format: false,
             custom_height: true,
             s: 0,
-            hidden,
+            hidden: false,
         });
+        r.height = height / constants::ROW_HEIGHT_FACTOR;
+        r.custom_height = true;
         Ok(())
     }
 
@@ -608,13 +607,7 @@ impl Worksheet {
         if !is_valid_row(row) {
             return Err(format!("Row number '{row}' is not valid."));
         }
-        let rows = &self.rows;
-        for r in rows {
-            if r.r == row {
-                return Ok(r.hidden);
-            }
-        }
-        Ok(false)
+        Ok(self.row_entry(row).is_some_and(|r| r.hidden))
     }
 
     /// Returns the column style index if present
@@ -667,16 +660,11 @@ impl Worksheet {
             return Err(format!("Row number '{row}' is not valid."));
         }
 
-        let rows = &self.rows;
-        for r in rows {
-            if r.r == row {
-                if r.hidden {
-                    return Ok(0.0);
-                }
-                return Ok(r.height * constants::ROW_HEIGHT_FACTOR);
-            }
+        match self.row_entry(row) {
+            Some(r) if r.hidden => Ok(0.0),
+            Some(r) => Ok(r.height * constants::ROW_HEIGHT_FACTOR),
+            None => Ok(constants::DEFAULT_ROW_HEIGHT),
         }
-        Ok(constants::DEFAULT_ROW_HEIGHT)
     }
 
     /// Calculates dimension of the sheet. This function isn't cheap to calculate.

@@ -263,3 +263,108 @@ pub fn make_demo(csv: &Path, out: &Path) -> Result<()> {
     println!("저장: {}", out.display());
     Ok(())
 }
+
+/// Pads `s` to `width` terminal columns (Hangul and other wide characters take two).
+fn pad(s: &str, width: usize) -> String {
+    let w: usize = s.chars().map(|c| if c >= '\u{1100}' { 2 } else { 1 }).sum();
+    format!("{s}{}", " ".repeat(width.saturating_sub(w)))
+}
+
+fn ms(t: Instant) -> f64 {
+    t.elapsed().as_secs_f64() * 1000.0
+}
+
+/// Times what a person does with a large ordinary sheet: build, save and open xlsx,
+/// scroll, sort, filter, insert rows, format, copy and paste, undo.
+pub fn bench_sheet(rows: i32, dir: &Path) -> Result<()> {
+    use cellx_core::datatools::{ColumnFilter, SortKey};
+    use cellx_core::workbook::CellRange;
+    let mut rng = Rng(0x2545_F491_4F6C_DD1D);
+    let mut wb = Workbook::new()?;
+    let header = ["주문번호", "지역", "카테고리", "주문일", "수량", "단가", "금액", "구분"];
+    let mut cells = Vec::with_capacity(rows as usize * 8 + 8);
+    for (i, h) in header.iter().enumerate() {
+        cells.push((1, i as i32 + 1, h.to_string()));
+    }
+    for r in 2..=rows + 1 {
+        let (y, m, d) = civil(19723 + rng.below(900) as i64);
+        cells.push((r, 1, format!("{}", 100000 + r)));
+        cells.push((r, 2, REGIONS[rng.below(REGIONS.len() as u64) as usize].to_string()));
+        cells.push((r, 3, CATEGORIES[rng.below(CATEGORIES.len() as u64) as usize].to_string()));
+        cells.push((r, 4, format!("{y:04}-{m:02}-{d:02}")));
+        cells.push((r, 5, format!("{}", 1 + rng.below(20))));
+        cells.push((r, 6, format!("{}", 1000 + rng.below(199) * 1000)));
+        cells.push((r, 7, format!("=E{r}*F{r}")));
+        cells.push((r, 8, format!("=IF(G{r}>=100000,\"대\",\"소\")")));
+    }
+    let last = rows + 1;
+    let all = CellRange { r0: 1, c0: 1, r1: last, c1: 8 };
+    println!("시트: {rows}행 × 8열 (값 {}개, 수식 {}개)\n", rows * 6, rows * 2);
+    let report = |label: &str, v: f64| println!("{} {v:>9.0} ms", pad(label, 40));
+
+    let t = Instant::now();
+    wb.set_inputs(0, &cells)?;
+    report("입력 + 전체 계산", ms(t));
+    drop(cells);
+
+    let path = dir.join(format!("bench-{rows}.xlsx"));
+    let t = Instant::now();
+    wb.save_xlsx(&path)?;
+    let save = ms(t);
+    let size = std::fs::metadata(&path)?.len();
+    report(&format!("xlsx 저장 ({:.1} MB)", size as f64 / 1e6), save);
+
+    let t = Instant::now();
+    let mut wb = Workbook::open_xlsx(&path)?;
+    report("xlsx 열기", ms(t));
+    let t = Instant::now();
+    wb.recalc()?;
+    report("열고 나서 전체 재계산", ms(t));
+
+    let mut times = Vec::new();
+    for _ in 0..30 {
+        let r0 = 1 + rng.below(last.max(2) as u64 - 1) as i32;
+        let t = Instant::now();
+        std::hint::black_box(wb.viewport(0, r0, 1, r0 + 50, 20)?);
+        times.push(ms(t));
+    }
+    println!("{} {:>9.2} ms (P95 {:.2})", pad("화면 한 장(50행×20열) 그리기", 40), median(times.clone()), p95(times));
+
+    let t = Instant::now();
+    wb.set_input(0, 2, 5, "7")?;
+    report("셀 하나 수정 + 재계산", ms(t));
+
+    let t = Instant::now();
+    wb.sort_range(0, all, &[SortKey { col: 2, descending: false }, SortKey { col: 6, descending: true }], true)?;
+    report("정렬 (지역 오름차순, 단가 내림차순)", ms(t));
+    let t = Instant::now();
+    wb.undo()?;
+    report("정렬 실행 취소", ms(t));
+
+    let t = Instant::now();
+    wb.toggle_auto_filter(0, all)?;
+    wb.set_filter_column(0, ColumnFilter { col: 2, values: Some(vec!["서울".into()]), conditions: vec![], and: true })?;
+    report("자동 필터 (지역 = 서울)", ms(t));
+    wb.toggle_auto_filter(0, all)?;
+
+    let t = Instant::now();
+    wb.insert_rows(0, 2, 1)?;
+    report("맨 위에 행 삽입 (아래 수식 전부 이동)", ms(t));
+    wb.undo()?;
+
+    let t = Instant::now();
+    wb.set_style(0, CellRange { r0: 2, c0: 7, r1: last, c1: 7 }, "num_fmt", "#,##0")?;
+    report("열 전체 서식 (#,##0)", ms(t));
+
+    let n = rows.min(10_000);
+    let t = Instant::now();
+    let text = wb.copy(0, CellRange { r0: 2, c0: 1, r1: n + 1, c1: 8 }, false)?;
+    wb.paste(0, 2, 10, &text)?;
+    report(&format!("{n}행 × 8열 복사 + 붙여넣기"), ms(t));
+
+    let t = Instant::now();
+    std::hint::black_box(wb.find(0, "환불없음", (1, 1), false)?);
+    report("찾기 (없는 값, 시트 전체)", ms(t));
+    std::fs::remove_file(&path).ok();
+    Ok(())
+}
