@@ -17,6 +17,7 @@ pub mod outline;
 pub mod audit;
 pub mod book;
 pub mod pictures;
+pub mod pivotxml;
 pub mod ooxml;
 pub mod project;
 pub mod refs;

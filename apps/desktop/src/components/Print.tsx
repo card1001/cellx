@@ -263,7 +263,7 @@ export function PageView(props: { job: PrintJob; setup: PageSetup; pag: Paginati
           const p = chartPos(chart);
           return (
             <div key={chart.id} className="print-chart" style={{ left: p.left, top: p.top, width: chart.anchor.width, height: chart.anchor.height }}>
-              <ChartSvg kind={chart.kind} data={data} width={chart.anchor.width} height={chart.anchor.height} legend={chart.legend} />
+              <ChartSvg kind={chart.kind} data={data} width={chart.anchor.width} height={chart.anchor.height} legend={chart.legend} trendline={chart.trendline} />
             </div>
           );
         })}

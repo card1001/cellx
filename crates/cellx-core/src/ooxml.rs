@@ -35,6 +35,9 @@ pub struct Marker {
 }
 
 pub struct ChartXml {
+    /// Written as it is instead of `chart_xml`, with its parts.
+    pub original: Option<std::sync::Arc<crate::extras::OriginalChart>>,
+    pub trendline: bool,
     pub kind: ChartKind,
     pub legend: bool,
     pub data: ChartData,
@@ -95,6 +98,8 @@ pub struct SheetParts {
     pub data_tables: Vec<(String, String)>,
     /// `<customSheetViews>` of the sheet.
     pub views: String,
+    /// (cache index, pivot table definition) of the sheet's pivot tables.
+    pub pivots: Vec<(usize, String)>,
     /// `<ext>` elements for the worksheet's `<extLst>` (sparklines).
     pub ext: String,
     pub filter: Option<AutoFilter>,
@@ -130,6 +135,7 @@ impl SheetParts {
             && self.scenarios.is_empty()
             && self.data_tables.is_empty()
             && self.views.is_empty()
+            && self.pivots.is_empty()
             && self.filter.is_none()
             && self.validations.is_empty()
             && self.outline_rows.is_empty()
@@ -484,6 +490,33 @@ fn zerr<T>(r: std::result::Result<T, zip::result::ZipError>) -> Result<T> {
     r.map_err(|e| CellxError::Xlsx(e.to_string()))
 }
 
+/// Where the worksheet's own `<extLst>` starts (its last child), if it has one —
+/// not an extLst inside a rule or a custom view.
+fn top_ext_start(xml: &str) -> Option<usize> {
+    let end = xml.rfind("</worksheet>")?;
+    if !xml[..end].trim_end().ends_with("</extLst>") {
+        return None;
+    }
+    let close = xml[..end].rfind("</extLst>")?;
+    let mut depth = 1;
+    let mut at = close;
+    while depth > 0 {
+        let open = xml[..at].rfind("<extLst")?;
+        let inner_close = xml[..at].rfind("</extLst>");
+        match inner_close {
+            Some(c) if c > open => {
+                depth += 1;
+                at = c;
+            }
+            _ => {
+                depth -= 1;
+                at = open;
+            }
+        }
+    }
+    Some(at)
+}
+
 pub fn esc(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -515,6 +548,8 @@ pub struct BookParts {
     pub protection: String,
     /// `<customWorkbookViews>`.
     pub views: String,
+    /// Pivot cache definitions, in the order the tables refer to them.
+    pub pivot_caches: Vec<String>,
 }
 
 pub(crate) fn workbook_xml(xlsx: &[u8]) -> Option<String> {
@@ -528,7 +563,7 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
 }
 
 pub fn add_extras_with(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String], book: &BookParts) -> Result<Vec<u8>> {
-    if parts.iter().all(SheetParts::is_empty) && book.protection.is_empty() && book.views.is_empty() {
+    if parts.iter().all(SheetParts::is_empty) && book.protection.is_empty() && book.views.is_empty() && book.pivot_caches.is_empty() {
         return Ok(xlsx.to_vec());
     }
     let mut zin = zerr(zip::ZipArchive::new(Cursor::new(xlsx)))?;
@@ -580,6 +615,7 @@ pub fn add_extras_with(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]
     let mut table_ids: HashMap<String, usize> = HashMap::new();
     let mut caches: Vec<&SlicerXml> = Vec::new();
     let mut slicer_no = 0;
+    let mut pivot_no = 0;
     for (i, p) in parts.iter().enumerate() {
         if p.is_empty() {
             continue;
@@ -592,6 +628,26 @@ pub fn add_extras_with(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]
         let mut rels = Vec::new();
         let mut tags = String::new();
 
+        for (cache, table) in &p.pivots {
+            pivot_no += 1;
+            put(&mut map, &mut order, format!("xl/pivotTables/pivotTable{pivot_no}.xml"), table.clone().into_bytes());
+            put(
+                &mut map,
+                &mut order,
+                format!("xl/pivotTables/_rels/pivotTable{pivot_no}.xml.rels"),
+                relationships(&[format!(
+                    r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="../pivotCache/pivotCacheDefinition{}.xml"/>"#,
+                    cache + 1
+                )])
+                .into_bytes(),
+            );
+            overrides.push_str(&format!(
+                r#"<Override PartName="/xl/pivotTables/pivotTable{pivot_no}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotTable+xml"/>"#
+            ));
+            rels.push(format!(
+                r#"<Relationship Id="rIdCxPivot{pivot_no}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivotTables/pivotTable{pivot_no}.xml"/>"#
+            ));
+        }
         let mut ext = p.ext.clone();
         if !p.slicers.is_empty() {
             slicer_no += 1;
@@ -675,7 +731,35 @@ pub fn add_extras_with(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]
                     r#"<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart{chart_no}.xml"/>"#
                 ));
                 anchors.push_str(&anchor_xml(ch, k as u32 + 2, &rid));
-                put(&mut map, &mut order, format!("xl/charts/chart{chart_no}.xml"), chart_xml(ch).into_bytes());
+                match &ch.original {
+                    Some(o) => {
+                        // As the file had it, with its style and color parts.
+                        put(&mut map, &mut order, format!("xl/charts/chart{chart_no}.xml"), o.xml.clone().into_bytes());
+                        let mut crels = Vec::new();
+                        for (j, (id, kind, name, bytes, ctype)) in o.parts.iter().enumerate() {
+                            let file = format!("cellx_c{chart_no}_{j}_{name}");
+                            put(&mut map, &mut order, format!("xl/charts/{file}"), bytes.clone());
+                            crels.push(format!(r#"<Relationship Id="{}" Type="{}" Target="{}"/>"#, esc(id), esc(kind), esc(&file)));
+                            match ctype {
+                                Some(t) => overrides.push_str(&format!(r#"<Override PartName="/xl/charts/{file}" ContentType="{}"/>"#, esc(t))),
+                                None => {
+                                    // A default by extension (an embedded workbook, an image).
+                                    if let Some(ext) = file.rsplit('.').next() {
+                                        let known = ["png", "jpeg", "jpg", "gif", "bmp", "xlsx", "bin", "emf", "wmf"];
+                                        if known.contains(&ext) && !media_types.iter().any(|m| *m == ext) {
+                                            let ext: &'static str = known.iter().find(|k| **k == ext).copied().unwrap_or("bin");
+                                            media_types.push(ext);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if !crels.is_empty() {
+                            put(&mut map, &mut order, format!("xl/charts/_rels/chart{chart_no}.xml.rels"), relationships(&crels).into_bytes());
+                        }
+                    }
+                    None => put(&mut map, &mut order, format!("xl/charts/chart{chart_no}.xml"), chart_xml(ch).into_bytes()),
+                }
                 overrides.push_str(&format!(
                     r#"<Override PartName="/xl/charts/chart{chart_no}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/>"#
                 ));
@@ -836,14 +920,13 @@ pub fn add_extras_with(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]
             let xml = validations_xml(&p.validations);
             let at = sheet_xml
                 .find("<hyperlinks")
-                .or_else(|| sheet_xml.rfind("<extLst"))
+                .or_else(|| top_ext_start(&sheet_xml))
                 .or_else(|| sheet_xml.rfind("</worksheet>"))
                 .unwrap_or(sheet_xml.len());
             sheet_xml.insert_str(at, &xml);
         }
         // drawing and legacyDrawing come before extLst in a worksheet.
-        let at = sheet_xml
-            .rfind("<extLst")
+        let at = top_ext_start(&sheet_xml)
             .or_else(|| sheet_xml.rfind("</worksheet>"))
             .unwrap_or(sheet_xml.len());
         let mut new_sheet = format!("{}{}{}", &sheet_xml[..at], tags, &sheet_xml[at..]);
@@ -942,6 +1025,18 @@ pub fn add_extras_with(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]
         cache_refs.push_str(&format!(r#"<x14:slicerCache r:id="rIdCxSlicerCache{n}"/>"#));
         slicer_names.push_str(&format!(r#"<definedName name="{}">#N/A</definedName>"#, esc(&x.cache)));
     }
+    let mut pivot_caches = String::new();
+    for (k, cache) in book.pivot_caches.iter().enumerate() {
+        let n = k + 1;
+        put(&mut map, &mut order, format!("xl/pivotCache/pivotCacheDefinition{n}.xml"), cache.clone().into_bytes());
+        overrides.push_str(&format!(
+            r#"<Override PartName="/xl/pivotCache/pivotCacheDefinition{n}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/>"#
+        ));
+        wb_rels_new.push_str(&format!(
+            r#"<Relationship Id="rIdCxPc{n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="pivotCache/pivotCacheDefinition{n}.xml"/>"#
+        ));
+        pivot_caches.push_str(&format!(r#"<pivotCache cacheId="{}" r:id="rIdCxPc{n}"/>"#, crate::pivotxml::CACHE_ID_BASE + k as u32));
+    }
     if !wb_rels_new.is_empty() {
         if let Some(r) = map.get("xl/_rels/workbook.xml.rels") {
             let mut r = String::from_utf8_lossy(r).to_string();
@@ -964,7 +1059,7 @@ pub fn add_extras_with(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]
             put(&mut map, &mut order, "xl/workbook.xml".into(), wb.into_bytes());
         }
     }
-    if !book.protection.is_empty() || !book.views.is_empty() {
+    if !book.protection.is_empty() || !book.views.is_empty() || !pivot_caches.is_empty() {
         if let Some(wb) = map.get("xl/workbook.xml") {
             let mut wb = String::from_utf8_lossy(wb).to_string();
             if !book.protection.is_empty() {
@@ -982,6 +1077,19 @@ pub fn add_extras_with(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]
                     .min()
                     .unwrap_or(wb.len());
                 wb.insert_str(at, &book.views);
+            }
+            if !pivot_caches.is_empty() {
+                // pivotCaches come after customWorkbookViews.
+                let from = wb.find("<sheets").unwrap_or(0);
+                let at = ["<smartTagPr", "<smartTagTypes", "<webPublishing", "<fileRecoveryPr", "<webPublishObjects", "<extLst", "</workbook>"]
+                    .iter()
+                    .filter_map(|t| wb[from..].find(t).map(|i| from + i))
+                    .min()
+                    .unwrap_or(wb.len());
+                wb.insert_str(at, &format!("<pivotCaches>{pivot_caches}</pivotCaches>"));
+                if !wb.contains("xmlns:r=") {
+                    wb = wb.replacen("<workbook ", r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" "#, 1);
+                }
             }
             put(&mut map, &mut order, "xl/workbook.xml".into(), wb.into_bytes());
         }
@@ -1196,8 +1304,13 @@ fn chart_xml(ch: &ChartXml) -> String {
             _ => "",
         };
         let smooth = if matches!(ch.kind, ChartKind::Line | ChartKind::Scatter) { r#"<c:smooth val="0"/>"# } else { "" };
+        let trend = if ch.trendline && !matches!(ch.kind, ChartKind::Pie | ChartKind::Doughnut) {
+            format!(r#"<c:trendline><c:spPr><a:ln w="19050" cap="rnd"><a:solidFill><a:srgbClr val="{color}"/></a:solidFill><a:prstDash val="sysDot"/></a:ln></c:spPr><c:trendlineType val="linear"/><c:dispRSqr val="0"/><c:dispEq val="0"/></c:trendline>"#)
+        } else {
+            String::new()
+        };
         series.push_str(&format!(
-            r#"<c:ser><c:idx val="{i}"/><c:order val="{i}"/>{tx}{sppr}{marker}{cat}{val}{smooth}</c:ser>"#
+            r#"<c:ser><c:idx val="{i}"/><c:order val="{i}"/>{tx}{sppr}{marker}{trend}{cat}{val}{smooth}</c:ser>"#
         ));
     }
     let axes = r#"<c:axId val="111111111"/><c:axId val="222222222"/>"#;
@@ -1264,6 +1377,10 @@ pub struct ImportedChart {
     pub to: Option<Marker>,
     /// Size in EMU for one-cell anchors.
     pub ext: Option<(i64, i64)>,
+    pub trendline: bool,
+    /// The chart part, and the parts it refers to.
+    pub raw: Option<String>,
+    pub parts: Vec<(String, String, String, Vec<u8>, Option<String>)>,
 }
 
 fn read_part<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, name: &str) -> Option<String> {
@@ -1322,8 +1439,31 @@ fn marker(node: roxmltree::Node) -> Marker {
 }
 
 /// Reads the charts of every sheet. Unknown chart types are skipped.
+/// Relationships of a part as written: (id, full type, target).
+fn rels_raw<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, part: &str) -> Vec<(String, String, String)> {
+    let (dir, file) = part.rsplit_once('/').unwrap_or(("", part));
+    let Some(xml) = read_part(zip, &format!("{dir}/_rels/{file}.rels")) else { return Vec::new() };
+    let Ok(doc) = roxmltree::Document::parse(&xml) else { return Vec::new() };
+    doc.descendants()
+        .filter(|n| n.has_tag_name("Relationship"))
+        .filter(|n| n.attribute("TargetMode") != Some("External"))
+        .filter_map(|n| Some((n.attribute("Id")?.to_string(), n.attribute("Type")?.to_string(), n.attribute("Target")?.to_string())))
+        .collect()
+}
+
+/// `[Content_Types].xml` overrides: part name → content type.
+fn content_types<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>) -> HashMap<String, String> {
+    let Some(xml) = read_part(zip, "[Content_Types].xml") else { return HashMap::new() };
+    let Ok(doc) = roxmltree::Document::parse(&xml) else { return HashMap::new() };
+    doc.descendants()
+        .filter(|n| n.has_tag_name("Override"))
+        .filter_map(|n| Some((n.attribute("PartName")?.to_string(), n.attribute("ContentType")?.to_string())))
+        .collect()
+}
+
 pub fn read_charts(xlsx: &[u8]) -> Vec<ImportedChart> {
     let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(xlsx)) else { return Vec::new() };
+    let types = content_types(&mut zip);
     let Some(wb_xml) = read_part(&mut zip, "xl/workbook.xml") else { return Vec::new() };
     let wb_rels = rels_of(&mut zip, "xl/workbook.xml");
     let Ok(wb_doc) = roxmltree::Document::parse(&wb_xml) else { return Vec::new() };
@@ -1363,6 +1503,28 @@ pub fn read_charts(xlsx: &[u8]) -> Vec<ImportedChart> {
                     c.from = from;
                     c.to = to;
                     c.ext = ext;
+                    // The parts the chart refers to, to write back with it.
+                    let crels = rels_raw(&mut zip, chart_part);
+                    let mut parts = Vec::new();
+                    let mut ok = true;
+                    for (id, kind, target) in crels {
+                        if target.starts_with("http") {
+                            ok = false;
+                            break;
+                        }
+                        let (dir, _) = chart_part.rsplit_once('/').unwrap_or(("", ""));
+                        let path = resolve(dir, &target);
+                        let Some(bytes) = read_part_bytes(&mut zip, &path) else {
+                            ok = false;
+                            break;
+                        };
+                        let name = path.rsplit('/').next().unwrap_or("part").to_string();
+                        parts.push((id, kind, name, bytes, types.get(&format!("/{path}")).cloned()));
+                    }
+                    if ok {
+                        c.raw = Some(cxml);
+                        c.parts = parts;
+                    }
                     out.push(c);
                 }
             }
@@ -1647,6 +1809,9 @@ fn parse_chart(xml: &str) -> Option<ImportedChart> {
         from: Marker { col: 0, col_off: 0, row: 0, row_off: 0 },
         to: None,
         ext: None,
+        trendline: plot.descendants().any(|n| n.has_tag_name("trendline")),
+        raw: None,
+        parts: Vec::new(),
     })
 }
 
@@ -2034,6 +2199,36 @@ pub fn read_table_filter(xlsx: &[u8], name: &str) -> Option<AutoFilter> {
 }
 
 /// AutoFilter and data validation rules of every sheet, read from the sheet XML.
+/// (sheet, pivot table definition, its cache definition) of every pivot table.
+pub(crate) fn read_pivot_tables(xlsx: &[u8]) -> Vec<(u32, String, String)> {
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(xlsx)) else { return Vec::new() };
+    if !zip.file_names().any(|n| n.is_ok_and(|n| n.starts_with("xl/pivotTables/"))) {
+        return Vec::new();
+    }
+    let Some(wb_xml) = read_part(&mut zip, "xl/workbook.xml") else { return Vec::new() };
+    let wb_rels = rels_of(&mut zip, "xl/workbook.xml");
+    let Ok(wb_doc) = roxmltree::Document::parse(&wb_xml) else { return Vec::new() };
+    let parts: Vec<String> = wb_doc
+        .descendants()
+        .filter(|n| n.has_tag_name("sheet"))
+        .filter_map(|n| n.attribute((R_NS, "id")).and_then(|id| wb_rels.get(id)).map(|(_, t)| t.clone()))
+        .collect();
+    let mut out = Vec::new();
+    for (si, part) in parts.iter().enumerate() {
+        let rels = rels_of(&mut zip, part);
+        let mut tables: Vec<String> = rels.values().filter(|(k, _)| k == "pivotTable").map(|(_, t)| t.clone()).collect();
+        tables.sort();
+        for t in tables {
+            let Some(txml) = read_part(&mut zip, &t) else { continue };
+            let trels = rels_of(&mut zip, &t);
+            let Some((_, cache)) = trels.values().find(|(k, _)| k == "pivotCacheDefinition") else { continue };
+            let Some(cxml) = read_part(&mut zip, cache) else { continue };
+            out.push((si as u32, txml, cxml));
+        }
+    }
+    out
+}
+
 /// The whole worksheet XML of the sheets whose XML mentions one of `markers`.
 pub(crate) fn raw_sheet_xmls(xlsx: &[u8], markers: &[&str]) -> Vec<(u32, String)> {
     let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(xlsx)) else { return Vec::new() };

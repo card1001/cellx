@@ -441,7 +441,9 @@ impl Workbook {
             range: range_a1(r),
             series_in_rows: default_series_in_rows(r.r0, r.c0, r.r1, r.c1),
             legend: true,
+            trendline: false,
             anchor: Anchor { row: r.r0, col: r.c1 + 2, dx: 0.0, dy: 0.0, width: 480.0, height: 288.0 },
+            original: None,
         };
         let start = self.begin();
         self.charts.push(chart.clone());
@@ -455,7 +457,8 @@ impl Workbook {
         }
         let start = self.begin();
         match self.charts.iter_mut().find(|c| c.id == chart.id) {
-            Some(c) => *c = chart,
+            // The file's own chart part stays with it (the frontend does not see it).
+            Some(c) => *c = Chart { original: c.original.take().or(chart.original.clone()), ..chart },
             None => return Err(CellxError::Calc("차트가 없습니다".into())),
         }
         self.commit(start)?;
@@ -598,6 +601,11 @@ impl Workbook {
             p.data_tables = self.data_table_formulas(i as u32);
             p.views = self.custom_sheet_views_xml(i as u32);
         }
+        for (k, x) in self.pivot_parts().into_iter().enumerate() {
+            if let Some(p) = parts.get_mut(x.sheet as usize) {
+                p.pivots.push((k, x.table));
+            }
+        }
         for (sheet, x) in self.slicer_parts() {
             if let Some(p) = parts.get_mut(sheet as usize) {
                 p.slicers.push(x);
@@ -612,7 +620,10 @@ impl Workbook {
             let Ok(data) = self.resolve_chart(c) else { continue };
             let Some(p) = parts.get_mut(c.sheet as usize) else { continue };
             let (from, to) = self.to_marker(c.sheet, &c.anchor);
+            let own = names.get(c.sheet as usize).cloned().unwrap_or_default();
             p.charts.push(ChartXml {
+                original: c.original.as_ref().filter(|o| o.0.signature == c.signature(&own)).map(|o| o.0.clone()),
+                trendline: c.trendline,
                 kind: c.kind,
                 legend: c.legend,
                 data_sheet: names.get(data.sheet as usize).cloned().unwrap_or_default(),
@@ -632,6 +643,7 @@ impl Workbook {
         self.import_slicers(xlsx);
         self.import_whatif(xlsx);
         self.import_book(xlsx);
+        self.import_pivot_tables(xlsx);
         self.import_sparklines(&ooxml::sheet_xmls(xlsx, "sparklineGroup"));
         // CellX writes these names itself on save.
         self.model_mut()
@@ -735,7 +747,7 @@ impl Workbook {
             };
             let id = self.next_object_id;
             self.next_object_id += 1;
-            self.charts.push(Chart {
+            let mut chart = Chart {
                 id,
                 sheet,
                 kind: ic.kind,
@@ -743,6 +755,7 @@ impl Workbook {
                 range,
                 series_in_rows: rows_wise,
                 legend: ic.legend,
+                trendline: ic.trendline,
                 anchor: Anchor {
                     row: ic.from.row + 1,
                     col: ic.from.col + 1,
@@ -751,7 +764,13 @@ impl Workbook {
                     width: width.max(60.0),
                     height: height.max(40.0),
                 },
-            });
+                original: None,
+            };
+            if let Some(xml) = ic.raw {
+                let signature = chart.signature(&own);
+                chart.original = Some(crate::extras::ChartOriginal(std::sync::Arc::new(crate::extras::OriginalChart { xml, parts: ic.parts, signature })));
+            }
+            self.charts.push(chart);
         }
     }
 
@@ -1338,6 +1357,10 @@ struct PivotGrid {
     total_row: bool,
 }
 
+pub(crate) fn header_names_pub(wb: &Workbook, sheet: u32, row: i32, c0: i32, c1: i32) -> Vec<String> {
+    header_names(wb, sheet, row, c0, c1)
+}
+
 fn header_names(wb: &Workbook, sheet: u32, row: i32, c0: i32, c1: i32) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for c in c0..=c1 {
@@ -1357,6 +1380,72 @@ fn header_names(wb: &Workbook, sheet: u32, row: i32, c0: i32, c1: i32) -> Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imported_chart_formatting_is_kept_until_the_chart_changes() {
+        use std::io::{Read, Write};
+        let mut wb = Workbook::new().unwrap();
+        wb.set_inputs(0, &[(1, 1, "a".into()), (1, 2, "b".into()), (2, 1, "x".into()), (2, 2, "1".into()), (3, 1, "y".into()), (3, 2, "3".into())]).unwrap();
+        let c = wb.add_chart(0, ChartKind::Line, CellRange { r0: 1, c0: 1, r1: 3, c1: 2 }).unwrap();
+        let mut c2 = c.clone();
+        c2.trendline = true;
+        wb.update_chart(c2).unwrap();
+        let dir = crate::project::new_work_dir().unwrap();
+        let path = dir.join("c.xlsx");
+        wb.save_xlsx(&path).unwrap();
+        // Formatting CellX does not draw, as Excel would write it, plus a style part.
+        let bytes = std::fs::read(&path).unwrap();
+        let mut zin = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for i in 0..zin.len() {
+            let mut f = zin.by_index(i).unwrap();
+            let name = f.name().unwrap().to_string();
+            let mut data = Vec::new();
+            f.read_to_end(&mut data).unwrap();
+            if name == "xl/charts/chart1.xml" {
+                data = String::from_utf8(data).unwrap().replace("<c:roundedCorners val=\"0\"/>", "<c:roundedCorners val=\"0\"/><c:style val=\"42\"/>").into_bytes();
+            }
+            if name == "[Content_Types].xml" {
+                data = String::from_utf8(data).unwrap().replace("</Types>", "<Override PartName=\"/xl/charts/style1.xml\" ContentType=\"application/vnd.ms-office.chartstyle+xml\"/></Types>").into_bytes();
+            }
+            out.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+            out.write_all(&data).unwrap();
+        }
+        out.start_file("xl/charts/style1.xml", zip::write::SimpleFileOptions::default()).unwrap();
+        out.write_all(b"<cs:chartStyle xmlns:cs=\"http://schemas.microsoft.com/office/drawing/2012/chartStyle\" id=\"227\"/>").unwrap();
+        out.start_file("xl/charts/_rels/chart1.xml.rels", zip::write::SimpleFileOptions::default()).unwrap();
+        out.write_all(br#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.microsoft.com/office/2011/relationships/chartStyle" Target="style1.xml"/></Relationships>"#).unwrap();
+        let patched = out.finish().unwrap().into_inner();
+        std::fs::write(&path, patched).unwrap();
+        let chart_part = |p: &std::path::Path, name: &str| -> Option<String> {
+            let mut z = zip::ZipArchive::new(std::fs::File::open(p).unwrap()).unwrap();
+            let mut s = String::new();
+            z.by_name(name).ok()?.read_to_string(&mut s).ok()?;
+            Some(s)
+        };
+        let mut back = Workbook::open_xlsx(&path).unwrap();
+        let bc = back.charts(0)[0].clone();
+        assert!(bc.trendline);
+        // Moving it keeps the formatting.
+        let mut moved = bc.clone();
+        moved.anchor.row += 3;
+        back.update_chart(moved.clone()).unwrap();
+        let p2 = dir.join("c2.xlsx");
+        back.save_xlsx(&p2).unwrap();
+        let x = chart_part(&p2, "xl/charts/chart1.xml").unwrap();
+        assert!(x.contains("c:style val=\"42\""));
+        let rels = chart_part(&p2, "xl/charts/_rels/chart1.xml.rels").unwrap();
+        assert!(rels.contains("chartStyle"));
+        let style = rels.split("Target=\"").nth(1).unwrap().split('"').next().unwrap().to_string();
+        assert!(chart_part(&p2, &format!("xl/charts/{style}")).is_some());
+        // Changing what it shows writes CellX's own chart.
+        let mut titled = moved;
+        titled.title = "매출".into();
+        back.update_chart(titled).unwrap();
+        back.save_xlsx(&p2).unwrap();
+        let x = chart_part(&p2, "xl/charts/chart1.xml").unwrap();
+        assert!(!x.contains("c:style val=\"42\"") && x.contains("매출") && x.contains("c:trendline"));
+    }
     use crate::extras::PivotValue;
 
     fn sample() -> Workbook {

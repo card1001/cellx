@@ -395,6 +395,9 @@ export function ChartDialog(props: { chart: Chart; onDone(c: Chart | null): void
           <label className="check">
             <input type="checkbox" checked={c.legend} onChange={(e) => setC({ ...c, legend: e.target.checked })} /> 범례
           </label>
+          <label className="check">
+            <input type="checkbox" checked={!!c.trendline} disabled={c.kind === "Pie" || c.kind === "Doughnut"} onChange={(e) => setC({ ...c, trendline: e.target.checked })} /> 추세선(선형)
+          </label>
         </div>
         <div className="actions">
           <button type="submit" className="primary">

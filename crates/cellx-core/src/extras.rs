@@ -41,7 +41,40 @@ pub struct Chart {
     pub range: String,
     pub series_in_rows: bool,
     pub legend: bool,
+    /// 추세선 (선형) on every series.
+    #[serde(default)]
+    pub trendline: bool,
     pub anchor: Anchor,
+    /// The chart as an xlsx file had it, written back as it was while the
+    /// chart is not changed (keeps formatting CellX does not draw).
+    #[serde(skip)]
+    pub original: Option<ChartOriginal>,
+}
+
+/// A chart part of an xlsx file and the parts it refers to (style, colors).
+#[derive(Debug)]
+pub struct OriginalChart {
+    pub xml: String,
+    /// (relationship id, type, file name, bytes, content type).
+    pub parts: Vec<(String, String, String, Vec<u8>, Option<String>)>,
+    /// What the chart was when read: written back only while it still is.
+    pub signature: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ChartOriginal(pub std::sync::Arc<OriginalChart>);
+
+impl PartialEq for ChartOriginal {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Chart {
+    /// What decides how the chart looks in CellX, with the name of its sheet.
+    pub(crate) fn signature(&self, sheet_name: &str) -> String {
+        format!("{:?}|{}|{}|{}|{}|{}|{}", self.kind, self.title, self.range, self.series_in_rows, self.legend, self.trendline, sheet_name)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]

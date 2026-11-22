@@ -39,7 +39,7 @@ function fmt(n: number): string {
 
 const FONT = '"맑은 고딕", "Malgun Gothic", sans-serif';
 
-export function ChartSvg(props: { kind: ChartKind; data: ChartData; width: number; height: number; legend: boolean; zoom?: number }) {
+export function ChartSvg(props: { kind: ChartKind; data: ChartData; width: number; height: number; legend: boolean; trendline?: boolean; zoom?: number }) {
   const { kind, data, width: W, height: H } = props;
   const z = props.zoom ?? 1;
   const fs = 11 * z;
@@ -193,6 +193,22 @@ export function ChartSvg(props: { kind: ChartKind; data: ChartData; width: numbe
           out.push(<circle key={`s${si}-${i}`} cx={xPos(xs[i] ?? 0)} cy={valuePos(v)} r={3.5 * z} fill={color} />);
         });
       }
+      // 추세선 (선형): least squares over the points, as Excel draws it.
+      if (props.trendline) {
+        const pts = s.values.map((v, i) => (v === null ? null : ([scatter ? (xs[i] ?? 0) : i + 1, v] as const))).filter((p): p is readonly [number, number] => !!p);
+        if (pts.length >= 2) {
+          const mx = pts.reduce((a, p) => a + p[0], 0) / pts.length;
+          const my = pts.reduce((a, p) => a + p[1], 0) / pts.length;
+          const sxx = pts.reduce((a, p) => a + (p[0] - mx) ** 2, 0);
+          const slope = sxx ? pts.reduce((a, p) => a + (p[0] - mx) * (p[1] - my), 0) / sxx : 0;
+          const at = (x: number) => my + slope * (x - mx);
+          const x0 = scatter ? Math.min(...pts.map((p) => p[0])) : 1;
+          const x1 = scatter ? Math.max(...pts.map((p) => p[0])) : n;
+          const pos = (x: number) => (scatter ? xPos(x) : catPos(x - 1));
+          const [a, b] = [x0, x1].map((x) => (horizontal ? [valuePos(at(x)), pos(x)] : [pos(x), valuePos(at(x))]));
+          out.push(<line key={`tr${si}`} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} stroke={color} strokeWidth={1.5 * z} strokeDasharray={`${2 * z} ${2 * z}`} />);
+        }
+      }
     });
   }
 
@@ -341,7 +357,7 @@ export function ChartLayer(props: {
             }}
           >
             {d ? (
-              <ChartSvg kind={c.kind} data={d} width={w} height={h} legend={c.legend} zoom={z} />
+              <ChartSvg kind={c.kind} data={d} width={w} height={h} legend={c.legend} trendline={c.trendline} zoom={z} />
             ) : (
               <div className="chart-empty">데이터 없음</div>
             )}

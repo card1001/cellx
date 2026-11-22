@@ -1635,7 +1635,11 @@ impl Workbook {
     pub fn xlsx_bytes(&self) -> Result<Vec<u8>> {
         let mut xlsx = std::io::Cursor::new(Vec::new());
         ironcalc::export::save_xlsx_to_writer(self.model(), &mut xlsx).map_err(|e| CellxError::Xlsx(e.to_string()))?;
-        let book = crate::ooxml::BookParts { protection: self.book_protection_xml(), views: self.custom_workbook_views_xml() };
+        let book = crate::ooxml::BookParts {
+            protection: self.book_protection_xml(),
+            views: self.custom_workbook_views_xml(),
+            pivot_caches: self.pivot_parts().into_iter().map(|p| p.cache).collect(),
+        };
         crate::ooxml::add_extras_with(xlsx.get_ref(), &self.sheet_parts(), &self.sheet_names(), &book)
     }
 

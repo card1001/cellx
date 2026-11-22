@@ -174,6 +174,7 @@ export interface Chart {
   range: string;
   series_in_rows: boolean;
   legend: boolean;
+  trendline?: boolean;
   anchor: ChartAnchor;
 }
 
