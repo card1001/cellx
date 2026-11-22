@@ -315,6 +315,22 @@ impl<'a> UserModel<'a> {
         &self.model
     }
 
+    /// CellX: the cells whose content the undo entries from `depth` on changed,
+    /// or `None` when one of them may change values in another way.
+    pub fn content_changes_since(&self, depth: usize) -> Option<Vec<(u32, i32, i32)>> {
+        let lists = self.history.undo_stack.get(depth..).unwrap_or(&[]);
+        let mut out = Vec::new();
+        crate::user_model::history::content_changes(lists, &mut out).then_some(out)
+    }
+
+    /// CellX: the same for the `count` entries an undo (or a redo) is about to apply.
+    pub fn content_changes_on_top(&self, count: usize, redo: bool) -> Option<Vec<(u32, i32, i32)>> {
+        let stack = if redo { &self.history.redo_stack } else { &self.history.undo_stack };
+        let lists = &stack[stack.len().saturating_sub(count)..];
+        let mut out = Vec::new();
+        crate::user_model::history::content_changes(lists, &mut out).then_some(out)
+    }
+
     /// Number of entries on the undo stack. Hosts that keep a parallel history
     /// use it to know how many steps an action pushed.
     pub fn undo_depth(&self) -> usize {
@@ -1186,6 +1202,7 @@ impl<'a> UserModel<'a> {
         })?;
 
         let old_merged_cells = self.model.get_merged_cells(sheet)?.to_vec();
+        let refs = self.model.formulas_reading_rows(sheet, row, row_count);
         self.model.delete_rows(sheet, row, row_count)?;
 
         let mut diff_list = self.merged_cells_snapshot_diffs(sheet, old_merged_cells)?;
@@ -1195,6 +1212,7 @@ impl<'a> UserModel<'a> {
             row,
             count: row_count,
             old_data,
+            refs,
         });
         self.push_diff_list(diff_list);
         self.evaluate_if_not_paused();

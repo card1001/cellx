@@ -247,6 +247,7 @@ impl<'a> UserModel<'a> {
                     row,
                     count: _,
                     old_data,
+                    refs,
                 } => {
                     needs_evaluation = true;
                     self.model
@@ -260,6 +261,9 @@ impl<'a> UserModel<'a> {
                             *worksheet.row_entry_mut(r, || fresh) = row_style;
                         }
                         worksheet.sheet_data.set_row(r, row_data.data.clone());
+                    }
+                    for (s, r, c, formula) in refs {
+                        self.model.set_user_input(*s, *r, *c, formula.clone())?;
                     }
                 }
                 Diff::InsertColumns {
@@ -791,7 +795,7 @@ impl<'a> UserModel<'a> {
                     sheet,
                     row,
                     count,
-                    old_data: _,
+                    ..
                 } => {
                     self.model.delete_rows(*sheet, *row, *count)?;
                     needs_evaluation = true;

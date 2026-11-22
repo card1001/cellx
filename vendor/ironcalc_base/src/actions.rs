@@ -354,7 +354,7 @@ fn displace_cf_rule_formulas(
 }
 
 impl<'a> Model<'a> {
-    fn shift_cell_formula(
+    pub(crate) fn shift_cell_formula(
         &mut self,
         sheet: u32,
         row: i32,
@@ -485,7 +485,7 @@ impl<'a> Model<'a> {
     /// * `source_column` - The column index of the cell's current location.
     /// * `target_row` - The row index of the cell's new location.
     /// * `target_column` - The column index of the cell's new location.
-    fn move_cell(
+    pub(crate) fn move_cell(
         &mut self,
         sheet: u32,
         source_row: i32,
@@ -1023,22 +1023,8 @@ impl<'a> Model<'a> {
         // Merged ranges are remapped at the end; take them out so the cell moves
         // (which go through `set_user_input`) do not trip the covered-cell guard.
         let merged_cells = std::mem::take(&mut self.workbook.worksheet_mut(sheet)?.merged_cells);
-        // Move cells
-        let worksheet = &self.workbook.worksheet(sheet)?;
-        let mut all_rows = worksheet.sheet_data.rows();
-        all_rows.reverse();
-        for r in all_rows {
-            if r >= row {
-                // We do not really need the columns in any order
-                let columns: Vec<i32> = self.get_columns_for_row(sheet, r, false)?;
-                for column in columns {
-                    self.move_cell(sheet, r, column, r + row_count, column)?;
-                }
-            } else {
-                // Rows are in descending order
-                break;
-            }
-        }
+        // Move cells (CellX: as they are, see `row_insert`)
+        self.move_rows_down(sheet, row, row_count)?;
         // In the list of rows styles:
         // * Add all rows above the rows we are inserting unchanged
         // * Shift the ones below
@@ -1092,7 +1078,11 @@ impl<'a> Model<'a> {
             row,
             delta: row_count,
         };
-        self.displace_cells(&disp)?;
+        self.displace_for_row_shift(crate::row_insert::RowShift {
+            sheet,
+            row,
+            count: row_count,
+        })?;
         self.displace_cf_ranges(sheet, &disp);
 
         Ok(())
@@ -1123,25 +1113,8 @@ impl<'a> Model<'a> {
         // Merged ranges are remapped at the end; take them out so the cell moves
         // (which go through `set_user_input`) do not trip the covered-cell guard.
         let merged_cells = std::mem::take(&mut self.workbook.worksheet_mut(sheet)?.merged_cells);
-        // Move cells
-        let worksheet = &self.workbook.worksheet(sheet)?;
-        let all_rows = worksheet.sheet_data.rows();
-
-        for r in all_rows {
-            if r >= row {
-                // We do not need ordered, but it is safer to eliminate sources of randomness in the algorithm
-                let columns: Vec<i32> = self.get_columns_for_row(sheet, r, false)?;
-                if r >= row + row_count {
-                    // displace all cells in column
-                    for column in columns {
-                        self.move_cell(sheet, r, column, r - row_count, column)?;
-                    }
-                } else {
-                    // remove all cells in row
-                    self.workbook.worksheet_mut(sheet)?.sheet_data.remove_row(r);
-                }
-            }
-        }
+        // Move cells (CellX: as they are, see `row_insert`)
+        self.move_rows_up(sheet, row, row_count)?;
         // In the list of rows styles:
         // * Add all rows above the rows we are deleting unchanged
         // * Skip all those we are deleting
@@ -1201,7 +1174,11 @@ impl<'a> Model<'a> {
             row,
             delta: -row_count,
         };
-        self.displace_cells(&disp)?;
+        self.displace_for_row_shift(crate::row_insert::RowShift {
+            sheet,
+            row,
+            count: -row_count,
+        })?;
         self.displace_cf_ranges(sheet, &disp);
         Ok(())
     }

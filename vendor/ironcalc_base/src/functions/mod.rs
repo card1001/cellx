@@ -14,6 +14,7 @@ mod engineering;
 mod financial;
 mod information;
 mod logical;
+pub(crate) mod lookup_cache;
 mod lookup_and_reference;
 mod macros;
 mod math_and_trigonometry;

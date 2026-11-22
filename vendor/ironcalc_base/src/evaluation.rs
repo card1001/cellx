@@ -421,6 +421,15 @@ pub(crate) struct Evaluation {
     /// restart, the cells stay on `stack`, still `Evaluating`, to be run again
     /// from the top once the recursion has unwound.
     pub(crate) unwinding: bool,
+    /// CellX: during an incremental pass, the formulas to evaluate. Every other
+    /// formula keeps the value it has.
+    pub(crate) only: Option<HashSet<CellKey, KeyBuild>>,
+    /// CellX: which formulas read which cells (see `dependencies`).
+    pub(crate) deps: Option<crate::dependencies::DepIndex>,
+    /// CellX: how many formulas the last evaluation ran, and whether it was incremental.
+    pub(crate) last_partial: Option<usize>,
+    /// CellX: lookup ranges read in the current pass (see `lookup_cache`).
+    pub(crate) lookup_cache: HashMap<(u32, i32, i32, i32, i32), Arc<crate::functions::lookup_cache::LookupVector>>,
 }
 
 /// How deep the recursion may go when nobody has said otherwise, in formulas
@@ -471,6 +480,10 @@ impl Default for Evaluation {
             max_stack: DEFAULT_MAX_STACK,
             stack_base: 0,
             unwinding: false,
+            only: None,
+            deps: None,
+            last_partial: None,
+            lookup_cache: HashMap::new(),
         }
     }
 }
@@ -504,6 +517,7 @@ impl<'a> Model<'a> {
     /// `#CIRC!` and keeps no spill cells: its stale cells are dropped when it
     /// is marked, so there is nothing of it to read or to contradict.
     pub fn evaluate(&mut self) {
+        self.evaluation.last_partial = None;
         self.sync_anchor_order();
         // Every pass starts from the same sheet: what an abandoned pass wrote
         // is undone. This is what makes a pass a function of the anchor order.
@@ -531,6 +545,125 @@ impl<'a> Model<'a> {
         }
         self.evaluation.restarts_in_last_evaluation = log.restarts;
         self.evaluate_conditional_formatting();
+    }
+
+    /// CellX: forgets which formulas read which cells. Call it after anything
+    /// that changes formulas other than by editing cells: inserting or deleting
+    /// rows, columns or sheets, renaming, defined names, tables.
+    pub fn invalidate_dependencies(&mut self) {
+        self.evaluation.deps = None;
+    }
+
+    /// CellX: how many formulas the last evaluation ran, if it was incremental.
+    pub fn last_partial_evaluation(&self) -> Option<usize> {
+        self.evaluation.last_partial
+    }
+
+    /// CellX: evaluates only the formulas that read, directly or through other
+    /// formulas, one of the `changed` cells (whose content was just set), plus
+    /// the volatile ones. The other formulas keep their values, which must be
+    /// those of a complete evaluation. Falls back to `evaluate()` when the
+    /// workbook has array formulas, or when most formulas are affected anyway.
+    pub fn evaluate_changed(&mut self, changed: &[CellKey]) {
+        let mut deps = match self.evaluation.deps.take() {
+            Some(d) if d.still_valid(self) => d,
+            _ => crate::dependencies::DepIndex::build(self),
+        };
+        for c in changed {
+            deps.update_cell(self, *c);
+        }
+        if !deps.arrays.is_empty() {
+            self.evaluate();
+            // Arrays that no longer spill stop forcing full evaluations.
+            deps.arrays.retain(|&(sheet, row, column)| {
+                matches!(
+                    self.fetch_cell(CellReferenceIndex { sheet, row, column }).as_deref(),
+                    Some(Cell::ArrayFormula { r, kind, .. }) if *r != (1, 1) || *kind == ArrayKind::Cse
+                )
+            });
+            self.evaluation.deps = Some(deps);
+            return;
+        }
+        let total = deps.formula_count();
+        let mut dirty: HashSet<CellKey, KeyBuild> = deps.volatile.clone();
+        let mut queue: Vec<CellKey> = Vec::with_capacity(changed.len());
+        for c in changed {
+            if deps.is_formula(c) {
+                dirty.insert(*c);
+            }
+            queue.push(*c);
+        }
+        let limit = total / 2 + 64;
+        while let Some(cell) = queue.pop() {
+            deps.dependents(cell, |d| {
+                if dirty.insert(d) {
+                    queue.push(d);
+                }
+            });
+            if dirty.len() > limit {
+                break;
+            }
+        }
+        if dirty.len() > limit {
+            self.evaluation.deps = Some(deps);
+            self.evaluate();
+            return;
+        }
+        self.evaluation.deps = Some(deps);
+        let mut order: Vec<CellKey> = dirty.iter().copied().collect();
+        order.sort_unstable();
+        let count = order.len();
+        let restart = self.run_partial_pass(order.clone(), dirty);
+        // A formula that now returns an array spills over other cells, which
+        // formulas outside this pass may read: that is the full evaluation's job.
+        let spilled = order.iter().any(|&(sheet, row, column)| {
+            matches!(
+                self.fetch_cell(CellReferenceIndex { sheet, row, column }).as_deref(),
+                Some(Cell::ArrayFormula { r, kind, .. }) if *r != (1, 1) || *kind == ArrayKind::Cse
+            )
+        });
+        if restart.is_some() || spilled {
+            self.evaluate();
+            return;
+        }
+        self.evaluate_conditional_formatting();
+        self.evaluation.last_partial = Some(count);
+    }
+
+    fn run_partial_pass(
+        &mut self,
+        order: Vec<CellKey>,
+        only: HashSet<CellKey, KeyBuild>,
+    ) -> Option<Restart> {
+        let state = &mut self.evaluation;
+        state.cells.clear();
+        state.stack.clear();
+        state.seen.clear();
+        state.seen_ranges.clear();
+        state.restart = None;
+        state.depth = 0;
+        state.unwinding = false;
+        state.circular.clear();
+        state.in_pass = true;
+        state.lookup_cache.clear();
+        state.only = Some(only);
+        self.clear_variable_stack();
+        self.clear_lambdas();
+        let mut restart = None;
+        for (sheet, row, column) in order {
+            let cell = CellReferenceIndex { sheet, row, column };
+            self.evaluation.root = Some(cell);
+            self.evaluate_cell(cell);
+            if self.evaluation.restart.is_some() {
+                restart = self.evaluation.restart.take();
+                break;
+            }
+        }
+        self.evaluation.only = None;
+        self.evaluation.in_pass = false;
+        self.evaluation.root = None;
+        self.evaluation.lookup_cache.clear();
+        restart
     }
 
     /// Sets how many formulas deep the evaluation may recurse. A formula that
@@ -696,6 +829,7 @@ impl<'a> Model<'a> {
         state.unwinding = false;
         state.circular = circular_anchors.iter().copied().collect();
         state.in_pass = true;
+        state.lookup_cache.clear();
         // dynamic links (HYPERLINK) are rebuilt on every evaluation
         self.links.clear();
         self.clear_variable_stack();
@@ -714,6 +848,7 @@ impl<'a> Model<'a> {
         }
         self.evaluation.in_pass = false;
         self.evaluation.root = None;
+        self.evaluation.lookup_cache.clear();
         restart
     }
 
@@ -832,7 +967,13 @@ impl<'a> Model<'a> {
                 return circular_reference(cell_reference);
             }
             Some(CellState::Evaluated) => return self.stored_value(cell_reference),
-            None => {}
+            None => {
+                if let Some(only) = &self.evaluation.only {
+                    if !only.contains(&key) {
+                        return self.stored_value(cell_reference);
+                    }
+                }
+            }
         }
         self.evaluation.cells.insert(key, CellState::Evaluating);
         // Everything above this length is this cell and what it needs.

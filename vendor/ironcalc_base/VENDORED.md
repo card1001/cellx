@@ -17,3 +17,6 @@ CellX에서 바꾼 부분:
 9. `Parser::set_tables`, `Model::refresh_parser_tables` — 불러온 뒤에 만든 표의 구조적 참조(`표1[금액]`) 해석.
 10. 행 정보(`Worksheet::rows`)를 행 번호 순으로 유지하고 이진 탐색 — 행 숨기기·높이·스타일 조회가 행마다 전체를 훑어 필터·윤곽에서 O(n²)이던 문제.
 11. `Styles::get_style` 공개 — 정렬·중복 제거에서 서식을 인덱스로 비교하고 필요할 때만 다시 씀.
+12. 증분 재계산: `dependencies` 모듈(수식→참조 셀 역방향 인덱스), `Model::evaluate_changed`·`invalidate_dependencies`, `UserModel::content_changes_since`·`content_changes_on_top`.
+13. 조회 캐시: `functions/lookup_cache` — 한 번의 계산 안에서 VLOOKUP·HLOOKUP·MATCH 범위를 한 번만 읽고 정확히 일치 해시 인덱스 사용.
+14. 행 삽입·삭제: `row_insert` — 셀을 그대로 옮기고 참조는 해석된 수식에서 조정(#REF!가 되는 수식만 문자열 경로). 행 삭제 실행 취소 때 #REF!가 된 수식 복원(`Diff::DeleteRows::refs`).

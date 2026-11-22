@@ -136,6 +136,9 @@ pub(crate) enum Diff {
         row: i32,
         count: i32,
         old_data: Vec<RowData>,
+        /// CellX: formulas elsewhere that read the deleted rows (and so became
+        /// #REF!), as they were written: undo puts them back.
+        refs: Vec<(u32, i32, i32, String)>,
     },
     InsertColumns {
         sheet: u32,
@@ -362,4 +365,54 @@ pub enum DiffType {
 pub struct QueueDiffs {
     pub r#type: DiffType,
     pub list: DiffList,
+}
+
+/// CellX: adds to `out` the cells whose content the diffs set or cleared.
+/// Returns false when a diff can change values some other way (structure,
+/// names, hidden rows for SUBTOTAL, merges, arrays): then only a full
+/// evaluation is right.
+pub(crate) fn content_changes(lists: &[DiffList], out: &mut Vec<(u32, i32, i32)>) -> bool {
+    for list in lists {
+        for diff in list {
+            match diff {
+                Diff::SetCellValue { sheet, row, column, .. } => out.push((*sheet, *row, *column)),
+                Diff::RangeClearContents { sheet, row, column, old_value, .. }
+                | Diff::RangeClearAll { sheet, row, column, old_value, .. } => {
+                    for (i, line) in old_value.iter().enumerate() {
+                        for (j, cell) in line.iter().enumerate() {
+                            if cell.is_some() {
+                                out.push((*sheet, row + i as i32, column + j as i32));
+                            }
+                        }
+                    }
+                }
+                // Formatting, sizes, frozen panes, colors, links and conditional
+                // formats do not change what formulas compute.
+                Diff::CellClearFormatting { .. }
+                | Diff::SetCellStyle { .. }
+                | Diff::ApplyNamedStyle { .. }
+                | Diff::SetColumnWidth { .. }
+                | Diff::SetRowHeight { .. }
+                | Diff::SetColumnStyle { .. }
+                | Diff::SetRowStyle { .. }
+                | Diff::DeleteColumnStyle { .. }
+                | Diff::DeleteRowStyle { .. }
+                | Diff::SetFrozenRowsCount { .. }
+                | Diff::SetFrozenColumnsCount { .. }
+                | Diff::SetSheetColor { .. }
+                | Diff::SetShowGridLines { .. }
+                | Diff::SetTheme { .. }
+                | Diff::SetCellLink { .. }
+                | Diff::AddConditionalFormatting { .. }
+                | Diff::DeleteConditionalFormatting { .. }
+                | Diff::UpdateConditionalFormatting { .. }
+                | Diff::SwapConditionalFormattingPriority { .. }
+                | Diff::CreateNamedStyle { .. }
+                | Diff::DeleteNamedStyle { .. }
+                | Diff::UpdateNamedStyle { .. } => {}
+                _ => return false,
+            }
+        }
+    }
+    true
 }

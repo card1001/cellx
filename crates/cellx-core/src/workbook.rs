@@ -222,6 +222,9 @@ pub struct RecalcStats {
     pub bridge_cache_hits: usize,
     pub calc_ms: f64,
     pub bridge_ms: f64,
+    /// Formulas evaluated by an incremental recalculation; `None` for a full one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evaluated: Option<usize>,
 }
 
 /// What Excel's status bar shows for a selection.
@@ -322,6 +325,9 @@ pub struct Workbook {
     pub(crate) page_setups: Vec<PageSetup>,
     pub(crate) next_object_id: u32,
     pub last_recalc: RecalcStats,
+    /// The model was changed outside its history (`model_mut`): the next
+    /// recalculation has to be a full one.
+    untracked: bool,
 }
 
 fn style_key(s: &str) -> String {
@@ -372,6 +378,7 @@ impl Workbook {
             page_setups: Vec::new(),
             next_object_id: 1,
             last_recalc: RecalcStats::default(),
+            untracked: true,
         })
     }
 
@@ -388,6 +395,7 @@ impl Workbook {
     }
 
     pub(crate) fn model_mut(&mut self) -> &mut Model<'static> {
+        self.untracked = true;
         self.um.get_model_mut()
     }
 
@@ -471,11 +479,12 @@ impl Workbook {
     pub(crate) fn commit(&mut self, start: (usize, Side)) -> Result<RecalcStats> {
         let steps = self.um.undo_depth().saturating_sub(start.0);
         let after = self.side();
+        let changes = if start.1 == after { self.um.content_changes_since(start.0) } else { None };
         if steps > 0 || start.1 != after {
             self.undo.push(Action { steps, before: start.1, after });
             self.redo.clear();
         }
-        self.recalc()
+        self.recalc_changes(changes)
     }
 
     pub fn can_undo(&self) -> bool {
@@ -488,24 +497,26 @@ impl Workbook {
 
     pub fn undo(&mut self) -> Result<RecalcStats> {
         let Some(a) = self.undo.pop() else { return Ok(RecalcStats::default()) };
+        let changes = if a.before == a.after { self.um.content_changes_on_top(a.steps, false) } else { None };
         for _ in 0..a.steps {
             self.um.undo()?;
         }
         self.restore_side(&a.before);
         self.redo.push(a);
         self.mark_bridges_dirty();
-        self.recalc()
+        self.recalc_changes(changes)
     }
 
     pub fn redo(&mut self) -> Result<RecalcStats> {
         let Some(a) = self.redo.pop() else { return Ok(RecalcStats::default()) };
+        let changes = if a.before == a.after { self.um.content_changes_on_top(a.steps, true) } else { None };
         for _ in 0..a.steps {
             self.um.redo()?;
         }
         self.restore_side(&a.after);
         self.undo.push(a);
         self.mark_bridges_dirty();
-        self.recalc()
+        self.recalc_changes(changes)
     }
 
     fn mark_bridges_dirty(&mut self) {
@@ -1130,11 +1141,34 @@ impl Workbook {
     /// Evaluates the workbook, then refreshes every bridge call whose inputs changed,
     /// repeating until no bridge result changes.
     pub fn recalc(&mut self) -> Result<RecalcStats> {
+        self.recalc_changes(None)
+    }
+
+    /// Recalculates after the content of `changes` was set: only the formulas
+    /// that depend on them, or everything (`None`, or after an untracked change).
+    pub(crate) fn recalc_changes(&mut self, changes: Option<Vec<(u32, i32, i32)>>) -> Result<RecalcStats> {
         let mut stats = RecalcStats::default();
+        let mut changes = if self.untracked { None } else { changes };
+        self.untracked = false;
         for _ in 0..MAX_BRIDGE_PASSES {
             stats.passes += 1;
             let t = Instant::now();
-            self.model_mut().evaluate();
+            let model = self.um.get_model_mut();
+            match changes.take() {
+                Some(cells) => {
+                    model.evaluate_changed(&cells);
+                    stats.evaluated = match (model.last_partial_evaluation(), stats.evaluated, stats.passes) {
+                        (Some(n), Some(before), p) if p > 1 => Some(before + n),
+                        (Some(n), _, 1) => Some(n),
+                        _ => None,
+                    };
+                }
+                None => {
+                    model.invalidate_dependencies();
+                    model.evaluate();
+                    stats.evaluated = None;
+                }
+            }
             stats.calc_ms += t.elapsed().as_secs_f64() * 1000.0;
 
             let t = Instant::now();
@@ -1143,9 +1177,14 @@ impl Workbook {
             if changed.is_empty() {
                 break;
             }
+            // Data engine results are written outside the history; the next
+            // pass re-evaluates what reads them.
+            let mut written = Vec::with_capacity(changed.len());
             for ((sheet, row, col), text) in changed {
-                self.model_mut().set_user_input(sheet, row, col, text)?;
+                self.um.get_model_mut().set_user_input(sheet, row, col, text)?;
+                written.push((sheet, row, col));
             }
+            changes = Some(written);
         }
         self.last_recalc = stats.clone();
         Ok(stats)

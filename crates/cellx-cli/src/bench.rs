@@ -332,7 +332,18 @@ pub fn bench_sheet(rows: i32, dir: &Path) -> Result<()> {
 
     let t = Instant::now();
     wb.set_input(0, 2, 5, "7")?;
-    report("셀 하나 수정 + 재계산", ms(t));
+    report("첫 수정 (의존성 인덱스 생성 포함)", ms(t));
+    let mut edits = Vec::new();
+    for i in 0..20 {
+        let r = 3 + (rng.below(rows as u64) as i32);
+        let t = Instant::now();
+        wb.set_input(0, r, 5, &format!("{}", 1 + i % 9))?;
+        edits.push(ms(t));
+    }
+    println!("{} {:>9.2} ms (계산한 수식 {}개)", pad("셀 하나 수정 + 재계산 (중앙값)", 40), median(edits), wb.last_recalc.evaluated.map_or("전체".into(), |n| n.to_string()));
+    let t = Instant::now();
+    wb.set_input(0, 2, 6, "=SUM(G3:G1000)")?;
+    report("수식 하나 입력", ms(t));
 
     let t = Instant::now();
     wb.sort_range(0, all, &[SortKey { col: 2, descending: false }, SortKey { col: 6, descending: true }], true)?;
@@ -350,6 +361,12 @@ pub fn bench_sheet(rows: i32, dir: &Path) -> Result<()> {
     let t = Instant::now();
     wb.insert_rows(0, 2, 1)?;
     report("맨 위에 행 삽입 (아래 수식 전부 이동)", ms(t));
+    let t = Instant::now();
+    wb.undo()?;
+    report("행 삽입 실행 취소", ms(t));
+    let t = Instant::now();
+    wb.delete_rows(0, 2, 1)?;
+    report("맨 위 행 삭제", ms(t));
     wb.undo()?;
 
     let t = Instant::now();

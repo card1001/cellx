@@ -63,9 +63,70 @@ jobs:
       - name: 프런트엔드 의존성
         working-directory: apps/desktop
         run: pnpm install --frozen-lockfile
+
+      # 코드 서명 (docs/code-signing.md). 비밀값이 없으면 서명하지 않고 빌드합니다.
+      - name: 코드 서명 준비 (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          AZURE_KEY_VAULT_CERT_URL: ${{ secrets.AZURE_KEY_VAULT_CERT_URL }}
+        run: |
+          $conf = "$PWD/apps/desktop/src-tauri/signing.json"
+          $windows = $null
+          if ($env:WINDOWS_CERTIFICATE) {
+            $pfx = "$env:RUNNER_TEMP/cellx.pfx"
+            [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+            $password = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -Force -AsPlainText
+            $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+            Remove-Item $pfx
+            $windows = @{ certificateThumbprint = $cert.Thumbprint; digestAlgorithm = "sha256"; timestampUrl = "http://timestamp.digicert.com" }
+            Write-Host "PFX 인증서로 서명합니다: $($cert.Subject)"
+          } elseif ($env:AZURE_KEY_VAULT_CERT_URL) {
+            go install github.com/sassoftware/relic/v8@latest
+            "$(go env GOPATH)\bin" >> $env:GITHUB_PATH
+            $relic = "$env:RUNNER_TEMP/relic.conf"
+            $lines = @('tokens:', '  azure:', '    type: azure', 'keys:', '  azure:', '    token: azure', "    id: $env:AZURE_KEY_VAULT_CERT_URL")
+            Set-Content -Path $relic -Value $lines
+            $windows = @{ signCommand = "relic sign --file %1 --key azure --config $($relic -replace '\\','/')" }
+            Write-Host "Azure Key Vault 인증서로 서명합니다"
+          } else {
+            Write-Host "::warning::서명 비밀값이 없어 서명하지 않은 설치 파일을 만듭니다"
+          }
+          if ($windows) {
+            @{ bundle = @{ windows = $windows } } | ConvertTo-Json -Depth 5 | Set-Content -Path $conf
+            "SIGN_ARGS=--config $($conf -replace '\\','/')" >> $env:GITHUB_ENV
+          }
+      - name: 코드 서명·공증 준비 (macOS)
+        if: matrix.platform == 'macos-latest'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # Tauri는 이 변수들이 있으면(빈 값이라도) 서명을 시도하므로, 값이 있을 때만 넘깁니다.
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            for v in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+              if [ -n "$(printenv "$v")" ]; then
+                { echo "$v<<__CELLX__"; printenv "$v"; echo "__CELLX__"; } >> "$GITHUB_ENV"
+              fi
+            done
+            echo "Developer ID 인증서로 서명합니다${APPLE_ID:+ (공증 포함)}"
+          else
+            echo "::warning::Apple 서명 비밀값이 없어 서명하지 않은 dmg를 만듭니다"
+          fi
+
       - uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Azure Key Vault 서명(relic)에 필요한 서비스 주체. 쓰지 않으면 비어 있어도 됩니다.
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         with:
           projectPath: apps/desktop
           tagName: ${{ github.ref_name }}
@@ -75,13 +136,13 @@ jobs:
             - **Windows**: `CellX_*_x64-setup.exe`(권장, 관리자 권한 없이 사용자 계정에 설치) 또는 `CellX_*_x64_ko-KR.msi`(관리자 배포용)
             - **macOS**: `CellX_*_universal.dmg` (Apple Silicon·Intel 공용)
 
-            설치 파일은 아직 코드 서명이 되어 있지 않습니다. Windows에서 「Windows의 PC 보호」 창이 뜨면 **추가 정보 → 실행**을 누르세요.
-            macOS에서는 처음 한 번 앱을 Control-클릭 → **열기**로 실행하세요.
+            Windows에서 「Windows의 PC 보호」 창이 뜨면 **추가 정보 → 실행**을 누르세요. 서명된 설치 파일도 다운로드가 쌓여 평판이 생길 때까지는 이 창이 뜰 수 있습니다.
+            서명되지 않은 macOS 앱은 처음 한 번 Control-클릭 → **열기**로 실행하세요.
             파일이 손상되지 않았는지는 `SHA256SUMS.txt`로 확인할 수 있습니다.
           releaseDraft: true
           prerelease: ${{ startsWith(github.ref_name, 'v0.') }}
           includeUpdaterJson: false
-          args: ${{ matrix.args }}
+          args: ${{ matrix.args }} ${{ env.SIGN_ARGS }}
 
   checksums:
     name: 체크섬
