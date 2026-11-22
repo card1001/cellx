@@ -186,6 +186,57 @@ export interface GoalSeekResult {
   iterations: number;
 }
 
+export interface OutlineView {
+  rows: [number, number][];
+  cols: [number, number][];
+}
+
+export type SubtotalFn = "Sum" | "Count" | "Average" | "Max" | "Min";
+
+export interface TableView {
+  name: string;
+  sheet: number;
+  range: Range;
+  style: string;
+  stripes: boolean;
+  header: boolean;
+  totals: boolean;
+  columns: string[];
+}
+
+export interface ProtectOptions {
+  format_cells: boolean;
+  format_columns: boolean;
+  format_rows: boolean;
+  insert_rows: boolean;
+  insert_columns: boolean;
+  delete_rows: boolean;
+  delete_columns: boolean;
+  sort: boolean;
+  auto_filter: boolean;
+}
+
+export interface ProtectionView {
+  protected: boolean;
+  has_password: boolean;
+  options: ProtectOptions;
+  unlocked: Range[];
+}
+
+export type FitMode = "None" | "Width" | "Page";
+
+export interface PageSetup {
+  sheet: number;
+  landscape: boolean;
+  fit: FitMode;
+  gridlines: boolean;
+  headings: boolean;
+  title_rows: [number, number] | null;
+  row_breaks: number[];
+  col_breaks: number[];
+  page_numbers: boolean;
+}
+
 /** IronCalc's conditional formatting rule input (tagged by `type`). */
 export type CfRule = { type: string; [k: string]: unknown };
 export interface CfView {
@@ -302,6 +353,7 @@ export interface BookInfo {
   can_undo: boolean;
   can_redo: boolean;
   font: [string, number];
+  protected: boolean[];
 }
 
 export interface Range {
@@ -407,6 +459,30 @@ export const api = {
     invoke<GoalSeekResult>("goal_seek", { sheet, setCell, target, changing }),
   openLink: (url: string) => invoke<void>("open_link", { url }),
   printPage: () => invoke<void>("print_page"),
+  outline: (sheet: number) => invoke<OutlineView>("outline", { sheet }),
+  group: (sheet: number, rows: boolean, from: number, to: number) => invoke<RecalcStats>("group", { sheet, rows, from, to }),
+  ungroup: (sheet: number, rows: boolean, from: number, to: number) => invoke<RecalcStats>("ungroup", { sheet, rows, from, to }),
+  clearOutline: (sheet: number) => invoke<RecalcStats>("clear_outline", { sheet }),
+  toggleGroup: (sheet: number, rows: boolean, index: number, level: number, collapse: boolean) =>
+    invoke<RecalcStats>("toggle_group", { sheet, rows, index, level, collapse }),
+  showOutlineLevel: (sheet: number, rows: boolean, level: number) => invoke<RecalcStats>("show_outline_level", { sheet, rows, level }),
+  subtotal: (sheet: number, range: Range, options: { group_col: number; func: SubtotalFn; value_cols: number[]; replace: boolean }) =>
+    invoke<RecalcStats>("subtotal", { sheet, range, options }),
+  removeSubtotals: (sheet: number, range: Range) => invoke<RecalcStats>("remove_subtotals", { sheet, range }),
+  tablesOn: (sheet: number) => invoke<TableView[]>("tables_on", { sheet }),
+  createTable: (sheet: number, range: Range, hasHeader: boolean, style: string) => invoke<TableView>("create_table", { sheet, range, hasHeader, style }),
+  updateTable: (update: { name: string; new_name: string; style: string; stripes: boolean; totals: boolean }) =>
+    invoke<RecalcStats>("update_table", { update }),
+  convertTableToRange: (name: string) => invoke<RecalcStats>("convert_table_to_range", { name }),
+  protection: (sheet: number) => invoke<ProtectionView>("protection", { sheet }),
+  protectSheet: (sheet: number, password: string | null, options: ProtectOptions) => invoke<void>("protect_sheet", { sheet, password, options }),
+  unprotectSheet: (sheet: number, password: string | null) => invoke<void>("unprotect_sheet", { sheet, password }),
+  setLocked: (sheet: number, range: Range, locked: boolean) => invoke<RecalcStats>("set_locked", { sheet, range, locked }),
+  pageSetup: (sheet: number) => invoke<PageSetup>("page_setup", { sheet }),
+  setPageSetup: (setup: PageSetup) => invoke<void>("set_page_setup", { setup }),
+  insertPageBreak: (sheet: number, row: number, col: number) => invoke<void>("insert_page_break", { sheet, row, col }),
+  removePageBreak: (sheet: number, row: number, col: number) => invoke<void>("remove_page_break", { sheet, row, col }),
+  resetPageBreaks: (sheet: number) => invoke<void>("reset_page_breaks", { sheet }),
   redo: () => invoke<RecalcStats>("redo"),
 
   insertRows: (sheet: number, at: number, count: number) => invoke<RecalcStats>("insert_rows", { sheet, at, count }),

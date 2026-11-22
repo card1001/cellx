@@ -5,6 +5,9 @@ import {
   type AutoFilter,
   type BookInfo,
   type NameView,
+  type PageSetup,
+  type ProtectionView,
+  type TableView,
   type ValidationFailure,
   type CellDetail,
   type Chart,
@@ -34,9 +37,14 @@ import {
   TextToColumnsDialog,
   ValidationAlert,
   ValidationDialog,
+  CreateTableDialog,
+  MessageBox,
+  PasswordDialog,
+  ProtectDialog,
+  SubtotalDialog,
 } from "./components/DataDialogs";
 import { type FormatResult, FormatCellsDialog, PromptDialog } from "./components/Dialogs";
-import { type PrintJob, type PrintOptions, PrintDialog, PrintView } from "./components/Print";
+import { type PrintJob, paginate, PrintPreviewDialog, PrintView } from "./components/Print";
 import { CfManagerDialog, ChartDialog, HighlightDialog, MemoBox, PasteSpecialDialog, PivotDialog } from "./components/ObjectDialogs";
 import { FormulaText } from "./components/FormulaText";
 import { ContextMenu, type MenuItem } from "./components/Menu";
@@ -80,10 +88,15 @@ type Dialog =
   | { kind: "hyperlink"; text: string; current: { target: string; internal: boolean } | null }
   | { kind: "goalSeek" }
   | { kind: "print" }
+  | { kind: "subtotal"; range: Range }
+  | { kind: "createTable"; range: Range; header: boolean; style: string }
+  | { kind: "protect" }
+  | { kind: "unprotect" }
   | null;
 
 const ARROWS: Record<string, Direction> = { ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right" };
 const DELTA: Record<Direction, [number, number]> = { Up: [-1, 0], Down: [1, 0], Left: [0, -1], Right: [0, 1] };
+const PROTECTED_MSG = "변경하려는 셀이나 차트가 보호된 시트에 있습니다. 변경하려면 검토 탭에서 시트 보호를 해제하세요. 암호를 입력해야 할 수도 있습니다.";
 const FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72];
 
 const measureCtx = typeof document !== "undefined" ? document.createElement("canvas").getContext("2d") : null;
@@ -130,6 +143,15 @@ export default function App() {
   const [inputTip, setInputTip] = useState<{ title: string; message: string } | null>(null);
   const [vAlert, setVAlert] = useState<{ failure: ValidationFailure; session: Session } | null>(null);
   const [printJob, setPrintJob] = useState<PrintJob | null>(null);
+  const [printState, setPrintState] = useState<{ job: PrintJob; setup: PageSetup; selection: boolean } | null>(null);
+  const [outline, setOutline] = useState<{ rows: Map<number, number>; cols: Map<number, number>; maxRow: number; maxCol: number } | null>(null);
+  const [tables, setTables] = useState<TableView[]>([]);
+  const [protection, setProtection] = useState<ProtectionView | null>(null);
+  const [pageSetupState, setPageSetupState] = useState<PageSetup | null>(null);
+  const [showPageBreaks, setShowPageBreaks] = useState(false);
+  const [msgBox, setMsgBox] = useState<string | null>(null);
+  const protectionRef = useRef<ProtectionView | null>(null);
+  protectionRef.current = protection;
   const linkClick = useRef<{ r: number; c: number; t: number } | null>(null);
   const [findMsg, setFindMsg] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(null);
@@ -325,6 +347,33 @@ export default function App() {
     };
   }, [selection.focus, tab, chartVersion]);
 
+  // Outline, tables, protection and page setup of the sheet on screen.
+  useEffect(() => {
+    if (tab.kind !== "sheet") {
+      setOutline(null);
+      setTables([]);
+      setProtection(null);
+      setPageSetupState(null);
+      return;
+    }
+    let live = true;
+    const sheet = tab.index;
+    Promise.all([api.outline(sheet), api.tablesOn(sheet), api.protection(sheet), api.pageSetup(sheet)])
+      .then(([o, t, p, ps]) => {
+        if (!live) return;
+        const rows = new Map(o.rows);
+        const cols = new Map(o.cols);
+        setOutline(rows.size || cols.size ? { rows, cols, maxRow: Math.max(0, ...rows.values()), maxCol: Math.max(0, ...cols.values()) } : null);
+        setTables(t);
+        setProtection(p);
+        setPageSetupState(ps);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [tab, info, chartVersion]);
+
   // Charts of the sheet on screen.
   useEffect(() => {
     if (tab.kind !== "sheet") {
@@ -390,10 +439,21 @@ export default function App() {
   };
 
   // ---------------------------------------------------------------- editing
+  /** On a protected sheet, cells are locked unless 잠금 was turned off for them. */
+  const lockedCell = (p: Pos) => {
+    const pr = protectionRef.current;
+    if (!pr?.protected || tabRef.current.kind !== "sheet") return false;
+    return !pr.unlocked.some((u) => p.r >= u.r0 && p.r <= u.r1 && p.c >= u.c0 && p.c <= u.c1);
+  };
+
   const newSession = (text: string, mode: Session["mode"], origin: Session["origin"], original: string): Session | null => {
     const pos = selectionRef.current.focus;
     const src = sourceRef.current;
     if (tabRef.current.kind === "data" && !(src instanceof DataSource && src.rowId(pos.r) !== undefined)) return null;
+    if (lockedCell(pos)) {
+      setMsgBox(PROTECTED_MSG);
+      return null;
+    }
     return { tab: tabRef.current, pos, text, original, caret: text.length, mode, origin, point: null };
   };
 
@@ -575,6 +635,7 @@ export default function App() {
   const applyFormat = async (r: FormatResult) => {
     if (tabRef.current.kind !== "sheet") return;
     const sheet = tabRef.current.index;
+    if (r.locked !== undefined) await api.setLocked(sheet, range(), r.locked).catch(fail);
     const ops: [string, string][] = [];
     if (r.numFmt !== undefined) ops.push(["num_fmt", r.numFmt]);
     if (r.align !== undefined) ops.push(["alignment.horizontal", r.align]);
@@ -1083,34 +1144,111 @@ export default function App() {
     return true;
   };
 
-  const startPrint = async (o: PrintOptions) => {
+  /** Builds what to print: the used range (or the selection), sizes, merges and charts. */
+  const buildPrintJob = async (selectionOnly: boolean): Promise<PrintJob | null> => {
     const src = sourceRef.current;
     const t = tabRef.current;
-    if (!(src instanceof SheetSource) || t.kind !== "sheet") return say("일반 시트만 인쇄할 수 있습니다", true);
-    const rg = o.scope === "selection" ? range() : { r0: 1, c0: 1, r1: Math.max(1, src.lastRow), c1: Math.max(1, src.lastCol) };
+    if (!(src instanceof SheetSource) || t.kind !== "sheet") {
+      say("일반 시트만 인쇄할 수 있습니다", true);
+      return null;
+    }
+    let rg = selectionOnly ? range() : { r0: 1, c0: 1, r1: Math.max(1, src.lastRow), c1: Math.max(1, src.lastCol) };
+    if (!selectionOnly) {
+      // Charts outside the cells widen the printed area, as in Excel.
+      for (const c of charts) {
+        let w = c.anchor.dx + c.anchor.width;
+        let col = c.anchor.col;
+        while (w > 0 && col < 16384) w -= src.cols.size(col++);
+        let h = c.anchor.dy + c.anchor.height;
+        let row = c.anchor.row;
+        while (h > 0 && row < 1048576) h -= src.rows.size(row++);
+        rg = { ...rg, r1: Math.max(rg.r1, row - 1), c1: Math.max(rg.c1, col - 1) };
+      }
+    }
     const r1 = Math.min(rg.r1, rg.r0 + 20000);
-    const [vp, layout] = await Promise.all([api.viewport(t.index, rg.r0, rg.c0, r1, rg.c1), api.layout(t.index)]);
-    const cells = new Map(vp.cells.map((c) => [`${c.row}:${c.col}`, c]));
-    const job: PrintJob = {
+    const [vp, layout, chartData] = await Promise.all([
+      api.viewport(t.index, rg.r0, rg.c0, r1, rg.c1),
+      api.layout(t.index),
+      Promise.all(charts.map((c) => api.chartData(c.id).then((data) => ({ chart: c, data })).catch(() => null))),
+    ]);
+    return {
       title: sheetName(t.index),
-      options: o,
       r0: rg.r0,
       c0: rg.c0,
       r1,
       c1: rg.c1,
-      colWidths: Array.from({ length: rg.c1 - rg.c0 + 1 }, (_, i) => src.cols.size(rg.c0 + i)),
-      rowHeights: Array.from({ length: r1 - rg.r0 + 1 }, (_, i) => src.rows.size(rg.r0 + i)),
-      cells,
+      colWidth: (c) => src.cols.size(c),
+      rowHeight: (r) => src.rows.size(r),
+      cells: new Map(vp.cells.map((c) => [`${c.row}:${c.col}`, c])),
       merges: layout.merges.map(([r, c, h, w]) => ({ r, c, h, w })),
       font: src.font,
+      charts: selectionOnly ? [] : chartData.filter((x): x is NonNullable<typeof x> => !!x),
     };
-    setPrintJob(job);
-    // Two frames: the print view must be laid out before the dialog snapshots it.
+  };
+
+  const openPrint = async (selectionOnly = false) => {
+    const t = tabRef.current;
+    if (t.kind !== "sheet") return say("일반 시트만 인쇄할 수 있습니다", true);
+    const job = await buildPrintJob(selectionOnly);
+    if (!job) return;
+    const setup = await api.pageSetup(t.index);
+    setPrintState({ job, setup, selection: selectionOnly });
+  };
+
+  const doPrint = () => {
+    const ps = printState;
+    if (!ps) return;
+    setPrintJob(ps.job);
+    setPrintState(null);
+    setShowPageBreaks(true);
+    // Two frames: the pages must be laid out before the print dialog takes them.
     requestAnimationFrame(() =>
       requestAnimationFrame(() => {
         api.printPage().catch(() => window.print());
       }),
     );
+  };
+
+  /** Page break lines for the grid (Excel shows them after printing or in page layout). */
+  const pageBreakLines = useMemo(() => {
+    const src = source;
+    if (!showPageBreaks || !(src instanceof SheetSource) || !pageSetupState) return null;
+    const job: PrintJob = {
+      title: "",
+      r0: 1,
+      c0: 1,
+      r1: Math.max(1, src.lastRow),
+      c1: Math.max(1, src.lastCol),
+      colWidth: (c) => src.cols.size(c),
+      rowHeight: (r) => src.rows.size(r),
+      cells: new Map(),
+      merges: [],
+      font: src.font,
+      charts: [],
+    };
+    const pag = paginate(job, pageSetupState);
+    return {
+      rows: pag.rowPages.slice(1).map((p) => p[0]),
+      cols: pag.colPages.slice(1).map((p) => p[0]),
+      manualRows: pageSetupState.row_breaks,
+      manualCols: pageSetupState.col_breaks,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showPageBreaks, source, pageSetupState, chartVersion]);
+
+  const changePageSetup = async (ps: PageSetup) => {
+    await api.setPageSetup(ps).catch(fail);
+    setPageSetupState(ps);
+    await refreshInfo();
+  };
+
+  const activeTable = tables.find((t) => t.range.r0 <= selection.focus.r && selection.focus.r <= t.range.r1 && t.range.c0 <= selection.focus.c && selection.focus.c <= t.range.c1) ?? null;
+
+  const updateTable = async (t: TableView, change: Partial<{ new_name: string; style: string; stripes: boolean; totals: boolean }>) => {
+    const st = await run("표", () =>
+      api.updateTable({ name: t.name, new_name: change.new_name ?? t.name, style: change.style ?? t.style, stripes: change.stripes ?? t.stripes, totals: change.totals ?? t.totals }),
+    );
+    if (st) await afterChange(st);
   };
 
   // ---------------------------------------------------------------- charts, memos, pivots
@@ -1219,6 +1357,19 @@ export default function App() {
       actions.refreshAll();
       return;
     }
+    if (e.altKey && e.shiftKey && (e.key === "ArrowRight" || e.key === "ArrowLeft")) {
+      // Shift+Alt+→ groups, Shift+Alt+← ungroups (rows unless whole columns are selected).
+      e.preventDefault();
+      const rows = !wholeCols();
+      if (e.key === "ArrowRight") actions.group(rows);
+      else actions.ungroup(rows);
+      return;
+    }
+    if (mod && !e.shiftKey && (e.key.toLowerCase() === "t" || e.key.toLowerCase() === "l")) {
+      e.preventDefault();
+      actions.formatAsTable("TableStyleMedium2");
+      return;
+    }
     if (e.altKey && e.key === "ArrowDown" && listItems) {
       // Alt+↓ opens the list of a validation rule, like the arrow next to the cell.
       e.preventDefault();
@@ -1285,6 +1436,9 @@ export default function App() {
       handled();
       const input = await currentInput();
       startEdit(input, "edit", "cell", input);
+    } else if (k === "Delete" && lockedCell(f)) {
+      handled();
+      setMsgBox(PROTECTED_MSG);
     } else if (k === "Delete") {
       handled();
       void clearRange("contents");
@@ -1658,7 +1812,7 @@ export default function App() {
         void newBook();
       } else if (mod && k === "p") {
         e.preventDefault();
-        setDialog({ kind: "print" });
+        void openPrint();
       } else if (e.key === "F12") {
         e.preventDefault();
         void saveAs();
@@ -1859,7 +2013,80 @@ export default function App() {
     },
     nameManager: async () => setDialog({ kind: "names", list: await api.names().catch(() => []), startNew: false }),
     defineName: async () => setDialog({ kind: "names", list: await api.names().catch(() => []), startNew: true }),
-    print: () => setDialog({ kind: "print" }),
+    print: () => void openPrint(),
+    group: async (rows) => {
+      const rg = range();
+      const st = await onSheetOnly("그룹", (s) => (rows ? api.group(s, true, rg.r0, rg.r1) : api.group(s, false, rg.c0, rg.c1)));
+      if (st) await afterChange(st);
+    },
+    ungroup: async (rows) => {
+      const rg = range();
+      const st = await onSheetOnly("그룹 해제", (s) => (rows ? api.ungroup(s, true, rg.r0, rg.r1) : api.ungroup(s, false, rg.c0, rg.c1)));
+      if (st) await afterChange(st);
+    },
+    clearOutline: async () => {
+      const st = await onSheetOnly("윤곽 지우기", (s) => api.clearOutline(s));
+      if (st) await afterChange(st);
+    },
+    showDetail: async (show) => {
+      const t = tabRef.current;
+      const o = outline;
+      if (t.kind !== "sheet" || !o) return;
+      const f = selectionRef.current.focus;
+      // The group of the active row (or the one ending just above it).
+      const r = o.rows.has(f.r) ? f.r : o.rows.has(f.r - 1) ? f.r - 1 : null;
+      if (r === null) return say("그룹 안의 셀을 선택하세요", true);
+      const st = await run(show ? "펼치기" : "접기", () => api.toggleGroup(t.index, true, r, o.rows.get(r)!, !show));
+      if (st) await afterChange(st);
+    },
+    subtotal: async () => {
+      if (sheetOrSay() === null) return;
+      setDialog({ kind: "subtotal", range: await workRange() });
+    },
+    formatAsTable: async (style) => {
+      if (sheetOrSay() === null) return;
+      if (activeTable) return void updateTable(activeTable, { style });
+      const rg = await workRange();
+      setDialog({ kind: "createTable", range: rg, header: guessHeader(rg) || true, style });
+    },
+    tableName: (name) => activeTable && void updateTable(activeTable, { new_name: name }),
+    tableToggle: (key, value) => activeTable && void updateTable(activeTable, { [key]: value }),
+    tableToRange: async () => {
+      if (!activeTable) return;
+      const st = await run("범위로 변환", () => api.convertTableToRange(activeTable.name));
+      if (st) await afterChange(st);
+    },
+    protectSheet: () => {
+      if (sheetOrSay() === null) return;
+      if (protection?.protected) {
+        if (protection.has_password) setDialog({ kind: "unprotect" });
+        else void onSheetOnly("보호 해제", (s) => api.unprotectSheet(s, null)).then(() => afterChange());
+      } else setDialog({ kind: "protect" });
+    },
+    orientation: (landscape) => pageSetupState && void changePageSetup({ ...pageSetupState, landscape }),
+    fitWidth: (fit) => pageSetupState && void changePageSetup({ ...pageSetupState, fit }),
+    printGrid: (v) => pageSetupState && void changePageSetup({ ...pageSetupState, gridlines: v }),
+    printHeadings: (v) => pageSetupState && void changePageSetup({ ...pageSetupState, headings: v }),
+    printTitles: async () => {
+      if (!pageSetupState) return;
+      const cur = pageSetupState.title_rows;
+      const v = await ask("인쇄 제목", "반복할 행 (예: 1:1, 비우면 없음)", cur ? `${cur[0]}:${cur[1]}` : "");
+      if (v === null) return;
+      const m = /^\$?(\d+)(?::\$?(\d+))?$/.exec(v.trim());
+      void changePageSetup({ ...pageSetupState, title_rows: m ? [Number(m[1]), Number(m[2] ?? m[1])] : null });
+    },
+    pageBreak: async (kind) => {
+      const t = tabRef.current;
+      if (t.kind !== "sheet") return;
+      const f = selectionRef.current.focus;
+      if (kind === "insert") await api.insertPageBreak(t.index, f.r, f.c).catch(fail);
+      else if (kind === "remove") await api.removePageBreak(t.index, f.r, f.c).catch(fail);
+      else await api.resetPageBreaks(t.index).catch(fail);
+      setShowPageBreaks(true);
+      setPageSetupState(await api.pageSetup(t.index));
+      await refreshInfo();
+    },
+    togglePageBreaks: () => setShowPageBreaks((v) => !v),
     zoomToSelection: () => {
       const src = sourceRef.current;
       if (!src) return;
@@ -1948,6 +2175,10 @@ export default function App() {
         showMemos={showMemos}
         hasMemo={onSheetTab && !!memoAt(selection.focus)}
         filterOn={!!filter}
+        table={activeTable}
+        protectedSheet={!!protection?.protected}
+        pageSetup={pageSetupState}
+        showPageBreaks={showPageBreaks}
       />
 
       <div className="formula-bar">
@@ -2090,6 +2321,16 @@ export default function App() {
               }
               onFilterButton={(c, x, y) => void openFilterMenu(c, x, y)}
               listButton={listItems && !session ? selection.focus : null}
+              outline={outline}
+              onOutlineToggle={async (rows, index, level, collapse) => {
+                const st = await onSheetOnly("윤곽", (s) => api.toggleGroup(s, rows, index, level, collapse));
+                if (st) await afterChange(st);
+              }}
+              onOutlineLevel={async (rows, level) => {
+                const st = await onSheetOnly("윤곽", (s) => api.showOutlineLevel(s, rows, level));
+                if (st) await afterChange(st);
+              }}
+              pageBreaks={pageBreakLines}
               onListButton={(x, y) => setListOpen({ x, y })}
               onDoubleClick={async (h) => {
                 if (sessionRef.current) return;
@@ -2276,6 +2517,7 @@ export default function App() {
                 });
               }}
             >
+              {info?.protected?.[i] && <span className="lock">🔒</span>}
               {name}
             </button>
           ))}
@@ -2574,20 +2816,105 @@ export default function App() {
           }}
         />
       )}
-      {dialog?.kind === "print" && (
-        <PrintDialog
+      {printState && (
+        <PrintPreviewDialog
+          job={printState.job}
+          setup={printState.setup}
+          selectionOnly={printState.selection}
           hasSelection={(() => {
             const rg = range();
             return rg.r0 !== rg.r1 || rg.c0 !== rg.c1;
           })()}
-          onDone={(o) => {
-            setDialog(null);
+          onScope={async (sel) => {
+            const job = await buildPrintJob(sel);
+            if (job) setPrintState((p) => (p ? { ...p, job, selection: sel } : p));
+          }}
+          onChange={(setup) => {
+            setPrintState((p) => (p ? { ...p, setup } : p));
+            void changePageSetup(setup);
+          }}
+          onPrint={doPrint}
+          onClose={() => {
+            setPrintState(null);
             focusGrid();
-            if (o) void startPrint(o);
           }}
         />
       )}
-      {printJob && <PrintView job={printJob} />}
+      {printJob && pageSetupState && <PrintView job={printJob} setup={pageSetupState} />}
+      {msgBox && (
+        <MessageBox
+          message={msgBox}
+          onClose={() => {
+            setMsgBox(null);
+            focusGrid();
+          }}
+        />
+      )}
+      {dialog?.kind === "subtotal" && (
+        <SubtotalDialog
+          columns={columnChoices(dialog.range)(true)}
+          initialGroup={dialog.range.c0}
+          onDone={async (r) => {
+            const rg = dialog.range;
+            setDialog(null);
+            focusGrid();
+            if (!r) return;
+            const st =
+              r === "removeAll"
+                ? await onSheetOnly("부분합 제거", (s) => api.removeSubtotals(s, rg))
+                : await onSheetOnly("부분합", (s) => api.subtotal(s, rg, { group_col: r.groupCol, func: r.func, value_cols: r.valueCols, replace: r.replace }));
+            if (st) await afterChange(st);
+          }}
+        />
+      )}
+      {dialog?.kind === "createTable" && (
+        <CreateTableDialog
+          range={`$${colName(dialog.range.c0)}$${dialog.range.r0}:$${colName(dialog.range.c1)}$${dialog.range.r1}`}
+          header={dialog.header}
+          onDone={async (r) => {
+            const style = dialog.style;
+            setDialog(null);
+            focusGrid();
+            if (!r) return;
+            const [a, b] = r.range.replace(/\$/g, "").split(":");
+            const pa = parseAddr(a ?? "");
+            const pb = parseAddr(b ?? a ?? "");
+            if (!pa || !pb) return say("범위가 올바르지 않습니다", true);
+            const t = await onSheetOnly("표 만들기", (s) => api.createTable(s, normalize(pa, pb), r.header, style));
+            if (t) {
+              await afterChange();
+              say(`${t.name}을(를) 만들었습니다. 수식에서 ${t.name}[${t.columns[t.columns.length - 1] ?? "열"}]처럼 쓸 수 있습니다.`);
+            }
+          }}
+        />
+      )}
+      {dialog?.kind === "protect" && (
+        <ProtectDialog
+          onDone={async (r) => {
+            setDialog(null);
+            focusGrid();
+            if (!r) return;
+            await onSheetOnly("시트 보호", (s) => api.protectSheet(s, r.password, r.options));
+            await afterChange();
+            await refreshInfo();
+          }}
+        />
+      )}
+      {dialog?.kind === "unprotect" && (
+        <PasswordDialog
+          title="시트 보호 해제"
+          onDone={async (pw) => {
+            setDialog(null);
+            focusGrid();
+            if (pw === null) return;
+            const ok = await onSheetOnly("보호 해제", (s) => api.unprotectSheet(s, pw).then(() => true));
+            if (ok) {
+              await afterChange();
+              await refreshInfo();
+            }
+          }}
+        />
+      )}
       {dialog?.kind === "pasteSpecial" && (
         <PasteSpecialDialog
           onDone={(o) => {
@@ -2648,6 +2975,7 @@ export default function App() {
       {dialog?.kind === "format" && detail && (
         <FormatCellsDialog
           style={detail.style}
+          locked={!protection?.unlocked.some((u) => selection.focus.r >= u.r0 && selection.focus.r <= u.r1 && selection.focus.c >= u.c0 && selection.focus.c <= u.c1)}
           onDone={(r) => {
             setDialog(null);
             focusGrid();

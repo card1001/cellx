@@ -323,7 +323,7 @@ fn op_holds(op: ValidationOp, v: f64, a: Option<f64>, b: Option<f64>) -> bool {
 }
 
 /// Parts of `a` not covered by `b`.
-fn subtract(a: CellRange, b: CellRange) -> Vec<CellRange> {
+pub(crate) fn subtract_range(a: CellRange, b: CellRange) -> Vec<CellRange> {
     let (a, b) = (a.normalized(), b.normalized());
     if b.r1 < a.r0 || b.r0 > a.r1 || b.c1 < a.c0 || b.c0 > a.c1 {
         return vec![a];
@@ -631,6 +631,8 @@ impl Workbook {
 
     /// 정렬: sorts the rows of `range` by `keys` (first key first).
     pub fn sort_range(&mut self, sheet: u32, range: CellRange, keys: &[SortKey], has_header: bool) -> Result<RecalcStats> {
+        self.guard(sheet, range, crate::sheetopts::Guard::Sort)?;
+        self.guard(sheet, range, crate::sheetopts::Guard::Content)?;
         let mut r = range.normalized();
         if has_header {
             r.r0 += 1;
@@ -679,6 +681,7 @@ impl Workbook {
     /// Ctrl+Shift+L: turns filter buttons on for `range` (the current region when it is
     /// one cell), or off with every row shown again.
     pub fn toggle_auto_filter(&mut self, sheet: u32, range: CellRange) -> Result<Option<AutoFilter>> {
+        self.guard(sheet, range, crate::sheetopts::Guard::AutoFilter)?;
         let start = self.begin();
         if let Some(i) = self.filters.iter().position(|f| f.sheet == sheet) {
             let f = self.filters.remove(i);
@@ -715,6 +718,7 @@ impl Workbook {
     }
 
     pub fn set_filter_column(&mut self, sheet: u32, filter: ColumnFilter) -> Result<RecalcStats> {
+        self.guard(sheet, CellRange { r0: 1, c0: 1, r1: 1, c1: 1 }, crate::sheetopts::Guard::AutoFilter)?;
         let start = self.begin();
         let f = self
             .filters
@@ -845,6 +849,7 @@ impl Workbook {
     // ------------------------------------------------------------ remove duplicates
 
     pub fn remove_duplicates(&mut self, sheet: u32, range: CellRange, cols: &[i32], has_header: bool) -> Result<DuplicateResult> {
+        self.guard(sheet, range, crate::sheetopts::Guard::Content)?;
         let mut r = range.normalized();
         if has_header {
             r.r0 += 1;
@@ -898,7 +903,7 @@ impl Workbook {
     fn cut_validations(&mut self, sheet: u32, range: CellRange) {
         for v in self.validations.iter_mut().filter(|v| v.sheet == sheet) {
             let parts: Vec<String> =
-                sqref_parts(&v.range).into_iter().flat_map(|p| subtract(p, range)).map(range_a1).collect();
+                sqref_parts(&v.range).into_iter().flat_map(|p| subtract_range(p, range)).map(range_a1).collect();
             v.range = parts.join(" ");
         }
         self.validations.retain(|v| !v.range.trim().is_empty());
@@ -906,6 +911,7 @@ impl Workbook {
 
     /// 데이터 유효성 검사: the rule applies to `range`, replacing rules there.
     pub fn set_validation(&mut self, sheet: u32, range: CellRange, mut v: Validation) -> Result<RecalcStats> {
+        self.guard(sheet, range, crate::sheetopts::Guard::FormatCells)?;
         let start = self.begin();
         self.cut_validations(sheet, range);
         v.sheet = sheet;
@@ -983,10 +989,21 @@ impl Workbook {
     }
 
     /// Checks a typed entry against the cell's rule. `None`: allowed.
-    pub fn validate_input(&self, sheet: u32, row: i32, col: i32, input: &str) -> Option<ValidationFailure> {
+    pub fn validate_input(&mut self, sheet: u32, row: i32, col: i32, input: &str) -> Option<ValidationFailure> {
         let v = self.validation_at(sheet, row, col)?;
-        if !v.show_error || v.kind == ValidationKind::Any || v.kind == ValidationKind::Custom || input.starts_with('=') {
+        if !v.show_error || v.kind == ValidationKind::Any || input.starts_with('=') {
             return None;
+        }
+        if v.kind == ValidationKind::Custom && !input.trim().is_empty() && !self.custom_rule_holds(sheet, row, col, input, &v) {
+            return Some(ValidationFailure {
+                style: v.error_style,
+                title: if v.error_title.is_empty() { "CellX".into() } else { v.error_title.clone() },
+                message: if v.error_message.is_empty() {
+                    "이 값은 이 셀에 정의된 데이터 유효성 검사 제한과 일치하지 않습니다.".into()
+                } else {
+                    v.error_message.clone()
+                },
+            });
         }
         let text = input.trim();
         let ok = if text.is_empty() {

@@ -14,3 +14,4 @@ CellX에서 바꾼 부분:
 6. `supported_function_names()` 추가 — 수식 자동완성 목록.
 7. `ClipboardCell`의 `text()`, `style()` 접근자 추가와 공개 — 선택하여 붙여넣기(값만, 서식만, 행/열 바꿈).
 8. 이름 정의의 첫 글자에 한글 등 유니코드 문자 허용(Excel과 같음) — `is_valid_a1_identifier`.
+9. `Parser::set_tables`, `Model::refresh_parser_tables` — 불러온 뒤에 만든 표의 구조적 참조(`표1[금액]`) 해석.

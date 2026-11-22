@@ -3136,6 +3136,12 @@ impl<'a> Model<'a> {
         cells
     }
 
+    /// Tells the formula parser about tables added or changed after the model was made
+    /// (CellX patch), so structured references like `표1[금액]` parse.
+    pub fn refresh_parser_tables(&mut self) {
+        self.parser.set_tables(self.workbook.tables.clone());
+    }
+
     /// Removes the content of every cell in the range but leaves the style.
     ///
     /// See also:

@@ -11,6 +11,7 @@ use zip::write::SimpleFileOptions;
 use crate::datatools::{AutoFilter, ColumnFilter, ErrorStyle, FilterCondition, FilterOp, Validation, ValidationKind, ValidationOp};
 use crate::error::{CellxError, Result};
 use crate::extras::{ChartData, ChartKind};
+use crate::sheetopts::{FitMode, PageSetup, SheetProtection};
 use crate::workbook::CellRange;
 use crate::refs::column_name;
 
@@ -49,12 +50,266 @@ pub struct SheetParts {
     pub charts: Vec<ChartXml>,
     pub filter: Option<AutoFilter>,
     pub validations: Vec<Validation>,
+    pub outline_rows: Vec<(i32, u8)>,
+    pub outline_cols: Vec<(i32, u8)>,
+    /// Hidden rows (written even when they hold no cells).
+    pub hidden_rows: Vec<i32>,
+    /// IronCalc's column records, to rewrite `<cols>` with outline levels.
+    pub cols: Vec<ironcalc_base::types::Col>,
+    pub tables: Vec<TableXml>,
+    pub protection: Option<SheetProtection>,
+    pub unlocked: Vec<CellRange>,
+    pub page: Option<PageSetup>,
+}
+
+pub struct TableXml {
+    pub table: ironcalc_base::types::Table,
+    /// The AutoFilter of the table's data, when the sheet's filter is the table's.
+    pub filter: Option<AutoFilter>,
 }
 
 impl SheetParts {
     fn is_empty(&self) -> bool {
-        self.memos.is_empty() && self.charts.is_empty() && self.filter.is_none() && self.validations.is_empty()
+        self.memos.is_empty()
+            && self.charts.is_empty()
+            && self.filter.is_none()
+            && self.validations.is_empty()
+            && self.outline_rows.is_empty()
+            && self.outline_cols.is_empty()
+            && self.tables.is_empty()
+            && self.protection.is_none()
+            && self.unlocked.is_empty()
+            && self.page.is_none()
     }
+}
+
+/// Adds `outlineLevel` to rows, writing the rows that hold no cells.
+fn patch_rows(xml: &str, levels: &[(i32, u8)], hidden: &[i32]) -> String {
+    use std::collections::BTreeMap;
+    let mut want: BTreeMap<i32, (u8, bool)> = BTreeMap::new();
+    for (r, l) in levels {
+        want.entry(*r).or_insert((0, false)).0 = *l;
+    }
+    for r in hidden {
+        want.entry(*r).or_insert((0, false)).1 = true;
+    }
+    if want.is_empty() {
+        return xml.to_string();
+    }
+    let (Some(start), Some(end)) = (xml.find("<sheetData"), xml.find("</sheetData>").or_else(|| xml.find("<sheetData/>"))) else {
+        return xml.to_string();
+    };
+    let self_closing = xml[start..].starts_with("<sheetData/>");
+    let body_start = if self_closing { start + "<sheetData/>".len() } else { xml[start..].find('>').map(|i| start + i + 1).unwrap_or(start) };
+    let body = if self_closing { "" } else { &xml[body_start..end] };
+    // Existing rows: split the body at each `<row `.
+    let mut pieces: Vec<(i32, String)> = Vec::new();
+    let mut rest = body;
+    while let Some(i) = rest.find("<row ") {
+        let after = &rest[i..];
+        let close = after.find("</row>").map(|k| k + 6).or_else(|| after.find("/>").map(|k| k + 2)).unwrap_or(after.len());
+        let elem = &after[..close];
+        let r = elem
+            .split("r=\"")
+            .nth(1)
+            .and_then(|x| x.split('"').next())
+            .and_then(|x| x.parse::<i32>().ok())
+            .unwrap_or(0);
+        pieces.push((r, elem.to_string()));
+        rest = &after[close..];
+    }
+    for (r, (level, hide)) in &want {
+        let extra = format!(
+            "{}{}",
+            if *level > 0 { format!(r#" outlineLevel="{level}""#) } else { String::new() },
+            if *hide { r#" hidden="1""# } else { "" }
+        );
+        match pieces.iter_mut().find(|(pr, _)| pr == r) {
+            Some((_, elem)) => {
+                let head_end = elem.find('>').unwrap_or(elem.len());
+                let head = &elem[..head_end];
+                let mut add = String::new();
+                if *level > 0 && !head.contains("outlineLevel") {
+                    add.push_str(&format!(r#" outlineLevel="{level}""#));
+                }
+                if *hide && !head.contains("hidden=") {
+                    add.push_str(r#" hidden="1""#);
+                }
+                let at = if head.ends_with('/') { head_end - 1 } else { head_end };
+                elem.insert_str(at, &add);
+            }
+            None => pieces.push((*r, format!(r#"<row r="{r}"{extra}/>"#))),
+        }
+    }
+    pieces.sort_by_key(|(r, _)| *r);
+    let new_body: String = pieces.into_iter().map(|(_, e)| e).collect();
+    let tail_start = if self_closing { start + "<sheetData/>".len() } else { end + "</sheetData>".len() };
+    format!("{}<sheetData>{new_body}</sheetData>{}", &xml[..start], &xml[tail_start..])
+}
+
+/// Rewrites `<cols>` with outline levels on the grouped columns.
+fn patch_cols(xml: &str, cols: &[ironcalc_base::types::Col], levels: &[(i32, u8)]) -> String {
+    if levels.is_empty() {
+        return xml.to_string();
+    }
+    #[derive(Clone)]
+    struct C {
+        min: i32,
+        max: i32,
+        width: f64,
+        custom: bool,
+        style: Option<i32>,
+        hidden: bool,
+        level: u8,
+    }
+    let mut list: Vec<C> = cols
+        .iter()
+        .map(|c| C { min: c.min, max: c.max, width: c.width, custom: c.custom_width, style: c.style, hidden: c.hidden, level: 0 })
+        .collect();
+    for (col, level) in levels {
+        match list.iter().position(|c| c.min <= *col && *col <= c.max) {
+            Some(i) => {
+                let c = list.remove(i);
+                if c.min < *col {
+                    list.push(C { max: col - 1, ..c.clone() });
+                }
+                if c.max > *col {
+                    list.push(C { min: col + 1, ..c.clone() });
+                }
+                list.push(C { min: *col, max: *col, level: *level, ..c });
+            }
+            None => list.push(C { min: *col, max: *col, width: 8.43, custom: false, style: None, hidden: false, level: *level }),
+        }
+    }
+    list.sort_by_key(|c| c.min);
+    let body: String = list
+        .iter()
+        .map(|c| {
+            format!(
+                r#"<col min="{}" max="{}" width="{}" customWidth="{}"{}{}{}/>"#,
+                c.min,
+                c.max,
+                c.width,
+                c.custom as u8,
+                c.style.map(|s| format!(r#" style="{s}""#)).unwrap_or_default(),
+                if c.hidden { r#" hidden="1""# } else { "" },
+                if c.level > 0 { format!(r#" outlineLevel="{}""#, c.level) } else { String::new() }
+            )
+        })
+        .collect();
+    let new_cols = format!("<cols>{body}</cols>");
+    if let (Some(a), Some(b)) = (xml.find("<cols>"), xml.find("</cols>")) {
+        format!("{}{new_cols}{}", &xml[..a], &xml[b + "</cols>".len()..])
+    } else if let Some(a) = xml.find("<sheetData") {
+        format!("{}{new_cols}{}", &xml[..a], &xml[a..])
+    } else {
+        xml.to_string()
+    }
+}
+
+fn protection_xml(p: &SheetProtection, unlocked: &[CellRange]) -> String {
+    let o = &p.options;
+    // In xlsx a "1" means the action is *protected*.
+    let flag = |allowed: bool| if allowed { "0" } else { "1" };
+    let mut xml = format!(
+        r#"<sheetProtection{} sheet="1" objects="1" scenarios="1" formatCells="{}" formatColumns="{}" formatRows="{}" insertColumns="{}" insertRows="{}" deleteColumns="{}" deleteRows="{}" sort="{}" autoFilter="{}"/>"#,
+        p.password_hash.as_ref().map(|h| format!(r#" password="{h}""#)).unwrap_or_default(),
+        flag(o.format_cells),
+        flag(o.format_columns),
+        flag(o.format_rows),
+        flag(o.insert_columns),
+        flag(o.insert_rows),
+        flag(o.delete_columns),
+        flag(o.delete_rows),
+        flag(o.sort),
+        flag(o.auto_filter),
+    );
+    if !unlocked.is_empty() {
+        let items: String = unlocked
+            .iter()
+            .enumerate()
+            .map(|(i, r)| format!(r#"<protectedRange sqref="{}" name="편집 가능 {}"/>"#, a1(*r), i + 1))
+            .collect();
+        xml.push_str(&format!("<protectedRanges>{items}</protectedRanges>"));
+    }
+    xml
+}
+
+fn page_xml(p: &PageSetup) -> String {
+    let mut xml = String::new();
+    if p.gridlines || p.headings {
+        xml.push_str(&format!(
+            "<printOptions{}{}/>",
+            if p.gridlines { r#" gridLines="1""# } else { "" },
+            if p.headings { r#" headings="1""# } else { "" }
+        ));
+    }
+    xml.push_str(r#"<pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>"#);
+    let fit = match p.fit {
+        FitMode::None => String::new(),
+        FitMode::Width => r#" fitToWidth="1" fitToHeight="0""#.into(),
+        FitMode::Page => r#" fitToWidth="1" fitToHeight="1""#.into(),
+    };
+    xml.push_str(&format!(r#"<pageSetup paperSize="9" orientation="{}"{fit}/>"#, if p.landscape { "landscape" } else { "portrait" }));
+    if p.page_numbers {
+        xml.push_str("<headerFooter><oddFooter>&amp;C&amp;P / &amp;N</oddFooter></headerFooter>");
+    }
+    if !p.row_breaks.is_empty() {
+        let b: String = p.row_breaks.iter().map(|r| format!(r#"<brk id="{}" max="16383" man="1"/>"#, r - 1)).collect();
+        xml.push_str(&format!(r#"<rowBreaks count="{0}" manualBreakCount="{0}">{b}</rowBreaks>"#, p.row_breaks.len()));
+    }
+    if !p.col_breaks.is_empty() {
+        let b: String = p.col_breaks.iter().map(|c| format!(r#"<brk id="{}" max="1048575" man="1"/>"#, c - 1)).collect();
+        xml.push_str(&format!(r#"<colBreaks count="{0}" manualBreakCount="{0}">{b}</colBreaks>"#, p.col_breaks.len()));
+    }
+    xml
+}
+
+fn table_xml(id: usize, t: &TableXml) -> String {
+    let tb = &t.table;
+    let filter_ref = crate::extras::parse_range(&tb.reference).map(|(_, r0, c0, r1, c1)| CellRange {
+        r0,
+        c0,
+        r1: r1 - tb.totals_row_count as i32,
+        c1,
+    });
+    let auto = match (&t.filter, filter_ref) {
+        (Some(f), Some(r)) => {
+            let mut f = f.clone();
+            f.range = r;
+            auto_filter_xml(&f)
+        }
+        (None, Some(r)) if tb.has_filters => format!(r#"<autoFilter ref="{}"/>"#, a1(r)),
+        _ => String::new(),
+    };
+    let cols: String = tb
+        .columns
+        .iter()
+        .map(|c| {
+            format!(
+                r#"<tableColumn id="{}" name="{}"{}{}/>"#,
+                c.id,
+                esc(&c.name),
+                c.totals_row_label.as_ref().map(|l| format!(r#" totalsRowLabel="{}""#, esc(l))).unwrap_or_default(),
+                c.totals_row_function.as_ref().map(|f| format!(r#" totalsRowFunction="{}""#, esc(f))).unwrap_or_default(),
+            )
+        })
+        .collect();
+    let si = &tb.style_info;
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="{id}" name="{}" displayName="{}" ref="{}"{}{}<tableColumns count="{}">{cols}</tableColumns><tableStyleInfo name="{}" showFirstColumn="{}" showLastColumn="{}" showRowStripes="{}" showColumnStripes="{}"/></table>"#,
+        esc(&tb.name),
+        esc(&tb.display_name),
+        esc(&tb.reference),
+        if tb.totals_row_count > 0 { format!(r#" totalsRowCount="{}""#, tb.totals_row_count) } else { String::new() },
+        format!(">{auto}"),
+        tb.columns.len(),
+        esc(si.name.as_deref().unwrap_or("TableStyleMedium2")),
+        si.show_first_column as u8,
+        si.show_last_column as u8,
+        si.show_row_stripes as u8,
+        si.show_column_stripes as u8,
+    )
 }
 
 fn a1(r: CellRange) -> String {
@@ -215,6 +470,7 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
     let mut chart_no = 0;
     let mut drawing_no = 0;
     let mut memo_no = 0;
+    let mut table_no = 0;
     for (i, p) in parts.iter().enumerate() {
         if p.is_empty() {
             continue;
@@ -283,14 +539,71 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
             tags.push_str(r#"<legacyDrawing r:id="rIdCxVml"/>"#);
         }
 
-        let mut sheet_xml = sheet_xml;
-        // autoFilter comes right after sheetData, dataValidations before hyperlinks.
+        let mut sheet_xml = patch_rows(&sheet_xml, &p.outline_rows, &p.hidden_rows);
+        sheet_xml = patch_cols(&sheet_xml, &p.cols, &p.outline_cols);
+        if !p.outline_rows.is_empty() || !p.outline_cols.is_empty() {
+            let lr = p.outline_rows.iter().map(|x| x.1).max().unwrap_or(0);
+            let lc = p.outline_cols.iter().map(|x| x.1).max().unwrap_or(0);
+            if !sheet_xml.contains("<sheetFormatPr") {
+                if let Some(at) = sheet_xml.find("<cols>").or_else(|| sheet_xml.find("<sheetData")) {
+                    sheet_xml.insert_str(at, &format!(r#"<sheetFormatPr defaultRowHeight="16.5" outlineLevelRow="{lr}" outlineLevelCol="{lc}"/>"#));
+                }
+            }
+        }
+        if p.page.as_ref().is_some_and(|pg| pg.fit != FitMode::None) && !sheet_xml.contains("<sheetPr") {
+            if let Some(at) = sheet_xml.find("<dimension").or_else(|| sheet_xml.find("<sheetViews")) {
+                sheet_xml.insert_str(at, r#"<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>"#);
+            }
+        }
+        let after_data = |xml: &String| {
+            xml.find("</sheetData>")
+                .map(|i| i + "</sheetData>".len())
+                .or_else(|| xml.find("<sheetData/>").map(|i| i + "<sheetData/>".len()))
+        };
+        if let Some(pr) = &p.protection {
+            let xml = protection_xml(pr, &p.unlocked);
+            if let Some(at) = after_data(&sheet_xml) {
+                sheet_xml.insert_str(at, &xml);
+            }
+        }
+        let mut table_tags = String::new();
+        for (k, t) in p.tables.iter().enumerate() {
+            table_no += 1;
+            put(&mut map, &mut order, format!("xl/tables/table{table_no}.xml"), table_xml(table_no, t).into_bytes());
+            overrides.push_str(&format!(
+                r#"<Override PartName="/xl/tables/table{table_no}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/>"#
+            ));
+            rels.push(format!(
+                r#"<Relationship Id="rIdCxTable{k}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="../tables/table{table_no}.xml"/>"#
+            ));
+            table_tags.push_str(&format!(r#"<tablePart r:id="rIdCxTable{k}"/>"#));
+        }
+        let page_tags = p.page.as_ref().map(page_xml).unwrap_or_default();
+        let tags = format!(
+            "{page_tags}{tags}{}",
+            if table_tags.is_empty() { String::new() } else { format!(r#"<tableParts count="{}">{table_tags}</tableParts>"#, p.tables.len()) }
+        );
+        // autoFilter comes right after sheetData (and its protection), dataValidations before hyperlinks.
         if let Some(f) = &p.filter {
             let xml = auto_filter_xml(f);
             let at = sheet_xml
-                .find("</sheetData>")
-                .map(|i| i + "</sheetData>".len())
-                .or_else(|| sheet_xml.find("<sheetData/>").map(|i| i + "<sheetData/>".len()));
+                .find("<mergeCells")
+                .or_else(|| after_data(&sheet_xml).map(|i| {
+                    // After sheetProtection/protectedRanges when present.
+                    let rest = &sheet_xml[i..];
+                    let mut j = i;
+                    for tag in ["</protectedRanges>"] {
+                        if let Some(k) = rest.find(tag) {
+                            j = i + k + tag.len();
+                        }
+                    }
+                    if j == i {
+                        if let Some(k) = rest.find("<sheetProtection") {
+                            j = i + k + rest[k..].find("/>").map(|x| x + 2).unwrap_or(0);
+                        }
+                    }
+                    j
+                }));
             if let Some(at) = at {
                 sheet_xml.insert_str(at, &xml);
             }
@@ -344,6 +657,16 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
             ))
         })
         .collect();
+    let title_names: String = parts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| p.page.as_ref().and_then(|pg| pg.title_rows).map(|t| (i, t)))
+        .filter_map(|(i, (a, b))| {
+            let n = sheet_names.get(i)?;
+            Some(format!(r#"<definedName name="_xlnm.Print_Titles" localSheetId="{i}">{}!${a}:${b}</definedName>"#, esc(&sheet_ref(n))))
+        })
+        .collect();
+    let filter_names = format!("{filter_names}{title_names}");
     if !filter_names.is_empty() {
         if let Some(wb) = map.get("xl/workbook.xml") {
             let mut wb = String::from_utf8_lossy(wb).to_string();
@@ -756,8 +1079,18 @@ fn parse_chart(xml: &str) -> Option<ImportedChart> {
     })
 }
 
-/// AutoFilter and data validation rules of every sheet, read from the sheet XML.
-pub fn read_sheet_rules(xlsx: &[u8]) -> Vec<(usize, Option<AutoFilter>, Vec<Validation>)> {
+/// Sheet settings IronCalc does not read: outline levels, protection, editable
+/// ranges (and cells whose style is unlocked) and page setup.
+pub struct SheetOptionsXml {
+    pub sheet: usize,
+    pub outline_rows: Vec<(i32, u8)>,
+    pub outline_cols: Vec<(i32, u8)>,
+    pub protection: Option<SheetProtection>,
+    pub unlocked: Vec<CellRange>,
+    pub page: Option<PageSetup>,
+}
+
+pub fn read_sheet_options(xlsx: &[u8]) -> Vec<SheetOptionsXml> {
     let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(xlsx)) else { return Vec::new() };
     let Some(wb_xml) = read_part(&mut zip, "xl/workbook.xml") else { return Vec::new() };
     let wb_rels = rels_of(&mut zip, "xl/workbook.xml");
@@ -767,15 +1100,168 @@ pub fn read_sheet_rules(xlsx: &[u8]) -> Vec<(usize, Option<AutoFilter>, Vec<Vali
         .filter(|n| n.has_tag_name("sheet"))
         .filter_map(|n| n.attribute((R_NS, "id")).and_then(|id| wb_rels.get(id)).map(|(_, t)| t.clone()))
         .collect();
+    // Print titles: _xlnm.Print_Titles = Sheet1!$1:$2.
+    let mut titles: std::collections::HashMap<usize, (i32, i32)> = std::collections::HashMap::new();
+    for dn in wb_doc.descendants().filter(|n| n.has_tag_name("definedName")) {
+        if dn.attribute("name") != Some("_xlnm.Print_Titles") {
+            continue;
+        }
+        let Some(i) = dn.attribute("localSheetId").and_then(|v| v.parse::<usize>().ok()) else { continue };
+        let text = dn.text().unwrap_or("");
+        for part in text.split(',') {
+            let rows = part.rsplit('!').next().unwrap_or("").replace('$', "");
+            if let Some((a, b)) = rows.split_once(':') {
+                if let (Ok(a), Ok(b)) = (a.parse::<i32>(), b.parse::<i32>()) {
+                    titles.insert(i, (a, b));
+                }
+            }
+        }
+    }
+    // Styles whose protection is locked="0".
+    let unlocked_xf: std::collections::HashSet<usize> = read_part(&mut zip, "xl/styles.xml")
+        .and_then(|x| {
+            let doc = roxmltree::Document::parse(&x).ok()?;
+            let xfs = doc.descendants().find(|n| n.has_tag_name("cellXfs"))?;
+            Some(
+                xfs.children()
+                    .filter(|n| n.has_tag_name("xf"))
+                    .enumerate()
+                    .filter(|(_, xf)| {
+                        xf.children().any(|c| c.has_tag_name("protection") && matches!(c.attribute("locked"), Some("0") | Some("false")))
+                    })
+                    .map(|(i, _)| i)
+                    .collect(),
+            )
+        })
+        .unwrap_or_default();
     let mut out = Vec::new();
     for (si, part) in parts.iter().enumerate() {
         let Some(xml) = read_part(&mut zip, part) else { continue };
-        if !xml.contains("<autoFilter") && !xml.contains("<dataValidation") {
-            continue;
-        }
         let Ok(doc) = roxmltree::Document::parse(&xml) else { continue };
         let root = doc.root_element();
-        let filter = root.children().find(|n| n.has_tag_name("autoFilter")).and_then(|af| {
+        let mut o = SheetOptionsXml { sheet: si, outline_rows: vec![], outline_cols: vec![], protection: None, unlocked: vec![], page: None };
+        let mut unlocked_cells: Vec<(i32, i32)> = Vec::new();
+        if let Some(data) = root.children().find(|n| n.has_tag_name("sheetData")) {
+            for row in data.children().filter(|n| n.has_tag_name("row")) {
+                let r = row.attribute("r").and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
+                if let Some(l) = row.attribute("outlineLevel").and_then(|v| v.parse::<u8>().ok()) {
+                    if l > 0 && r > 0 {
+                        o.outline_rows.push((r, l));
+                    }
+                }
+                if unlocked_xf.is_empty() {
+                    continue;
+                }
+                for c in row.children().filter(|n| n.has_tag_name("c")) {
+                    let s = c.attribute("s").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+                    if unlocked_xf.contains(&s) {
+                        if let Some((rr, cc)) = c.attribute("r").and_then(parse_cell) {
+                            unlocked_cells.push((rr, cc));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(cols) = root.children().find(|n| n.has_tag_name("cols")) {
+            for c in cols.children().filter(|n| n.has_tag_name("col")) {
+                let (Some(a), Some(b)) = (c.attribute("min").and_then(|v| v.parse::<i32>().ok()), c.attribute("max").and_then(|v| v.parse::<i32>().ok())) else { continue };
+                if let Some(l) = c.attribute("outlineLevel").and_then(|v| v.parse::<u8>().ok()).filter(|l| *l > 0) {
+                    for i in a..=b.min(a + 16384) {
+                        o.outline_cols.push((i, l));
+                    }
+                }
+            }
+        }
+        if let Some(sp) = root.children().find(|n| n.has_tag_name("sheetProtection")) {
+            if matches!(sp.attribute("sheet"), Some("1") | Some("true")) {
+                let allowed = |k: &str, default_protected: bool| match sp.attribute(k) {
+                    Some("0") | Some("false") => true,
+                    Some(_) => false,
+                    None => !default_protected,
+                };
+                o.protection = Some(SheetProtection {
+                    sheet: si as u32,
+                    password_hash: sp.attribute("password").map(str::to_string),
+                    options: crate::sheetopts::ProtectOptions {
+                        format_cells: allowed("formatCells", true),
+                        format_columns: allowed("formatColumns", true),
+                        format_rows: allowed("formatRows", true),
+                        insert_rows: allowed("insertRows", true),
+                        insert_columns: allowed("insertColumns", true),
+                        delete_rows: allowed("deleteRows", true),
+                        delete_columns: allowed("deleteColumns", true),
+                        sort: allowed("sort", true),
+                        auto_filter: allowed("autoFilter", true),
+                    },
+                });
+            }
+        }
+        for pr in root.descendants().filter(|n| n.has_tag_name("protectedRange")) {
+            for part in pr.attribute("sqref").unwrap_or("").split_whitespace() {
+                if let Some((_, r0, c0, r1, c1)) = crate::extras::parse_range(part) {
+                    o.unlocked.push(CellRange { r0, c0, r1, c1 });
+                }
+            }
+        }
+        // Unlocked cells become runs down each column.
+        unlocked_cells.sort_by_key(|(r, c)| (*c, *r));
+        let mut i = 0;
+        while i < unlocked_cells.len() {
+            let (r0, c) = unlocked_cells[i];
+            let mut r1 = r0;
+            while i + 1 < unlocked_cells.len() && unlocked_cells[i + 1] == (r1 + 1, c) {
+                r1 += 1;
+                i += 1;
+            }
+            o.unlocked.push(CellRange { r0, c0: c, r1, c1: c });
+            i += 1;
+        }
+        let mut page = PageSetup::new(si as u32);
+        if let Some(po) = root.children().find(|n| n.has_tag_name("printOptions")) {
+            page.gridlines = matches!(po.attribute("gridLines"), Some("1") | Some("true"));
+            page.headings = matches!(po.attribute("headings"), Some("1") | Some("true"));
+        }
+        let fit_to_page = root
+            .descendants()
+            .find(|n| n.has_tag_name("pageSetUpPr"))
+            .is_some_and(|n| matches!(n.attribute("fitToPage"), Some("1") | Some("true")));
+        if let Some(ps) = root.children().find(|n| n.has_tag_name("pageSetup")) {
+            page.landscape = ps.attribute("orientation") == Some("landscape");
+            if fit_to_page {
+                page.fit = if ps.attribute("fitToHeight") == Some("0") { FitMode::Width } else { FitMode::Page };
+            }
+        }
+        if let Some(hf) = root.children().find(|n| n.has_tag_name("headerFooter")) {
+            page.page_numbers = hf.descendants().filter_map(|n| n.text()).any(|t| t.contains("&P"));
+        }
+        let brks = |tag: &str| -> Vec<i32> {
+            root.children()
+                .find(|n| n.has_tag_name(tag))
+                .map(|b| b.children().filter(|n| n.has_tag_name("brk")).filter_map(|n| n.attribute("id")?.parse::<i32>().ok()).map(|i| i + 1).collect())
+                .unwrap_or_default()
+        };
+        page.row_breaks = brks("rowBreaks");
+        page.col_breaks = brks("colBreaks");
+        page.title_rows = titles.get(&si).copied();
+        if !page.is_default() {
+            o.page = Some(page);
+        }
+        out.push(o);
+    }
+    out
+}
+
+fn parse_cell(s: &str) -> Option<(i32, i32)> {
+    let split = s.find(|c: char| c.is_ascii_digit())?;
+    let (letters, digits) = s.split_at(split);
+    let mut col = 0i32;
+    for ch in letters.chars() {
+        col = col * 26 + (ch.to_ascii_uppercase() as i32 - 'A' as i32 + 1);
+    }
+    Some((digits.parse().ok()?, col))
+}
+
+fn parse_auto_filter(af: roxmltree::Node, si: u32) -> Option<AutoFilter> {
             let (_, r0, c0, r1, c1) = crate::extras::parse_range(af.attribute("ref")?)?;
             let mut columns = Vec::new();
             for fc in af.children().filter(|n| n.has_tag_name("filterColumn")) {
@@ -819,8 +1305,97 @@ pub fn read_sheet_rules(xlsx: &[u8]) -> Vec<(usize, Option<AutoFilter>, Vec<Vali
                     columns.push(ColumnFilter { col, values: None, conditions, and: cfs.attribute("and") == Some("1") });
                 }
             }
-            Some(AutoFilter { sheet: si as u32, range: CellRange { r0, c0, r1, c1 }, columns })
-        });
+            Some(AutoFilter { sheet: si, range: CellRange { r0, c0, r1, c1 }, columns })
+}
+
+/// What IronCalc's table import misses: style info, filter flag, totals row settings.
+pub struct TableMeta {
+    pub style: ironcalc_base::types::TableStyleInfo,
+    pub has_filters: bool,
+    /// (totalsRowLabel, totalsRowFunction) per column.
+    pub totals: Vec<(Option<String>, Option<String>)>,
+}
+
+pub fn read_table_meta(xlsx: &[u8]) -> HashMap<String, TableMeta> {
+    let mut out = HashMap::new();
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(xlsx)) else { return out };
+    let names: Vec<String> = zip
+        .file_names()
+        .filter_map(|n| n.ok().map(|n| n.to_string()))
+        .filter(|n| n.starts_with("xl/tables/") && n.ends_with(".xml"))
+        .collect();
+    for part in names {
+        let Some(xml) = read_part(&mut zip, &part) else { continue };
+        let Ok(doc) = roxmltree::Document::parse(&xml) else { continue };
+        let root = doc.root_element();
+        let Some(name) = root.attribute("name") else { continue };
+        let flag = |n: roxmltree::Node, k: &str, d: bool| n.attribute(k).map(|v| v == "1" || v == "true").unwrap_or(d);
+        let style = match root.children().find(|n| n.has_tag_name("tableStyleInfo")) {
+            Some(si) => ironcalc_base::types::TableStyleInfo {
+                name: si.attribute("name").map(str::to_string),
+                show_first_column: flag(si, "showFirstColumn", false),
+                show_last_column: flag(si, "showLastColumn", false),
+                show_row_stripes: flag(si, "showRowStripes", true),
+                show_column_stripes: flag(si, "showColumnStripes", false),
+            },
+            None => ironcalc_base::types::TableStyleInfo {
+                name: None,
+                show_first_column: false,
+                show_last_column: false,
+                show_row_stripes: true,
+                show_column_stripes: false,
+            },
+        };
+        let totals = root
+            .descendants()
+            .filter(|n| n.has_tag_name("tableColumn"))
+            .map(|c| (c.attribute("totalsRowLabel").map(str::to_string), c.attribute("totalsRowFunction").map(str::to_string)))
+            .collect();
+        let has_filters = root.children().any(|n| n.has_tag_name("autoFilter"));
+        out.insert(name.to_string(), TableMeta { style, has_filters, totals });
+    }
+    out
+}
+
+/// The filter of a table part (xl/tables/*.xml) by table name.
+pub fn read_table_filter(xlsx: &[u8], name: &str) -> Option<AutoFilter> {
+    let mut zip = zip::ZipArchive::new(Cursor::new(xlsx)).ok()?;
+    let names: Vec<String> = zip
+        .file_names()
+        .filter_map(|n| n.ok().map(|n| n.to_string()))
+        .filter(|n| n.starts_with("xl/tables/") && n.ends_with(".xml"))
+        .collect();
+    for part in names {
+        let Some(xml) = read_part(&mut zip, &part) else { continue };
+        let Ok(doc) = roxmltree::Document::parse(&xml) else { continue };
+        let root = doc.root_element();
+        if root.attribute("name").is_some_and(|n| n.eq_ignore_ascii_case(name)) {
+            return root.children().find(|n| n.has_tag_name("autoFilter")).and_then(|af| parse_auto_filter(af, 0));
+        }
+    }
+    None
+}
+
+/// AutoFilter and data validation rules of every sheet, read from the sheet XML.
+pub fn read_sheet_rules(xlsx: &[u8]) -> Vec<(usize, Option<AutoFilter>, Vec<Validation>)> {
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(xlsx)) else { return Vec::new() };
+    let Some(wb_xml) = read_part(&mut zip, "xl/workbook.xml") else { return Vec::new() };
+    let wb_rels = rels_of(&mut zip, "xl/workbook.xml");
+    let Ok(wb_doc) = roxmltree::Document::parse(&wb_xml) else { return Vec::new() };
+    let parts: Vec<String> = wb_doc
+        .descendants()
+        .filter(|n| n.has_tag_name("sheet"))
+        .filter_map(|n| n.attribute((R_NS, "id")).and_then(|id| wb_rels.get(id)).map(|(_, t)| t.clone()))
+        .collect();
+    let mut out = Vec::new();
+    for (si, part) in parts.iter().enumerate() {
+        let Some(xml) = read_part(&mut zip, part) else { continue };
+        if !xml.contains("<autoFilter") && !xml.contains("<dataValidation") {
+            continue;
+        }
+        let Ok(doc) = roxmltree::Document::parse(&xml) else { continue };
+        let root = doc.root_element();
+        let filter = root.children().find(|n| n.has_tag_name("autoFilter")).and_then(|af| parse_auto_filter(af, si as u32));
         let mut validations = Vec::new();
         for dv in root.descendants().filter(|n| n.has_tag_name("dataValidation")) {
             let attr = |k: &str| dv.attribute(k).unwrap_or("").to_string();

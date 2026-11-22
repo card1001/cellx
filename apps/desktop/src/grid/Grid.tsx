@@ -67,6 +67,12 @@ interface Props {
   /** In-cell list arrow (data validation) next to this cell. */
   listButton?: Pos | null;
   onListButton?(x: number, y: number): void;
+  /** Outline levels (그룹) of rows and columns: index → level. */
+  outline?: { rows: Map<number, number>; cols: Map<number, number>; maxRow: number; maxCol: number } | null;
+  onOutlineToggle?(rows: boolean, index: number, level: number, collapse: boolean): void;
+  onOutlineLevel?(rows: boolean, level: number): void;
+  /** Page breaks to draw: the first row / column of each new page. */
+  pageBreaks?: { rows: number[]; cols: number[]; manualRows: number[]; manualCols: number[] } | null;
 }
 
 export interface OverlayGeometry {
@@ -160,8 +166,14 @@ export function Grid(props: Props) {
   const fr = Math.min(source.frozenRows, rows.count);
   const fc = Math.min(source.frozenCols, cols.count);
   const hz = Math.max(0.75, Math.min(z, 1.5));
-  const HEADER_H = Math.round(20 * hz);
-  const rowHeaderW = Math.round(Math.max(34, String(rows.count).length * 7 + 14) * hz);
+  const ol = props.outline;
+  const OL = Math.round(14 * hz);
+  const gutterW = ol && ol.maxRow > 0 ? OL * (ol.maxRow + 1) + 4 : 0;
+  const gutterH = ol && ol.maxCol > 0 ? OL * (ol.maxCol + 1) + 4 : 0;
+  const headH = Math.round(20 * hz);
+  const numW = Math.round(Math.max(34, String(rows.count).length * 7 + 14) * hz);
+  const HEADER_H = gutterH + headH;
+  const rowHeaderW = gutterW + numW;
 
   // Unzoomed geometry of frozen panes and the scrolling region.
   const frozenH = rows.offset(fr + 1);
@@ -676,6 +688,35 @@ export function Grid(props: Props) {
       ctx.lineDashOffset = 0;
     }
 
+    // Page breaks: dashed (automatic) or solid (manual), like Excel after printing.
+    const pb = props.pageBreaks;
+    if (pb) {
+      ctx.lineWidth = Math.max(1, 1.5 * z);
+      for (const r of pb.rows) {
+        const y = Math.round(rowY(r)) - 0.5;
+        if (y < HEADER_H || y > size.h) continue;
+        const manual = pb.manualRows.includes(r);
+        ctx.strokeStyle = manual ? "#1d4ed8" : "#6b7280";
+        ctx.setLineDash(manual ? [] : [6, 4]);
+        ctx.beginPath();
+        ctx.moveTo(rowHeaderW, y);
+        ctx.lineTo(size.w, y);
+        ctx.stroke();
+      }
+      for (const c of pb.cols) {
+        const x = Math.round(colX(c)) - 0.5;
+        if (x < rowHeaderW || x > size.w) continue;
+        const manual = pb.manualCols.includes(c);
+        ctx.strokeStyle = manual ? "#1d4ed8" : "#6b7280";
+        ctx.setLineDash(manual ? [] : [6, 4]);
+        ctx.beginPath();
+        ctx.moveTo(x, HEADER_H);
+        ctx.lineTo(x, size.h);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+    }
+
     // AutoFilter buttons and the validation list arrow, drawn over the cells like Excel's.
     const drawButton = (x: number, y: number, size: number, active: boolean) => {
       ctx.fillStyle = active ? "#e0e7ff" : "#ffffff";
@@ -738,7 +779,7 @@ export function Grid(props: Props) {
       ctx.clip();
       if (inSel) {
         ctx.fillStyle = headerSel;
-        ctx.fillRect(x, 0, w, HEADER_H);
+        ctx.fillRect(x, gutterH, w, headH);
         ctx.fillStyle = ACCENT;
         ctx.fillRect(x, HEADER_H - 2, w, 2);
       }
@@ -747,13 +788,13 @@ export function Grid(props: Props) {
       if (sub) {
         ctx.textAlign = "left";
         const label = source.colHeader(c);
-        ctx.fillText(label, x + 6, HEADER_H / 2 + 1);
+        ctx.fillText(label, x + 6, gutterH + headH / 2 + 1);
         const lw = ctx.measureText(label).width;
         ctx.fillStyle = "#9aa0a6";
-        ctx.fillText(sub, x + 12 + lw, HEADER_H / 2 + 1);
+        ctx.fillText(sub, x + 12 + lw, gutterH + headH / 2 + 1);
       } else {
         ctx.textAlign = "center";
-        ctx.fillText(source.colHeader(c), x + w / 2, HEADER_H / 2 + 1);
+        ctx.fillText(source.colHeader(c), x + w / 2, gutterH + headH / 2 + 1);
       }
       ctx.restore();
     }
@@ -774,12 +815,12 @@ export function Grid(props: Props) {
       ctx.clip();
       if (inSel) {
         ctx.fillStyle = headerSel;
-        ctx.fillRect(0, y, rowHeaderW, h);
+        ctx.fillRect(gutterW, y, numW, h);
         ctx.fillStyle = ACCENT;
         ctx.fillRect(rowHeaderW - 2, y, 2, h);
       }
       ctx.fillStyle = inSel ? ACCENT : headerText;
-      ctx.fillText(source.rowHeader(r), rowHeaderW / 2, y + h / 2 + 1);
+      ctx.fillText(source.rowHeader(r), gutterW + numW / 2, y + h / 2 + 1);
       ctx.restore();
     }
     // Header separators.
@@ -789,13 +830,13 @@ export function Grid(props: Props) {
     for (const c of headerCols) {
       const x = Math.round(colX(c) + cols.size(c) * z) - 0.5;
       if (x < rowHeaderW || (c > fc && x < bodyX0)) continue;
-      ctx.moveTo(x, 0);
+      ctx.moveTo(x, gutterH);
       ctx.lineTo(x, HEADER_H);
     }
     for (const r of headerRows) {
       const y = Math.round(rowY(r) + rows.size(r) * z) - 0.5;
       if (y < HEADER_H || (r > fr && y < bodyY0)) continue;
-      ctx.moveTo(0, y);
+      ctx.moveTo(gutterW, y);
       ctx.lineTo(rowHeaderW, y);
     }
     ctx.moveTo(0, HEADER_H - 0.5);
@@ -825,6 +866,100 @@ export function Grid(props: Props) {
     ctx.lineTo(rowHeaderW - 4 - 9 * hz, HEADER_H - 4);
     ctx.closePath();
     ctx.fill();
+
+    // Outline (윤곽) gutters: level buttons, group brackets and +/- buttons.
+    if (ol && (ol.maxRow > 0 || ol.maxCol > 0)) {
+      const btn = (x: number, y: number, label: string) => {
+        const b = OL - 3;
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(x, y, b, b);
+        ctx.strokeStyle = "#8a8a8a";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x + 0.5, y + 0.5, b - 1, b - 1);
+        ctx.fillStyle = "#3f3f46";
+        ctx.font = `${Math.round(10 * hz)}px ${UI_FONT}`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(label, x + b / 2, y + b / 2 + 0.5);
+      };
+      ctx.fillStyle = "#f7f7f8";
+      if (gutterW) ctx.fillRect(0, HEADER_H, gutterW, size.h - HEADER_H);
+      if (gutterH) ctx.fillRect(rowHeaderW, 0, size.w - rowHeaderW, gutterH);
+      const drawAxis = (isRows: boolean) => {
+        const levels = isRows ? ol.rows : ol.cols;
+        const max = isRows ? ol.maxRow : ol.maxCol;
+        if (max <= 0) return;
+        const axis = isRows ? rows : cols;
+        const visible = isRows ? [...frozenRows, ...scrollRows] : [...frozenCols, ...scrollCols];
+        const pos = (i: number) => (isRows ? rowY(i) : colX(i));
+        const lv = (i: number) => levels.get(i) ?? 0;
+        // Level buttons 1 … max+1 in the header band.
+        for (let L = 1; L <= max + 1; L++) {
+          const a = (L - 1) * OL + 2;
+          if (isRows) btn(a, gutterH + (headH - OL) / 2 + 2, String(L));
+          else btn(gutterW + (numW - OL) / 2, a, String(L));
+        }
+        ctx.save();
+        ctx.beginPath();
+        if (isRows) ctx.rect(0, HEADER_H, gutterW, size.h - HEADER_H);
+        else ctx.rect(rowHeaderW, 0, size.w - rowHeaderW, gutterH);
+        ctx.clip();
+        if (visible.length === 0) {
+          ctx.restore();
+          return;
+        }
+        const first = visible[0];
+        const last = visible[visible.length - 1];
+        for (let L = 1; L <= max; L++) {
+          const lane = (L - 1) * OL + OL / 2;
+          let i = first;
+          while (i <= last + 1) {
+            if (lv(i) < L) {
+              i++;
+              continue;
+            }
+            let a = i;
+            while (a > 1 && lv(a - 1) >= L) a--;
+            let b = i;
+            while (lv(b + 1) >= L) b++;
+            const collapsed = (() => {
+              for (let k = a; k <= b; k++) if (axis.size(k) > 0) return false;
+              return true;
+            })();
+            ctx.strokeStyle = "#6b6b6b";
+            ctx.lineWidth = 1;
+            if (!collapsed) {
+              const start = pos(a) + 2;
+              const end = pos(b) + axis.size(b) * z;
+              ctx.beginPath();
+              if (isRows) {
+                ctx.moveTo(lane + 0.5, start);
+                ctx.lineTo(lane + 0.5, end);
+                ctx.moveTo(lane + 0.5, start);
+                ctx.lineTo(lane + 4, start);
+              } else {
+                ctx.moveTo(start, lane + 0.5);
+                ctx.lineTo(end, lane + 0.5);
+                ctx.moveTo(start, lane + 0.5);
+                ctx.lineTo(start, lane + 4);
+              }
+              ctx.stroke();
+            }
+            // The button sits on the summary line after the group.
+            const sumIdx = b + 1;
+            if (sumIdx <= axis.count && axis.size(sumIdx) > 0) {
+              const p = pos(sumIdx) + (axis.size(sumIdx) * z - (OL - 3)) / 2;
+              if (isRows) btn(lane - (OL - 3) / 2, p, collapsed ? "+" : "−");
+              else btn(p, lane - (OL - 3) / 2, collapsed ? "+" : "−");
+            }
+            i = b + 2;
+          }
+        }
+        ctx.restore();
+      };
+      drawAxis(true);
+      drawAxis(false);
+    }
   });
 
   // ------------------------------------------------------------------ hit testing
@@ -859,8 +994,55 @@ export function Grid(props: Props) {
     return Math.abs(x - (sr.x + sr.w - 1)) <= 5 && Math.abs(y - (sr.y + sr.h - 1)) <= 5;
   };
 
+  /** Clicks on outline buttons; true when handled. */
+  const outlineClick = (x: number, y: number): boolean => {
+    if (!ol) return false;
+    const levelAt = (v: number) => Math.floor(v / OL) + 1;
+    const toggle = (isRows: boolean, index: number, L: number) => {
+      const levels = isRows ? ol.rows : ol.cols;
+      const axis = isRows ? rows : cols;
+      // A button on line `index` belongs to the group ending just before it.
+      const end = index - 1;
+      if ((levels.get(end) ?? 0) < L || (levels.get(index) ?? 0) >= L) return;
+      let a = end;
+      while (a > 1 && (levels.get(a - 1) ?? 0) >= L) a--;
+      let collapsed = true;
+      for (let k = a; k <= end; k++) if (axis.size(k) > 0) collapsed = false;
+      props.onOutlineToggle?.(isRows, end, L, !collapsed);
+    };
+    if (gutterW && x < gutterW) {
+      if (y >= gutterH && y < HEADER_H) props.onOutlineLevel?.(true, levelAt(x));
+      else if (y >= HEADER_H) {
+        const L = levelAt(x);
+        if (L <= ol.maxRow) {
+          const bodyY0 = HEADER_H + frozenH * z;
+          const r = y < bodyY0 ? rows.indexAt(Math.max(0, (y - HEADER_H) / z)) : rows.indexAt(frozenH + scrollY + (y - bodyY0) / z);
+          toggle(true, r, L);
+        }
+      }
+      return true;
+    }
+    if (gutterH && y < gutterH) {
+      if (x >= gutterW && x < rowHeaderW) props.onOutlineLevel?.(false, levelAt(y));
+      else if (x >= rowHeaderW) {
+        const L = levelAt(y);
+        if (L <= ol.maxCol) {
+          const bodyX0 = rowHeaderW + frozenW * z;
+          const c = x < bodyX0 ? cols.indexAt(Math.max(0, (x - rowHeaderW) / z)) : cols.indexAt(frozenW + scrollX + (x - bodyX0) / z);
+          toggle(false, c, L);
+        }
+      }
+      return true;
+    }
+    return false;
+  };
+
   const onMouseDown = (e: React.MouseEvent) => {
     const h = hit(e.clientX, e.clientY);
+    if (e.button === 0 && outlineClick(h.x, h.y)) {
+      e.preventDefault();
+      return;
+    }
     if (e.button === 2) {
       props.onContextMenu(h, e.clientX, e.clientY);
       return;

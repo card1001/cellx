@@ -21,6 +21,7 @@ use crate::bridge::{self, BridgeValue, CellRef, CellResolver};
 use crate::data::{ColumnFilter, DataStore, Page, Sort, TableInfo};
 use crate::error::{CellxError, Result};
 use crate::datatools::{AutoFilter, Validation};
+use crate::sheetopts::{Guard, PageSetup, SheetProtection};
 use crate::extras::{Chart, PivotDef};
 use crate::refs::{self, Axis};
 use crate::value::{from_ironcalc, Scalar};
@@ -251,6 +252,12 @@ pub(crate) struct Side {
     comments: Vec<Vec<Comment>>,
     filters: Vec<AutoFilter>,
     validations: Vec<Validation>,
+    outline_rows: BTreeMap<(u32, i32), u8>,
+    outline_cols: BTreeMap<(u32, i32), u8>,
+    protections: Vec<SheetProtection>,
+    unlocked: Vec<(u32, CellRange)>,
+    page_setups: Vec<PageSetup>,
+    tables: Vec<(String, ironcalc_base::types::Table)>,
 }
 
 #[derive(Debug, Clone)]
@@ -308,6 +315,11 @@ pub struct Workbook {
     pub(crate) pivots: Vec<PivotDef>,
     pub(crate) filters: Vec<AutoFilter>,
     pub(crate) validations: Vec<Validation>,
+    pub(crate) outline_rows: BTreeMap<(u32, i32), u8>,
+    pub(crate) outline_cols: BTreeMap<(u32, i32), u8>,
+    pub(crate) protections: Vec<SheetProtection>,
+    pub(crate) unlocked: Vec<(u32, CellRange)>,
+    pub(crate) page_setups: Vec<PageSetup>,
     pub(crate) next_object_id: u32,
     pub last_recalc: RecalcStats,
 }
@@ -353,6 +365,11 @@ impl Workbook {
             pivots: Vec::new(),
             filters: Vec::new(),
             validations: Vec::new(),
+            outline_rows: BTreeMap::new(),
+            outline_cols: BTreeMap::new(),
+            protections: Vec::new(),
+            unlocked: Vec::new(),
+            page_setups: Vec::new(),
             next_object_id: 1,
             last_recalc: RecalcStats::default(),
         })
@@ -412,6 +429,17 @@ impl Workbook {
             comments: self.model().workbook.worksheets.iter().map(|w| w.comments.clone()).collect(),
             filters: self.filters.clone(),
             validations: self.validations.clone(),
+            outline_rows: self.outline_rows.clone(),
+            outline_cols: self.outline_cols.clone(),
+            protections: self.protections.clone(),
+            unlocked: self.unlocked.clone(),
+            page_setups: self.page_setups.clone(),
+            tables: {
+                let mut t: Vec<(String, ironcalc_base::types::Table)> =
+                    self.model().workbook.tables.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                t.sort_by(|a, b| a.0.cmp(&b.0));
+                t
+            },
         }
     }
 
@@ -421,6 +449,16 @@ impl Workbook {
         self.pivots = side.pivots.clone();
         self.filters = side.filters.clone();
         self.validations = side.validations.clone();
+        self.outline_rows = side.outline_rows.clone();
+        self.outline_cols = side.outline_cols.clone();
+        self.protections = side.protections.clone();
+        self.unlocked = side.unlocked.clone();
+        self.page_setups = side.page_setups.clone();
+        let tables: HashMap<String, ironcalc_base::types::Table> = side.tables.iter().cloned().collect();
+        if self.model().workbook.tables != tables {
+            self.model_mut().workbook.tables = tables;
+            self.model_mut().refresh_parser_tables();
+        }
         for (ws, c) in self.model_mut().workbook.worksheets.iter_mut().zip(side.comments.iter()) {
             ws.comments = c.clone();
         }
@@ -505,6 +543,12 @@ impl Workbook {
                 }
             }
             self.rename_in_objects(&format!("{quoted_old}!"), &format!("{quoted_new}!"));
+            for t in self.model_mut().workbook.tables.values_mut() {
+                if t.sheet_name == old {
+                    t.sheet_name = name.to_string();
+                }
+            }
+            self.model_mut().refresh_parser_tables();
         }
         self.commit(start)?;
         Ok(())
@@ -515,6 +559,9 @@ impl Workbook {
             return Err(CellxError::Calc("통합 문서에는 시트가 하나 이상 있어야 합니다".into()));
         }
         let start = self.begin();
+        let gone = self.sheet_names().get(sheet as usize).cloned().unwrap_or_default();
+        self.model_mut().workbook.tables.retain(|_, t| t.sheet_name != gone);
+        self.model_mut().refresh_parser_tables();
         self.um.delete_sheet(sheet)?;
         let old = std::mem::take(&mut self.bridges);
         for ((s, r, c), b) in old {
@@ -525,6 +572,8 @@ impl Workbook {
             }
         }
         self.objects_after_sheet_delete(sheet);
+        self.outline_after_sheet_delete(sheet);
+        self.sheet_options_after_delete(sheet);
         self.commit(start)?;
         Ok(())
     }
@@ -577,6 +626,7 @@ impl Workbook {
 
     /// Writes one cell. `record` = through IronCalc's history (user edits) or not.
     pub(crate) fn write_input(&mut self, sheet: u32, row: i32, col: i32, input: &str, record: bool) -> Result<()> {
+        self.guard(sheet, CellRange { r0: row, c0: col, r1: row, c1: col }, Guard::Content)?;
         let is_bridge = self.is_bridge_input(input);
         let text = if is_bridge {
             self.bridges.insert((sheet, row, col), BridgeCell::new(input.to_string()));
@@ -632,6 +682,7 @@ impl Workbook {
 
     /// Delete key: clears contents, keeps formatting.
     pub fn clear_contents(&mut self, sheet: u32, range: CellRange) -> Result<RecalcStats> {
+        self.guard(sheet, range, Guard::Content)?;
         let start = self.begin();
         self.um.range_clear_contents(&range.area(sheet))?;
         self.bridges.retain(|(s, r, c), _| !(*s == sheet && range.contains(*r, *c)));
@@ -639,12 +690,15 @@ impl Workbook {
     }
 
     pub fn clear_formatting(&mut self, sheet: u32, range: CellRange) -> Result<RecalcStats> {
+        self.guard(sheet, range, Guard::FormatCells)?;
         let start = self.begin();
         self.um.range_clear_formatting(&range.area(sheet))?;
         self.commit(start)
     }
 
     pub fn clear_all(&mut self, sheet: u32, range: CellRange) -> Result<RecalcStats> {
+        self.guard(sheet, range, Guard::Content)?;
+        self.guard(sheet, range, Guard::FormatCells)?;
         let start = self.begin();
         self.um.range_clear_all(&range.area(sheet))?;
         self.bridges.retain(|(s, r, c), _| !(*s == sheet && range.contains(*r, *c)));
@@ -698,10 +752,11 @@ impl Workbook {
             .is_some_and(|c| from_app || normalize(c.clip.csv()) == normalize(text));
         let start = self.begin();
         if internal {
-            let stored = self.clipboard.take().expect("checked above");
-            let (sr0, sc0, sr1, sc1) = stored.clip.range();
+            let (sr0, sc0, sr1, sc1) = self.clipboard.as_ref().expect("checked above").clip.range();
             let (h, w) = (sr1 - sr0, sc1 - sc0);
             let target = CellRange { r0: at_row, c0: at_col, r1: at_row + h, c1: at_col + w };
+            self.guard(sheet, target, Guard::Content)?;
+            let stored = self.clipboard.take().expect("checked above");
             self.select(sheet, target)?;
             self.um
                 .paste_from_clipboard(stored.clip.sheet(), stored.clip.range(), stored.clip.data(), stored.cut)?;
@@ -739,6 +794,7 @@ impl Workbook {
     /// The fill handle: extends `source` to `target` (which contains it), like dragging
     /// the small square at the corner of a selection. Ctrl+D / Ctrl+R use it too.
     pub fn auto_fill(&mut self, sheet: u32, source: CellRange, target: CellRange) -> Result<RecalcStats> {
+        self.guard(sheet, target, Guard::Content)?;
         let s = source.normalized();
         let t = target.normalized();
         let start = self.begin();
@@ -786,6 +842,14 @@ impl Workbook {
     fn shift_all(&mut self, sheet: u32, axis: Axis, at: i32, count: i32) {
         self.shift_bridges(sheet, axis, at, count);
         self.shift_objects(sheet, axis, at, count);
+        self.shift_outline(sheet, axis, at, count);
+        self.shift_tables(sheet, axis, at, count);
+        self.shift_sheet_options(sheet, axis, at, count);
+    }
+
+    /// For helpers that insert rows inside a larger action (subtotals, tables).
+    pub(crate) fn shift_all_pub(&mut self, sheet: u32, axis: Axis, at: i32, count: i32) {
+        self.shift_all(sheet, axis, at, count);
     }
 
     fn shift_bridges(&mut self, sheet: u32, axis: Axis, at: i32, count: i32) {
@@ -815,6 +879,7 @@ impl Workbook {
     }
 
     pub fn insert_rows(&mut self, sheet: u32, row: i32, count: i32) -> Result<RecalcStats> {
+        self.guard(sheet, CellRange { r0: row, c0: 1, r1: row, c1: 1 }, Guard::InsertRows)?;
         let start = self.begin();
         self.um.insert_rows(sheet, row, count)?;
         self.shift_all(sheet, Axis::Row, row, count);
@@ -822,6 +887,7 @@ impl Workbook {
     }
 
     pub fn delete_rows(&mut self, sheet: u32, row: i32, count: i32) -> Result<RecalcStats> {
+        self.guard(sheet, CellRange { r0: row, c0: 1, r1: row, c1: 1 }, Guard::DeleteRows)?;
         let start = self.begin();
         self.um.delete_rows(sheet, row, count)?;
         self.shift_all(sheet, Axis::Row, row, -count);
@@ -829,6 +895,7 @@ impl Workbook {
     }
 
     pub fn insert_columns(&mut self, sheet: u32, col: i32, count: i32) -> Result<RecalcStats> {
+        self.guard(sheet, CellRange { r0: 1, c0: col, r1: 1, c1: col }, Guard::InsertColumns)?;
         let start = self.begin();
         self.um.insert_columns(sheet, col, count)?;
         self.shift_all(sheet, Axis::Column, col, count);
@@ -836,6 +903,7 @@ impl Workbook {
     }
 
     pub fn delete_columns(&mut self, sheet: u32, col: i32, count: i32) -> Result<RecalcStats> {
+        self.guard(sheet, CellRange { r0: 1, c0: col, r1: 1, c1: col }, Guard::DeleteColumns)?;
         let start = self.begin();
         self.um.delete_columns(sheet, col, count)?;
         self.shift_all(sheet, Axis::Column, col, -count);
@@ -843,6 +911,7 @@ impl Workbook {
     }
 
     pub fn set_column_width(&mut self, sheet: u32, c0: i32, c1: i32, px: f64) -> Result<()> {
+        self.guard(sheet, CellRange { r0: 1, c0, r1: 1, c1 }, Guard::FormatColumns)?;
         let start = self.begin();
         self.um.set_columns_width(sheet, c0.min(c1), c0.max(c1), px)?;
         self.commit(start)?;
@@ -850,6 +919,7 @@ impl Workbook {
     }
 
     pub fn set_row_height(&mut self, sheet: u32, r0: i32, r1: i32, px: f64) -> Result<()> {
+        self.guard(sheet, CellRange { r0, c0: 1, r1, c1: 1 }, Guard::FormatRows)?;
         let start = self.begin();
         self.um.set_rows_height(sheet, r0.min(r1), r0.max(r1), px)?;
         self.commit(start)?;
@@ -857,6 +927,8 @@ impl Workbook {
     }
 
     pub fn set_hidden(&mut self, sheet: u32, axis: Axis, from: i32, to: i32, hidden: bool) -> Result<()> {
+        let g = if axis == Axis::Row { Guard::FormatRows } else { Guard::FormatColumns };
+        self.guard(sheet, CellRange { r0: from, c0: from, r1: from, c1: from }, g)?;
         let start = self.begin();
         match axis {
             Axis::Row => self.um.set_rows_hidden(sheet, from.min(to), from.max(to), hidden)?,
@@ -886,6 +958,7 @@ impl Workbook {
     /// Applies one style property (`font.b`, `font.name`, `num_fmt`, `fill.fg_color`,
     /// `alignment.horizontal`, …) to a range.
     pub fn set_style(&mut self, sheet: u32, range: CellRange, path: &str, value: &str) -> Result<RecalcStats> {
+        self.guard(sheet, range, Guard::FormatCells)?;
         let start = self.begin();
         self.um.update_range_style(&range.area(sheet), path, value)?;
         self.commit(start)
@@ -895,6 +968,7 @@ impl Workbook {
     /// CenterH, CenterV or None (Excel's border menu). `style`: thin, medium, thick,
     /// double, dotted, …
     pub fn set_border(&mut self, sheet: u32, range: CellRange, kind: &str, style: &str, color: &str) -> Result<RecalcStats> {
+        self.guard(sheet, range, Guard::FormatCells)?;
         let spec = serde_json::json!({
             "item": { "style": style, "color": color },
             "type": kind,
@@ -907,6 +981,7 @@ impl Workbook {
     }
 
     pub fn merge(&mut self, sheet: u32, range: CellRange, center: bool) -> Result<RecalcStats> {
+        self.guard(sheet, range, Guard::FormatCells)?;
         let start = self.begin();
         let area = range.area(sheet);
         if center {
@@ -918,6 +993,7 @@ impl Workbook {
     }
 
     pub fn unmerge(&mut self, sheet: u32, range: CellRange) -> Result<RecalcStats> {
+        self.guard(sheet, range, Guard::FormatCells)?;
         let start = self.begin();
         self.um.unmerge_cells(&range.area(sheet))?;
         self.commit(start)
@@ -1296,15 +1372,29 @@ impl Workbook {
         let ws = self.model().workbook.worksheet(sheet)?;
         let default_font = self.default_font();
         let links = self.um.get_links(sheet)?;
+        let tables = self.tables_on(sheet);
         let mut cells = Vec::new();
+        let in_table = |row: i32, col: i32| tables.iter().any(|t| t.range.contains(row, col));
         for row in row0..=row1 {
             for col in col0..=col1 {
-                if ws.cell(row, col).is_none() {
+                let exists = ws.cell(row, col).is_some();
+                if !exists && !in_table(row, col) {
                     continue;
                 }
-                let text = self.model().get_formatted_cell_value(sheet, row, col)?;
-                let scalar = from_ironcalc(self.model().get_cell_value_by_index(sheet, row, col)?);
-                let style = self.cell_style(sheet, row, col, &default_font);
+                let (text, scalar, mut style) = if exists {
+                    (
+                        self.model().get_formatted_cell_value(sheet, row, col)?,
+                        from_ironcalc(self.model().get_cell_value_by_index(sheet, row, col)?),
+                        self.cell_style(sheet, row, col, &default_font),
+                    )
+                } else {
+                    (String::new(), Scalar::Empty, None)
+                };
+                if in_table(row, col) {
+                    let mut cs = style.unwrap_or_default();
+                    self.table_style_for(&tables, row, col, &mut cs);
+                    style = (cs != CellStyle::default()).then_some(cs);
+                }
                 if text.is_empty() && style.is_none() {
                     continue;
                 }

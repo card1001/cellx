@@ -49,6 +49,7 @@ export function PromptDialog(props: { title: string; label: string; value: strin
 }
 
 export interface FormatResult {
+  locked?: boolean;
   numFmt?: string;
   align?: string;
   valign?: string;
@@ -88,9 +89,9 @@ export const FONTS = [
 ];
 export const SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72];
 
-const TABS = ["표시 형식", "맞춤", "글꼴", "테두리", "채우기"] as const;
+const TABS = ["표시 형식", "맞춤", "글꼴", "테두리", "채우기", "보호"] as const;
 
-export function FormatCellsDialog(props: { style: CurrentStyle; onDone(r: FormatResult | null): void }) {
+export function FormatCellsDialog(props: { style: CurrentStyle; locked?: boolean; onDone(r: FormatResult | null): void }) {
   const s = props.style;
   const [tab, setTab] = useState<(typeof TABS)[number]>("표시 형식");
   const [r, setR] = useState<FormatResult>({});
@@ -203,6 +204,14 @@ export function FormatCellsDialog(props: { style: CurrentStyle; onDone(r: Format
                 {label}
               </label>
             ))}
+          </div>
+        )}
+        {tab === "보호" && (
+          <div className="fmt-form">
+            <label className="check">
+              <input type="checkbox" checked={r.locked ?? props.locked ?? true} onChange={(e) => setR({ ...r, locked: e.target.checked })} /> 잠금
+            </label>
+            <div className="muted">셀 잠금은 시트를 보호해야 적용됩니다(검토 탭 → 시트 보호).</div>
           </div>
         )}
         {tab === "채우기" && (

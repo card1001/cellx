@@ -1,6 +1,7 @@
 // The ribbon, laid out like Korean Excel's: 파일 · 홈 · 삽입 · 수식 · 데이터 · 보기.
 import { useState, type ReactNode } from "react";
-import type { ChartKind, CurrentStyle } from "../api";
+import type { ChartKind, CurrentStyle, FitMode, PageSetup, TableView } from "../api";
+import { TABLE_STYLES, TableStyleSwatch } from "./DataDialogs";
 import { COLOR_SCALES, DATA_BARS, HIGHLIGHT, type HighlightKind, ICON_SETS } from "../cf";
 import { CHART_KINDS } from "./Chart";
 import { FORMAT_CHOICES, formatLabel } from "../formats";
@@ -83,6 +84,23 @@ export interface RibbonActions {
   nameManager(): void;
   defineName(): void;
   print(): void;
+  group(rows: boolean): void;
+  ungroup(rows: boolean): void;
+  clearOutline(): void;
+  showDetail(show: boolean): void;
+  subtotal(): void;
+  formatAsTable(style: string): void;
+  tableName(name: string): void;
+  tableToggle(key: "stripes" | "totals", value: boolean): void;
+  tableToRange(): void;
+  protectSheet(): void;
+  orientation(landscape: boolean): void;
+  fitWidth(fit: FitMode): void;
+  printGrid(v: boolean): void;
+  printHeadings(v: boolean): void;
+  printTitles(): void;
+  pageBreak(kind: "insert" | "remove" | "reset"): void;
+  togglePageBreaks(): void;
 }
 
 interface Props {
@@ -97,10 +115,14 @@ interface Props {
   showMemos: boolean;
   hasMemo: boolean;
   filterOn: boolean;
+  table: TableView | null;
+  protectedSheet: boolean;
+  pageSetup: PageSetup | null;
+  showPageBreaks: boolean;
 }
 
-const TABS = ["파일", "홈", "삽입", "수식", "데이터", "검토", "보기"] as const;
-type Tab = (typeof TABS)[number];
+const TABS = ["파일", "홈", "삽입", "페이지 레이아웃", "수식", "데이터", "검토", "보기"] as const;
+type Tab = (typeof TABS)[number] | "표 디자인";
 
 function Group(props: { label: string; children: ReactNode }) {
   return (
@@ -145,6 +167,8 @@ const FN_CATEGORIES: [string, string[]][] = [
 
 export function Ribbon(props: Props) {
   const [tab, setTab] = useState<Tab>("홈");
+  // The contextual 표 디자인 tab goes away when the active cell leaves the table.
+  if (tab === "표 디자인" && !props.table) setTab("홈");
   const a = props.actions;
   const s = props.style;
   const fnItems = (names: string[]): MenuItem[] =>
@@ -176,6 +200,11 @@ export function Ribbon(props: Props) {
             {t}
           </button>
         ))}
+        {props.table && (
+          <button className={`rtab contextual ${tab === "표 디자인" ? "on" : ""}`} onMouseDown={(e) => e.preventDefault()} onClick={() => setTab("표 디자인")}>
+            표 디자인
+          </button>
+        )}
         <div className="qat">
           <button className="rb" title="저장 (Ctrl+S)" onClick={a.save} onMouseDown={(e) => e.preventDefault()}>
             💾
@@ -424,6 +453,29 @@ export function Ribbon(props: Props) {
                   { label: "규칙 관리...", onClick: a.manageCf },
                 ]}
               />
+              <Dropdown
+                label={<span className="dd-big"><span className="ic">▤</span>표 서식</span>}
+                title="표 서식 (Ctrl+T)"
+                className="big-dd"
+                panel={(close) => (
+                  <div className="table-styles">
+                    {TABLE_STYLES.map((t) => (
+                      <button
+                        key={t.name}
+                        title={t.label}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => {
+                          close();
+                          a.formatAsTable(t.name);
+                        }}
+                      >
+                        <TableStyleSwatch name={t.name} />
+                        <span>{t.label}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              />
             </Group>
             <Group label="셀">
               <Dropdown
@@ -534,6 +586,9 @@ export function Ribbon(props: Props) {
               <Btn big title="피벗 테이블: 선택한 범위를 요약합니다" onClick={a.insertPivot}>
                 <span className="ic">⊞</span>피벗 테이블
               </Btn>
+              <Btn big title="표 (Ctrl+T)" onClick={() => a.formatAsTable("TableStyleMedium2")}>
+                <span className="ic">▤</span>표
+              </Btn>
             </Group>
             <Group label="차트">
               {CHART_KINDS.map((k) => (
@@ -557,6 +612,116 @@ export function Ribbon(props: Props) {
               <Btn big title="CSV·Parquet을 데이터 시트로" onClick={a.importData}>
                 <span className="ic">🗄</span>데이터 시트
               </Btn>
+            </Group>
+          </>
+        )}
+        {tab === "페이지 레이아웃" && (
+          <>
+            <Group label="페이지 설정">
+              <Dropdown
+                label={<span className="dd-big"><span className="ic">⎙</span>용지 방향</span>}
+                className="big-dd"
+                items={[
+                  { label: "세로", checked: !props.pageSetup?.landscape, onClick: () => a.orientation(false) },
+                  { label: "가로", checked: !!props.pageSetup?.landscape, onClick: () => a.orientation(true) },
+                ]}
+              />
+              <Dropdown
+                label={<span className="dd-big"><span className="ic">⤓</span>나누기</span>}
+                className="big-dd"
+                items={[
+                  { label: "페이지 나누기 삽입", onClick: () => a.pageBreak("insert") },
+                  { label: "페이지 나누기 제거", onClick: () => a.pageBreak("remove") },
+                  { label: "페이지 나누기 모두 원래대로", onClick: () => a.pageBreak("reset") },
+                ]}
+              />
+              <Btn big title="모든 페이지에 반복할 행" onClick={a.printTitles}>
+                <span className="ic">☰</span>인쇄 제목
+              </Btn>
+            </Group>
+            <Group label="크기 조정">
+              <select
+                className="num-fmt"
+                value={props.pageSetup?.fit ?? "None"}
+                onChange={(e) => a.fitWidth(e.target.value as FitMode)}
+                title="배율"
+              >
+                <option value="None">현재 크기</option>
+                <option value="Width">너비: 1페이지</option>
+                <option value="Page">한 페이지에 맞추기</option>
+              </select>
+            </Group>
+            <Group label="시트 옵션">
+              <div className="col">
+                <label className="rcheck">
+                  <input type="checkbox" checked={!!props.pageSetup?.gridlines} onChange={(e) => a.printGrid(e.target.checked)} /> 눈금선 인쇄
+                </label>
+                <label className="rcheck">
+                  <input type="checkbox" checked={!!props.pageSetup?.headings} onChange={(e) => a.printHeadings(e.target.checked)} /> 제목 인쇄
+                </label>
+                <label className="rcheck">
+                  <input type="checkbox" checked={props.showPageBreaks} onChange={a.togglePageBreaks} /> 페이지 나누기 보기
+                </label>
+              </div>
+            </Group>
+            <Group label="인쇄">
+              <Btn big title="인쇄 미리 보기와 인쇄 (Ctrl+P)" onClick={a.print}>
+                <span className="ic">🖨</span>인쇄
+              </Btn>
+            </Group>
+          </>
+        )}
+        {tab === "표 디자인" && props.table && (
+          <>
+            <Group label="속성">
+              <div className="col">
+                <span className="muted">표 이름:</span>
+                <input
+                  key={props.table.name}
+                  className="font-name"
+                  defaultValue={props.table.name}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") a.tableName((e.target as HTMLInputElement).value);
+                  }}
+                  onBlur={(e) => e.target.value !== props.table?.name && a.tableName(e.target.value)}
+                />
+              </div>
+            </Group>
+            <Group label="도구">
+              <Btn big title="표를 일반 범위로 바꿉니다(서식은 남습니다)" onClick={a.tableToRange}>
+                <span className="ic">⇲</span>범위로 변환
+              </Btn>
+              <Btn big title="부분합" onClick={a.subtotal}>
+                <span className="ic">Σ</span>부분합
+              </Btn>
+            </Group>
+            <Group label="표 스타일 옵션">
+              <div className="col">
+                <label className="rcheck">
+                  <input type="checkbox" checked={props.table.totals} onChange={(e) => a.tableToggle("totals", e.target.checked)} /> 요약 행
+                </label>
+                <label className="rcheck">
+                  <input type="checkbox" checked={props.table.stripes} onChange={(e) => a.tableToggle("stripes", e.target.checked)} /> 줄무늬 행
+                </label>
+                <label className="rcheck">
+                  <input type="checkbox" checked={props.filterOn} onChange={a.toggleFilter} /> 필터 단추
+                </label>
+              </div>
+            </Group>
+            <Group label="표 스타일">
+              <div className="table-styles inline">
+                {TABLE_STYLES.map((t) => (
+                  <button
+                    key={t.name}
+                    className={props.table?.style === t.name ? "on" : ""}
+                    title={t.label}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => a.formatAsTable(t.name)}
+                  >
+                    <TableStyleSwatch name={t.name} />
+                  </button>
+                ))}
+              </div>
             </Group>
           </>
         )}
@@ -634,6 +799,37 @@ export function Ribbon(props: Props) {
             <Group label="예측">
               <Dropdown label={<span className="dd-big"><span className="ic">❓</span>가상 분석</span>} className="big-dd" items={[{ label: "목표값 찾기...", onClick: a.goalSeek }]} />
             </Group>
+            <Group label="개요">
+              <Dropdown
+                label={<span className="dd-big"><span className="ic">⊟</span>그룹</span>}
+                className="big-dd"
+                items={[
+                  { label: "행 그룹", shortcut: "Shift+Alt+→", onClick: () => a.group(true) },
+                  { label: "열 그룹", onClick: () => a.group(false) },
+                ]}
+              />
+              <Dropdown
+                label={<span className="dd-big"><span className="ic">⊞</span>그룹 해제</span>}
+                className="big-dd"
+                items={[
+                  { label: "행 그룹 해제", shortcut: "Shift+Alt+←", onClick: () => a.ungroup(true) },
+                  { label: "열 그룹 해제", onClick: () => a.ungroup(false) },
+                  { separator: true },
+                  { label: "개요 지우기", onClick: a.clearOutline },
+                ]}
+              />
+              <Btn big title="그룹별 SUBTOTAL 행을 넣습니다" onClick={a.subtotal}>
+                <span className="ic">Σ</span>부분합
+              </Btn>
+              <div className="col">
+                <Btn title="세부 정보 표시" onClick={() => a.showDetail(true)}>
+                  ⊞ 세부 정보 표시
+                </Btn>
+                <Btn title="세부 정보 숨기기" onClick={() => a.showDetail(false)}>
+                  ⊟ 세부 정보 숨기기
+                </Btn>
+              </div>
+            </Group>
             <Group label="쿼리 및 연결">
               <Btn big title="피벗 테이블을 모두 새로 고침 (Ctrl+Alt+F5)" onClick={a.refreshAll}>
                 <span className="ic">⟳</span>모두 새로 고침
@@ -655,6 +851,12 @@ export function Ribbon(props: Props) {
                 <span className="ic">🗪</span>메모 모두 표시
               </Btn>
             </Group>
+            <Group label="보호">
+              <Btn big title={props.protectedSheet ? "시트 보호 해제" : "시트 보호"} on={props.protectedSheet} onClick={a.protectSheet}>
+                <span className="ic">🔒</span>
+                {props.protectedSheet ? "시트 보호 해제" : "시트 보호"}
+              </Btn>
+            </Group>
           </>
         )}
         {tab === "보기" && (
@@ -662,6 +864,9 @@ export function Ribbon(props: Props) {
             <Group label="표시">
               <label className="rcheck">
                 <input type="checkbox" checked={props.showGrid} onChange={a.toggleGrid} /> 눈금선
+              </label>
+              <label className="rcheck">
+                <input type="checkbox" checked={props.showPageBreaks} onChange={a.togglePageBreaks} /> 페이지 나누기
               </label>
             </Group>
             <Group label="확대/축소">

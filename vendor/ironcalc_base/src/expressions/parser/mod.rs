@@ -337,6 +337,11 @@ impl<'a> Parser<'a> {
         self.defined_names = defined_names;
     }
 
+    /// Replaces the tables known to structured references (CellX: tables made after load).
+    pub fn set_tables(&mut self, tables: HashMap<String, Table>) {
+        self.tables = tables;
+    }
+
     pub fn parse(&mut self, formula: &str, context: &CellReferenceRC) -> Node {
         self.lexer.set_formula(formula);
         self.context = context.clone();

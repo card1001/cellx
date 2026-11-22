@@ -68,6 +68,8 @@ pub struct BookInfo {
     can_undo: bool,
     can_redo: bool,
     font: (String, f64),
+    /// Per sheet: is it protected (시트 보호)?
+    protected: Vec<bool>,
 }
 
 fn info(book: &mut Book) -> CmdResult<BookInfo> {
@@ -78,6 +80,7 @@ fn info(book: &mut Book) -> CmdResult<BookInfo> {
         dirty: book.dirty,
         can_undo: book.wb.can_undo(),
         can_redo: book.wb.can_redo(),
+        protected: (0..book.wb.sheet_names().len() as u32).map(|i| book.wb.protection(i).protected).collect(),
         font: book.wb.workbook_font(),
     })
 }
@@ -651,4 +654,122 @@ pub fn open_link(app: tauri::AppHandle, url: String) -> CmdResult<()> {
 #[tauri::command]
 pub fn print_page(window: tauri::WebviewWindow) -> CmdResult<()> {
     window.print().map_err(err)
+}
+
+// ---------------------------------------------------------------- outline, tables, protection, page setup
+
+use cellx_core::outline::{OutlineView, SubtotalOptions};
+use cellx_core::sheetopts::{PageSetup, ProtectOptions, ProtectionView, TableUpdate, TableView};
+
+fn axis_of(rows: bool) -> Axis {
+    if rows {
+        Axis::Row
+    } else {
+        Axis::Column
+    }
+}
+
+#[tauri::command]
+pub fn outline(state: State<'_, AppState>, sheet: u32) -> CmdResult<OutlineView> {
+    read(&state, |wb| Ok(wb.outline(sheet)))
+}
+
+#[tauri::command]
+pub fn group(state: State<'_, AppState>, sheet: u32, rows: bool, from: i32, to: i32) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.group(sheet, axis_of(rows), from, to))
+}
+
+#[tauri::command]
+pub fn ungroup(state: State<'_, AppState>, sheet: u32, rows: bool, from: i32, to: i32) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.ungroup(sheet, axis_of(rows), from, to))
+}
+
+#[tauri::command]
+pub fn clear_outline(state: State<'_, AppState>, sheet: u32) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.clear_outline(sheet))
+}
+
+#[tauri::command]
+pub fn toggle_group(state: State<'_, AppState>, sheet: u32, rows: bool, index: i32, level: u8, collapse: bool) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.toggle_group(sheet, axis_of(rows), index, level, collapse))
+}
+
+#[tauri::command]
+pub fn show_outline_level(state: State<'_, AppState>, sheet: u32, rows: bool, level: u8) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.show_outline_level(sheet, axis_of(rows), level))
+}
+
+#[tauri::command]
+pub fn subtotal(state: State<'_, AppState>, sheet: u32, range: CellRange, options: SubtotalOptions) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.subtotal(sheet, range, &options))
+}
+
+#[tauri::command]
+pub fn remove_subtotals(state: State<'_, AppState>, sheet: u32, range: CellRange) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.remove_subtotals(sheet, range))
+}
+
+#[tauri::command]
+pub fn tables_on(state: State<'_, AppState>, sheet: u32) -> CmdResult<Vec<TableView>> {
+    read(&state, |wb| Ok(wb.tables_on(sheet)))
+}
+
+#[tauri::command]
+pub fn create_table(state: State<'_, AppState>, sheet: u32, range: CellRange, has_header: bool, style: String) -> CmdResult<TableView> {
+    edit(&state, |wb| wb.create_table(sheet, range, has_header, &style))
+}
+
+#[tauri::command]
+pub fn update_table(state: State<'_, AppState>, update: TableUpdate) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.update_table(&update))
+}
+
+#[tauri::command]
+pub fn convert_table_to_range(state: State<'_, AppState>, name: String) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.convert_table_to_range(&name))
+}
+
+#[tauri::command]
+pub fn protection(state: State<'_, AppState>, sheet: u32) -> CmdResult<ProtectionView> {
+    read(&state, |wb| Ok(wb.protection(sheet)))
+}
+
+#[tauri::command]
+pub fn protect_sheet(state: State<'_, AppState>, sheet: u32, password: Option<String>, options: ProtectOptions) -> CmdResult<()> {
+    edit(&state, |wb| wb.protect_sheet(sheet, password.as_deref(), options))
+}
+
+#[tauri::command]
+pub fn unprotect_sheet(state: State<'_, AppState>, sheet: u32, password: Option<String>) -> CmdResult<()> {
+    edit(&state, |wb| wb.unprotect_sheet(sheet, password.as_deref()))
+}
+
+#[tauri::command]
+pub fn set_locked(state: State<'_, AppState>, sheet: u32, range: CellRange, locked: bool) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.set_locked(sheet, range, locked))
+}
+
+#[tauri::command]
+pub fn page_setup(state: State<'_, AppState>, sheet: u32) -> CmdResult<PageSetup> {
+    read(&state, |wb| Ok(wb.page_setup(sheet)))
+}
+
+#[tauri::command]
+pub fn set_page_setup(state: State<'_, AppState>, setup: PageSetup) -> CmdResult<()> {
+    edit(&state, |wb| wb.set_page_setup(setup))
+}
+
+#[tauri::command]
+pub fn insert_page_break(state: State<'_, AppState>, sheet: u32, row: i32, col: i32) -> CmdResult<()> {
+    edit(&state, |wb| wb.insert_page_break(sheet, row, col))
+}
+
+#[tauri::command]
+pub fn remove_page_break(state: State<'_, AppState>, sheet: u32, row: i32, col: i32) -> CmdResult<()> {
+    edit(&state, |wb| wb.remove_page_break(sheet, row, col))
+}
+
+#[tauri::command]
+pub fn reset_page_breaks(state: State<'_, AppState>, sheet: u32) -> CmdResult<()> {
+    edit(&state, |wb| wb.reset_page_breaks(sheet))
 }

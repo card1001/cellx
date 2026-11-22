@@ -13,9 +13,11 @@ pub mod datatools;
 pub mod error;
 pub mod extras;
 pub mod objects;
+pub mod outline;
 pub mod ooxml;
 pub mod project;
 pub mod refs;
+pub mod sheetopts;
 pub mod value;
 pub mod workbook;
 

@@ -2,6 +2,7 @@
 // remove duplicates, data validation, find & replace, names, hyperlinks, goal seek.
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
+  ProtectOptions,
   ErrorStyle,
   FilterOp,
   FilterValue,
@@ -1055,6 +1056,265 @@ export function GoalSeekDialog(props: { setCell: string; onDone(r: { setCell: st
           </button>
         </div>
       </form>
+    </Modal>
+  );
+}
+
+// ---------------------------------------------------------------- 부분합
+
+export function SubtotalDialog(props: {
+  columns: ColumnChoice[];
+  initialGroup: number;
+  onDone(r: { groupCol: number; func: "Sum" | "Count" | "Average" | "Max" | "Min"; valueCols: number[]; replace: boolean } | "removeAll" | null): void;
+}) {
+  const [group, setGroup] = useState(props.initialGroup);
+  const [func, setFunc] = useState<"Sum" | "Count" | "Average" | "Max" | "Min">("Sum");
+  const [vals, setVals] = useState(() => new Set([props.columns[props.columns.length - 1]?.col].filter((x): x is number => x !== undefined)));
+  const [replace, setReplace] = useState(true);
+  return (
+    <Modal title="부분합" onClose={() => props.onDone(null)}>
+      <div className="modal-body">
+        <label>
+          그룹화할 항목
+          <select value={group} onChange={(e) => setGroup(Number(e.target.value))}>
+            {props.columns.map((c) => (
+              <option key={c.col} value={c.col}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          사용할 함수
+          <select value={func} onChange={(e) => setFunc(e.target.value as typeof func)}>
+            <option value="Sum">합계</option>
+            <option value="Count">개수</option>
+            <option value="Average">평균</option>
+            <option value="Max">최대</option>
+            <option value="Min">최소</option>
+          </select>
+        </label>
+        <div>부분합 계산 항목</div>
+        <div className="filter-list tall">
+          {props.columns.map((c) => (
+            <label className="check" key={c.col}>
+              <input
+                type="checkbox"
+                checked={vals.has(c.col)}
+                onChange={(e) => {
+                  const n = new Set(vals);
+                  if (e.target.checked) n.add(c.col);
+                  else n.delete(c.col);
+                  setVals(n);
+                }}
+              />
+              {c.label}
+            </label>
+          ))}
+        </div>
+        <label className="check">
+          <input type="checkbox" checked={replace} onChange={(e) => setReplace(e.target.checked)} /> 새로운 값으로 대치
+        </label>
+        <div className="muted">먼저 그룹화할 열로 데이터를 정렬해 두세요.</div>
+        <div className="actions">
+          <button onClick={() => props.onDone("removeAll")}>모두 제거</button>
+          <span className="spacer" />
+          <button className="primary" disabled={vals.size === 0} onClick={() => props.onDone({ groupCol: group, func, valueCols: [...vals].sort((a, b) => a - b), replace })}>
+            확인
+          </button>
+          <button onClick={() => props.onDone(null)}>취소</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ---------------------------------------------------------------- 표 만들기
+
+export const TABLE_STYLES: { name: string; label: string; header: string; stripe: string }[] = [
+  { name: "TableStyleLight1", label: "밝게 1", header: "#ffffff", stripe: "#D9D9D9" },
+  { name: "TableStyleLight9", label: "밝게 9", header: "#4472C4", stripe: "#ffffff" },
+  { name: "TableStyleMedium2", label: "보통 2", header: "#4472C4", stripe: "#D9E1F2" },
+  { name: "TableStyleMedium3", label: "보통 3", header: "#ED7D31", stripe: "#FCE4D6" },
+  { name: "TableStyleMedium4", label: "보통 4", header: "#A5A5A5", stripe: "#EDEDED" },
+  { name: "TableStyleMedium5", label: "보통 5", header: "#FFC000", stripe: "#FFF2CC" },
+  { name: "TableStyleMedium6", label: "보통 6", header: "#5B9BD5", stripe: "#DDEBF7" },
+  { name: "TableStyleMedium7", label: "보통 7", header: "#70AD47", stripe: "#E2EFDA" },
+  { name: "TableStyleMedium9", label: "보통 9", header: "#4472C4", stripe: "#B4C6E7" },
+  { name: "TableStyleDark1", label: "어둡게 1", header: "#000000", stripe: "#737373" },
+];
+
+export function TableStyleSwatch(props: { name: string }) {
+  const s = TABLE_STYLES.find((x) => x.name === props.name) ?? TABLE_STYLES[2];
+  return (
+    <span className="table-swatch" title={s.label}>
+      <span style={{ background: s.header }} />
+      <span style={{ background: s.stripe }} />
+      <span style={{ background: "#ffffff" }} />
+      <span style={{ background: s.stripe }} />
+    </span>
+  );
+}
+
+export function CreateTableDialog(props: { range: string; header: boolean; onDone(r: { range: string; header: boolean } | null): void }) {
+  const [range, setRange] = useState(props.range);
+  const [header, setHeader] = useState(props.header);
+  return (
+    <Modal title="표 만들기" onClose={() => props.onDone(null)}>
+      <form
+        className="modal-body"
+        onSubmit={(e) => {
+          e.preventDefault();
+          props.onDone({ range, header });
+        }}
+      >
+        <label>
+          표에 사용할 데이터를 지정하십시오.
+          <input autoFocus value={range} onChange={(e) => setRange(e.target.value)} />
+        </label>
+        <label className="check">
+          <input type="checkbox" checked={header} onChange={(e) => setHeader(e.target.checked)} /> 머리글 포함
+        </label>
+        <div className="actions">
+          <button type="submit" className="primary">
+            확인
+          </button>
+          <button type="button" onClick={() => props.onDone(null)}>
+            취소
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+// ---------------------------------------------------------------- 시트 보호
+
+
+const PROTECT_LABELS: [keyof ProtectOptions, string][] = [
+  ["format_cells", "셀 서식"],
+  ["format_columns", "열 서식"],
+  ["format_rows", "행 서식"],
+  ["insert_columns", "열 삽입"],
+  ["insert_rows", "행 삽입"],
+  ["delete_columns", "열 삭제"],
+  ["delete_rows", "행 삭제"],
+  ["sort", "정렬"],
+  ["auto_filter", "자동 필터 사용"],
+];
+
+export function ProtectDialog(props: { onDone(r: { password: string | null; options: ProtectOptions } | null): void }) {
+  const [pw, setPw] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [step, setStep] = useState<"opts" | "confirm">("opts");
+  const [o, setO] = useState<ProtectOptions>({
+    format_cells: false,
+    format_columns: false,
+    format_rows: false,
+    insert_rows: false,
+    insert_columns: false,
+    delete_rows: false,
+    delete_columns: false,
+    sort: false,
+    auto_filter: false,
+  });
+  const [err, setErr] = useState<string | null>(null);
+  return (
+    <Modal title={step === "opts" ? "시트 보호" : "암호 확인"} onClose={() => props.onDone(null)}>
+      <form
+        className="modal-body"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (step === "opts" && pw) {
+            setStep("confirm");
+            return;
+          }
+          if (step === "confirm" && pw !== pw2) {
+            setErr("확인 암호가 일치하지 않습니다.");
+            return;
+          }
+          props.onDone({ password: pw || null, options: o });
+        }}
+      >
+        {step === "opts" ? (
+          <>
+            <label>
+              시트 보호 해제 암호 (선택)
+              <input type="password" autoFocus value={pw} onChange={(e) => setPw(e.target.value)} />
+            </label>
+            <div>워크시트의 모든 사용자에게 허용할 내용 (잠긴 셀 내용 변경은 항상 막힙니다):</div>
+            <div className="filter-list tall">
+              {PROTECT_LABELS.map(([k, l]) => (
+                <label className="check" key={k}>
+                  <input type="checkbox" checked={o[k]} onChange={(e) => setO({ ...o, [k]: e.target.checked })} /> {l}
+                </label>
+              ))}
+            </div>
+          </>
+        ) : (
+          <label>
+            계속하려면 암호를 다시 입력하십시오.
+            <input type="password" autoFocus value={pw2} onChange={(e) => setPw2(e.target.value)} />
+          </label>
+        )}
+        {err && <div className="err-text">{err}</div>}
+        <div className="muted">암호를 잊어버리면 복구할 수 없습니다. Excel과 같은 방식의 보호여서 강력한 보안 수단은 아닙니다.</div>
+        <div className="actions">
+          <button type="submit" className="primary">
+            확인
+          </button>
+          <button type="button" onClick={() => props.onDone(null)}>
+            취소
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+export function PasswordDialog(props: { title: string; onDone(pw: string | null): void }) {
+  const [pw, setPw] = useState("");
+  return (
+    <Modal title={props.title} onClose={() => props.onDone(null)}>
+      <form
+        className="modal-body"
+        onSubmit={(e) => {
+          e.preventDefault();
+          props.onDone(pw);
+        }}
+      >
+        <label>
+          암호
+          <input type="password" autoFocus value={pw} onChange={(e) => setPw(e.target.value)} />
+        </label>
+        <div className="actions">
+          <button type="submit" className="primary">
+            확인
+          </button>
+          <button type="button" onClick={() => props.onDone(null)}>
+            취소
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+/** Excel's message box. */
+export function MessageBox(props: { title?: string; message: string; onClose(): void }) {
+  return (
+    <Modal title={props.title ?? "CellX"} onClose={props.onClose}>
+      <div className="modal-body">
+        <div className="alert-row">
+          <span className="alert-icon warning">⚠</span>
+          <div>{props.message}</div>
+        </div>
+        <div className="actions">
+          <button className="primary" autoFocus onClick={props.onClose}>
+            확인
+          </button>
+        </div>
+      </div>
     </Modal>
   );
 }

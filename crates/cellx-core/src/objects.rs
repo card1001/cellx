@@ -451,9 +451,34 @@ impl Workbook {
                     .collect();
             }
         }
-        for f in &self.filters {
-            if let Some(p) = parts.get_mut(f.sheet as usize) {
-                p.filter = Some(f.clone());
+        for (i, p) in parts.iter_mut().enumerate() {
+            let sheet = i as u32;
+            let outline = self.outline(sheet);
+            p.outline_rows = outline.rows;
+            p.outline_cols = outline.cols;
+            if let Ok(ws) = self.model().workbook.worksheet(sheet) {
+                p.hidden_rows = ws.rows.iter().filter(|r| r.hidden).map(|r| r.r).collect();
+                p.cols = ws.cols.clone();
+            }
+            p.protection = self.protections.iter().find(|x| x.sheet == sheet).cloned();
+            p.unlocked = self.unlocked.iter().filter(|(s, _)| *s == sheet).map(|(_, r)| *r).collect();
+            p.page = self.page_setups.iter().find(|x| x.sheet == sheet).cloned();
+            let filter = self.filters.iter().find(|f| f.sheet == sheet).cloned();
+            let names = self.sheet_names();
+            let mut tables: Vec<ironcalc_base::types::Table> =
+                self.model().workbook.tables.values().filter(|t| names.get(i) == Some(&t.sheet_name)).cloned().collect();
+            tables.sort_by(|a, b| a.name.cmp(&b.name));
+            let mut claimed = false;
+            for t in tables {
+                // A filter over the table's data belongs to the table in xlsx.
+                let owns = filter.as_ref().is_some_and(|f| {
+                    parse_range(&t.reference).is_some_and(|(_, r0, c0, _, c1)| f.range.r0 == r0 && f.range.c0 == c0 && f.range.c1 == c1)
+                });
+                claimed |= owns;
+                p.tables.push(ooxml::TableXml { table: t, filter: if owns { filter.clone() } else { None } });
+            }
+            if !claimed {
+                p.filter = filter;
             }
         }
         for v in &self.validations {
@@ -480,8 +505,54 @@ impl Workbook {
     /// Objects IronCalc does not read from xlsx: charts, AutoFilter, data validation.
     pub(crate) fn import_extras(&mut self, xlsx: &[u8]) {
         self.import_charts(xlsx);
-        // CellX writes the AutoFilter name itself on save.
-        self.model_mut().workbook.defined_names.retain(|d| !d.name.eq_ignore_ascii_case("_xlnm._FilterDatabase"));
+        // CellX writes these names itself on save.
+        self.model_mut()
+            .workbook
+            .defined_names
+            .retain(|d| !d.name.eq_ignore_ascii_case("_xlnm._FilterDatabase") && !d.name.eq_ignore_ascii_case("_xlnm.Print_Titles"));
+        for o in ooxml::read_sheet_options(xlsx) {
+            let sheet = o.sheet as u32;
+            for (r, l) in o.outline_rows {
+                self.outline_rows.insert((sheet, r), l);
+            }
+            for (c, l) in o.outline_cols {
+                self.outline_cols.insert((sheet, c), l);
+            }
+            if let Some(p) = o.protection {
+                self.protections.push(p);
+            }
+            self.unlocked.extend(o.unlocked.into_iter().map(|r| (sheet, r)));
+            if let Some(p) = o.page {
+                self.page_setups.push(p);
+            }
+        }
+        // IronCalc reads table parts without their style, filter and totals settings.
+        let meta = ooxml::read_table_meta(xlsx);
+        for t in self.model_mut().workbook.tables.values_mut() {
+            if let Some(m) = meta.get(&t.name) {
+                t.style_info = m.style.clone();
+                t.has_filters = m.has_filters;
+                for (c, (label, func)) in t.columns.iter_mut().zip(m.totals.iter()) {
+                    c.totals_row_label = label.clone();
+                    c.totals_row_function = func.clone();
+                }
+            }
+        }
+        // Table filters (inside the table part) become the sheet's AutoFilter.
+        let names = self.sheet_names();
+        let tables: Vec<ironcalc_base::types::Table> = self.model().workbook.tables.values().cloned().collect();
+        for t in tables {
+            let Some(sheet) = names.iter().position(|n| *n == t.sheet_name).map(|i| i as u32) else { continue };
+            if !t.has_filters || self.filters.iter().any(|f| f.sheet == sheet) {
+                continue;
+            }
+            if let Some((_, r0, c0, r1, c1)) = parse_range(&t.reference) {
+                let range = CellRange { r0, c0, r1: r1 - t.totals_row_count as i32, c1 };
+                let columns = ooxml::read_table_filter(xlsx, &t.name).map(|f| f.columns).unwrap_or_default();
+                self.filters.push(crate::datatools::AutoFilter { sheet, range, columns });
+            }
+        }
+        self.model_mut().refresh_parser_tables();
         for (_, filter, validations) in ooxml::read_sheet_rules(xlsx) {
             if let Some(f) = filter {
                 self.filters.retain(|x| x.sheet != f.sheet);
@@ -559,6 +630,7 @@ impl Workbook {
     }
 
     pub fn add_conditional_format(&mut self, sheet: u32, range: CellRange, rule: CfRuleInput) -> Result<RecalcStats> {
+        self.guard(sheet, range, crate::sheetopts::Guard::FormatCells)?;
         let start = self.begin();
         self.um.add_conditional_formatting(sheet, &range_a1(range), rule)?;
         self.commit(start)
@@ -1295,6 +1367,21 @@ mod tests {
             error_message: String::new(),
         };
         wb.set_validation(0, CellRange { r0: 2, c0: 2, r1: 5, c1: 2 }, v).unwrap();
+        wb.group(0, crate::refs::Axis::Row, 3, 4).unwrap();
+        wb.group(0, crate::refs::Axis::Column, 2, 2).unwrap();
+        wb.toggle_group(0, crate::refs::Axis::Row, 3, 1, true).unwrap();
+        let mut ps = wb.page_setup(0);
+        ps.landscape = true;
+        ps.fit = crate::sheetopts::FitMode::Width;
+        ps.title_rows = Some((1, 1));
+        ps.row_breaks = vec![4];
+        ps.page_numbers = true;
+        wb.set_page_setup(ps).unwrap();
+        wb.set_locked(0, CellRange { r0: 2, c0: 3, r1: 5, c1: 3 }, false).unwrap();
+        wb.protect_sheet(0, Some("abc"), crate::sheetopts::ProtectOptions { auto_filter: true, ..Default::default() }).unwrap();
+        wb.add_sheet().unwrap();
+        wb.set_inputs(1, &[(1, 1, "품목".into()), (1, 2, "수량".into()), (2, 1, "사과".into()), (2, 2, "3".into()), (3, 1, "배".into()), (3, 2, "5".into())]).unwrap();
+        wb.create_table(1, CellRange { r0: 1, c0: 1, r1: 3, c1: 2 }, true, "TableStyleMedium3").unwrap();
         wb.save_xlsx(std::path::Path::new(&path)).unwrap();
     }
 
