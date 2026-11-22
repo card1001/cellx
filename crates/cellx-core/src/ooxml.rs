@@ -446,23 +446,38 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
         return Ok(xlsx.to_vec());
     }
     let mut zin = zerr(zip::ZipArchive::new(Cursor::new(xlsx)))?;
-    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    // Only the parts that may change are read; the others are copied as they
+    // are, still compressed, when the package is written again.
+    let mut order: Vec<String> = Vec::new();
     for i in 0..zin.len() {
-        let mut f = zerr(zin.by_index(i))?;
-        if f.is_dir() {
-            continue;
+        let f = zerr(zin.by_index_raw(i))?;
+        if !f.is_dir() {
+            order.push(zerr(f.name())?.to_string());
         }
+    }
+    let sheets: std::collections::HashSet<String> = parts
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !p.is_empty())
+        .flat_map(|(i, _)| {
+            [format!("xl/worksheets/sheet{}.xml", i + 1), format!("xl/worksheets/_rels/sheet{}.xml.rels", i + 1)]
+        })
+        .collect();
+    let wanted = |name: &str| name == "[Content_Types].xml" || name == "xl/workbook.xml" || sheets.contains(name);
+    let mut map: HashMap<String, Vec<u8>> = HashMap::new();
+    for name in order.iter().filter(|n| wanted(n)) {
+        let mut f = zerr(zin.by_name(name))?;
         let mut buf = Vec::new();
         f.read_to_end(&mut buf)?;
-        let name = zerr(f.name())?.to_string();
-        files.push((name, buf));
+        map.insert(name.clone(), buf);
     }
-    let mut map: HashMap<String, Vec<u8>> = files.iter().cloned().collect();
-    let mut order: Vec<String> = files.into_iter().map(|(n, _)| n).collect();
-    let put = |map: &mut HashMap<String, Vec<u8>>, order: &mut Vec<String>, name: String, data: Vec<u8>| {
-        if !map.contains_key(&name) {
+    let loaded: std::collections::HashSet<String> = map.keys().cloned().collect();
+    let mut changed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut put = |map: &mut HashMap<String, Vec<u8>>, order: &mut Vec<String>, name: String, data: Vec<u8>| {
+        if !order.contains(&name) {
             order.push(name.clone());
         }
+        changed.insert(name.clone());
         map.insert(name, data);
     };
 
@@ -675,7 +690,7 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
             } else if let Some(at) = wb.find("<calcPr").or_else(|| wb.find("</workbook>")) {
                 wb.insert_str(at, &format!("<definedNames>{filter_names}</definedNames>"));
             }
-            map.insert("xl/workbook.xml".into(), wb.into_bytes());
+            put(&mut map, &mut order, "xl/workbook.xml".into(), wb.into_bytes());
         }
     }
 
@@ -689,7 +704,7 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
         }
         let at = ct.rfind("</Types>").unwrap_or(ct.len());
         ct.insert_str(at, &overrides);
-        map.insert("[Content_Types].xml".into(), ct.into_bytes());
+        put(&mut map, &mut order, "[Content_Types].xml".into(), ct.into_bytes());
     }
 
     let mut out = Cursor::new(Vec::new());
@@ -697,8 +712,13 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
         let mut zw = zip::ZipWriter::new(&mut out);
         let opts = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
         for name in &order {
-            zerr(zw.start_file(name.as_str(), opts))?;
-            zw.write_all(&map[name])?;
+            if changed.contains(name) || !loaded.contains(name) && map.contains_key(name) {
+                zerr(zw.start_file(name.as_str(), opts))?;
+                zw.write_all(&map[name])?;
+            } else {
+                // Unchanged: the compressed bytes go across untouched.
+                zerr(zw.raw_copy_file(zerr(zin.by_name(name))?))?;
+            }
         }
         zerr(zw.finish())?;
     }
@@ -1090,6 +1110,89 @@ pub struct SheetOptionsXml {
     pub page: Option<PageSetup>,
 }
 
+/// A worksheet's XML without its cell data (`<sheetData>…</sheetData>`), and
+/// that cell data. The cells are what IronCalc reads; CellX needs the small rest
+/// as a tree and only a few attributes of the cells, so the cells are scanned
+/// as a stream instead of being built into a tree of millions of nodes.
+fn split_sheet_data(xml: &str) -> (std::borrow::Cow<'_, str>, &str) {
+    use std::borrow::Cow;
+    // The opening tag, with or without a namespace prefix.
+    let Some(open) = xml.match_indices("sheetData").map(|(i, _)| i).find(|&i| {
+        let before = xml[..i].rfind('<').map(|lt| &xml[lt + 1..i]);
+        matches!(before, Some(p) if p.is_empty() || (p.ends_with(':') && !p.contains(['/', ' ', '>'])))
+    }) else {
+        return (Cow::Borrowed(xml), "");
+    };
+    let start = xml[..open].rfind('<').unwrap_or(open);
+    let Some(gt) = xml[open..].find('>').map(|i| open + i) else { return (Cow::Borrowed(xml), "") };
+    if xml.as_bytes()[gt - 1] == b'/' {
+        let mut rest = String::with_capacity(xml.len());
+        rest.push_str(&xml[..start]);
+        rest.push_str(&xml[gt + 1..]);
+        return (Cow::Owned(rest), "");
+    }
+    let Some(close) = xml.rfind("sheetData>").filter(|&i| i > gt) else { return (Cow::Borrowed(xml), "") };
+    let Some(close_start) = xml[..close].rfind("</") else { return (Cow::Borrowed(xml), "") };
+    let mut rest = String::with_capacity(start + xml.len() - close);
+    rest.push_str(&xml[..start]);
+    rest.push_str(&xml[close + "sheetData>".len()..]);
+    (Cow::Owned(rest), &xml[gt + 1..close_start])
+}
+
+/// From the cell data of a worksheet: the outline level of each row that has
+/// one, and the cells whose style is in `unlocked_xf`.
+fn scan_sheet_data(data: &str, unlocked_xf: &std::collections::HashSet<usize>) -> (Vec<(i32, u8)>, Vec<(i32, i32)>) {
+    use quick_xml::events::Event;
+    let mut outline = Vec::new();
+    let mut unlocked = Vec::new();
+    // Most sheets have neither: one fast search instead of a scan of every cell.
+    if unlocked_xf.is_empty() && !data.contains("outlineLevel") {
+        return (outline, unlocked);
+    }
+    let mut reader = quick_xml::Reader::from_str(data);
+    reader.config_mut().check_end_names = false;
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match e.local_name().as_ref() {
+                "row" => {
+                    let (mut r, mut level) = (0, None);
+                    for a in e.attributes().flatten() {
+                        match a.key.local_name().as_ref() {
+                            "r" => r = a.value.parse::<i32>().unwrap_or(0),
+                            "outlineLevel" => level = a.value.parse::<u8>().ok(),
+                            _ => {}
+                        }
+                    }
+                    if let Some(l) = level {
+                        if l > 0 && r > 0 {
+                            outline.push((r, l));
+                        }
+                    }
+                }
+                "c" if !unlocked_xf.is_empty() => {
+                    let (mut style, mut at) = (0usize, None);
+                    for a in e.attributes().flatten() {
+                        match a.key.local_name().as_ref() {
+                            "s" => style = a.value.parse::<usize>().unwrap_or(0),
+                            "r" => at = parse_cell(&a.value),
+                            _ => {}
+                        }
+                    }
+                    if unlocked_xf.contains(&style) {
+                        if let Some(cell) = at {
+                            unlocked.push(cell);
+                        }
+                    }
+                }
+                _ => {}
+            },
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    (outline, unlocked)
+}
+
 pub fn read_sheet_options(xlsx: &[u8]) -> Vec<SheetOptionsXml> {
     let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(xlsx)) else { return Vec::new() };
     let Some(wb_xml) = read_part(&mut zip, "xl/workbook.xml") else { return Vec::new() };
@@ -1137,31 +1240,12 @@ pub fn read_sheet_options(xlsx: &[u8]) -> Vec<SheetOptionsXml> {
     let mut out = Vec::new();
     for (si, part) in parts.iter().enumerate() {
         let Some(xml) = read_part(&mut zip, part) else { continue };
-        let Ok(doc) = roxmltree::Document::parse(&xml) else { continue };
+        let (rest, data) = split_sheet_data(&xml);
+        let Ok(doc) = roxmltree::Document::parse(&rest) else { continue };
         let root = doc.root_element();
         let mut o = SheetOptionsXml { sheet: si, outline_rows: vec![], outline_cols: vec![], protection: None, unlocked: vec![], page: None };
-        let mut unlocked_cells: Vec<(i32, i32)> = Vec::new();
-        if let Some(data) = root.children().find(|n| n.has_tag_name("sheetData")) {
-            for row in data.children().filter(|n| n.has_tag_name("row")) {
-                let r = row.attribute("r").and_then(|v| v.parse::<i32>().ok()).unwrap_or(0);
-                if let Some(l) = row.attribute("outlineLevel").and_then(|v| v.parse::<u8>().ok()) {
-                    if l > 0 && r > 0 {
-                        o.outline_rows.push((r, l));
-                    }
-                }
-                if unlocked_xf.is_empty() {
-                    continue;
-                }
-                for c in row.children().filter(|n| n.has_tag_name("c")) {
-                    let s = c.attribute("s").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
-                    if unlocked_xf.contains(&s) {
-                        if let Some((rr, cc)) = c.attribute("r").and_then(parse_cell) {
-                            unlocked_cells.push((rr, cc));
-                        }
-                    }
-                }
-            }
-        }
+        let (outline_rows, mut unlocked_cells) = scan_sheet_data(data, &unlocked_xf);
+        o.outline_rows = outline_rows;
         if let Some(cols) = root.children().find(|n| n.has_tag_name("cols")) {
             for c in cols.children().filter(|n| n.has_tag_name("col")) {
                 let (Some(a), Some(b)) = (c.attribute("min").and_then(|v| v.parse::<i32>().ok()), c.attribute("max").and_then(|v| v.parse::<i32>().ok())) else { continue };
@@ -1393,7 +1477,8 @@ pub fn read_sheet_rules(xlsx: &[u8]) -> Vec<(usize, Option<AutoFilter>, Vec<Vali
         if !xml.contains("<autoFilter") && !xml.contains("<dataValidation") {
             continue;
         }
-        let Ok(doc) = roxmltree::Document::parse(&xml) else { continue };
+        let (rest, _) = split_sheet_data(&xml);
+        let Ok(doc) = roxmltree::Document::parse(&rest) else { continue };
         let root = doc.root_element();
         let filter = root.children().find(|n| n.has_tag_name("autoFilter")).and_then(|af| parse_auto_filter(af, si as u32));
         let mut validations = Vec::new();
@@ -1455,6 +1540,26 @@ pub fn read_sheet_rules(xlsx: &[u8]) -> Vec<(usize, Option<AutoFilter>, Vec<Vali
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sheet_data_is_split_off_and_scanned() {
+        let xml = r#"<worksheet xmlns="x"><cols><col min="2" max="2" outlineLevel="1"/></cols><sheetData><row r="1"><c r="A1" s="3"><v>1</v></c></row><row r="2" outlineLevel="2" hidden="1"><c r="B2"><f>A1&lt;2</f></c></row></sheetData><autoFilter ref="A1:B2"/></worksheet>"#;
+        let (rest, data) = split_sheet_data(xml);
+        assert_eq!(rest, r#"<worksheet xmlns="x"><cols><col min="2" max="2" outlineLevel="1"/></cols><autoFilter ref="A1:B2"/></worksheet>"#);
+        assert!(data.starts_with("<row r=\"1\">") && data.ends_with("</row>"));
+        let unlocked: std::collections::HashSet<usize> = [3].into_iter().collect();
+        assert_eq!(scan_sheet_data(data, &unlocked), (vec![(2, 2)], vec![(1, 1)]));
+        let none = std::collections::HashSet::new();
+        assert_eq!(scan_sheet_data(data, &none), (vec![(2, 2)], vec![]));
+        // A prefix, an empty sheetData, and none at all.
+        let (rest, data) = split_sheet_data(r#"<x:worksheet><x:sheetData><x:row r="4" outlineLevel="1"/></x:sheetData><x:cols/></x:worksheet>"#);
+        assert_eq!((rest.as_ref(), data), (r#"<x:worksheet><x:cols/></x:worksheet>"#, r#"<x:row r="4" outlineLevel="1"/>"#));
+        assert_eq!(scan_sheet_data(data, &none).0, vec![(4, 1)]);
+        let (rest, data) = split_sheet_data(r#"<worksheet><sheetData/><cols/></worksheet>"#);
+        assert_eq!((rest.as_ref(), data), ("<worksheet><cols/></worksheet>", ""));
+        let (rest, data) = split_sheet_data("<worksheet><cols/></worksheet>");
+        assert_eq!((rest.as_ref(), data), ("<worksheet><cols/></worksheet>", ""));
+    }
+
     use super::*;
 
     #[test]

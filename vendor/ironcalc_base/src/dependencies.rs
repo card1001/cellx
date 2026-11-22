@@ -165,6 +165,8 @@ pub(crate) fn collect(node: &Node, out: &mut Vec<RelArea>) -> bool {
                     | Function::Hyperlink
                     | Function::Sheet
                     | Function::Sheets
+                    // Skips hidden rows: hiding a row changes it without touching a cell.
+                    | Function::Subtotal
             );
             let mut known = !dynamic;
             for a in args {

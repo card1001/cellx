@@ -117,6 +117,9 @@ pub fn to_precision(value: f64, precision: usize) -> f64 {
     if value.is_infinite() || value.is_nan() {
         return value;
     }
+    if is_exact_integer(value, precision) {
+        return value;
+    }
     to_precision_str(value, precision)
         .parse::<f64>()
         .unwrap_or({
@@ -137,8 +140,22 @@ pub fn to_excel_precision_str(value: f64) -> String {
     to_precision_str(value, 15)
 }
 
+/// CellX: an integer with fewer digits than `precision` comes back from the
+/// text round trip unchanged, so it skips it (most numbers in a sheet are such).
+#[inline]
+fn is_exact_integer(value: f64, precision: usize) -> bool {
+    precision <= 15 && value.fract() == 0.0 && value.abs() < POWERS_OF_TEN[precision]
+}
+
+const POWERS_OF_TEN: [f64; 16] = [
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15,
+];
+
 pub fn to_excel_precision(value: f64, precision: usize) -> f64 {
     if !value.is_finite() {
+        return value;
+    }
+    if is_exact_integer(value, precision) {
         return value;
     }
 

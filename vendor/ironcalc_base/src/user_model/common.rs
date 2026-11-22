@@ -221,6 +221,9 @@ pub struct UserModel<'a> {
     pub(crate) model: Model<'a>,
     history: History,
     send_queue: Vec<QueueDiffs>,
+    /// CellX: whether changes are queued for `flush_send_queue` (collaboration).
+    /// A host that never flushes turns it off; the queue would only grow.
+    send_queue_enabled: bool,
     pause_evaluation: bool,
     /// What the user is looking at: selected sheet, selection and scroll
     /// position of each sheet, window size. Runtime state only: it is not
@@ -262,6 +265,7 @@ impl<'a> UserModel<'a> {
             model,
             history: History::default(),
             send_queue: vec![],
+            send_queue_enabled: true,
             pause_evaluation: false,
             view: WorkbookView::default(),
         }
@@ -282,6 +286,7 @@ impl<'a> UserModel<'a> {
             model,
             history: History::default(),
             send_queue: vec![],
+            send_queue_enabled: true,
             pause_evaluation: false,
             view: WorkbookView::default(),
         })
@@ -297,6 +302,7 @@ impl<'a> UserModel<'a> {
             model,
             history: History::default(),
             send_queue: vec![],
+            send_queue_enabled: true,
             pause_evaluation: false,
             view: WorkbookView::default(),
         })
@@ -329,6 +335,27 @@ impl<'a> UserModel<'a> {
         let lists = &stack[stack.len().saturating_sub(count)..];
         let mut out = Vec::new();
         crate::user_model::history::content_changes(lists, &mut out).then_some(out)
+    }
+
+    /// CellX: puts whole cells (content and style) at the given places as one
+    /// undoable change; `None` removes the cell. The cells are taken as they
+    /// are: a formula keeps its parsed form, so one moved to another row reads
+    /// the cells at the same distance from it, the way Excel moves formulas
+    /// when it sorts. Array formulas and their spills must not be among them.
+    pub fn set_cells(&mut self, sheet: u32, cells: Vec<(i32, i32, Option<Cell>)>) -> Result<(), String> {
+        let worksheet = self.model.workbook.worksheet(sheet)?;
+        let mut list = Vec::with_capacity(cells.len());
+        for (row, column, new) in cells {
+            if !is_valid_row(row) || !is_valid_column_number(column) {
+                return Err("Invalid cell".to_string());
+            }
+            let old = worksheet.cell(row, column).map(Cow::into_owned);
+            list.push((row, column, old, new));
+        }
+        self.model.put_cells(sheet, list.iter().map(|(r, c, _, new)| (*r, *c, new.clone())))?;
+        self.push_diff_list(vec![Diff::SetCells { sheet, cells: list }]);
+        self.evaluate_if_not_paused();
+        Ok(())
     }
 
     /// Number of entries on the undo stack. Hosts that keep a parallel history
@@ -366,12 +393,17 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [UserModel::redo]
     pub fn undo(&mut self) -> Result<(), String> {
-        if let Some(diff_list) = self.history.undo() {
-            self.apply_undo_diff_list(&diff_list)?;
-            self.send_queue.push(QueueDiffs {
-                r#type: DiffType::Undo,
-                list: diff_list.clone(),
-            });
+        // CellX: the list moves to the redo stack instead of being copied.
+        if let Some(diff_list) = self.history.undo_stack.pop() {
+            let applied = self.apply_undo_diff_list(&diff_list);
+            if self.send_queue_enabled && applied.is_ok() {
+                self.send_queue.push(QueueDiffs {
+                    r#type: DiffType::Undo,
+                    list: diff_list.clone(),
+                });
+            }
+            self.history.redo_stack.push(diff_list);
+            applied?;
         };
         Ok(())
     }
@@ -381,14 +413,27 @@ impl<'a> UserModel<'a> {
     /// See also:
     /// * [UserModel::redo]
     pub fn redo(&mut self) -> Result<(), String> {
-        if let Some(diff_list) = self.history.redo() {
-            self.apply_diff_list(&diff_list)?;
-            self.send_queue.push(QueueDiffs {
-                r#type: DiffType::Redo,
-                list: diff_list.clone(),
-            });
+        if let Some(diff_list) = self.history.redo_stack.pop() {
+            let applied = self.apply_diff_list(&diff_list);
+            if self.send_queue_enabled && applied.is_ok() {
+                self.send_queue.push(QueueDiffs {
+                    r#type: DiffType::Redo,
+                    list: diff_list.clone(),
+                });
+            }
+            self.history.undo_stack.push(diff_list);
+            applied?;
         };
         Ok(())
+    }
+
+    /// CellX: stops (or restarts) queueing changes for `flush_send_queue`.
+    /// Anything queued so far is dropped when it is turned off.
+    pub fn set_send_queue_enabled(&mut self, enabled: bool) {
+        self.send_queue_enabled = enabled;
+        if !enabled {
+            self.send_queue = Vec::new();
+        }
     }
 
     /// Returns true if there are items to be undone
@@ -1202,7 +1247,7 @@ impl<'a> UserModel<'a> {
         })?;
 
         let old_merged_cells = self.model.get_merged_cells(sheet)?.to_vec();
-        let refs = self.model.formulas_reading_rows(sheet, row, row_count);
+        let refs = self.model.formulas_reading_rows(sheet, row, row_count, false);
         self.model.delete_rows(sheet, row, row_count)?;
 
         let mut diff_list = self.merged_cells_snapshot_diffs(sheet, old_merged_cells)?;
@@ -1284,6 +1329,7 @@ impl<'a> UserModel<'a> {
         })?;
 
         let old_merged_cells = self.model.get_merged_cells(sheet)?.to_vec();
+        let refs = self.model.formulas_reading_rows(sheet, column, column_count, true);
         self.model.delete_columns(sheet, column, column_count)?;
 
         let mut diff_list = self.merged_cells_snapshot_diffs(sheet, old_merged_cells)?;
@@ -1293,6 +1339,7 @@ impl<'a> UserModel<'a> {
             column,
             count: column_count,
             old_data,
+            refs,
         });
         self.push_diff_list(diff_list);
         self.evaluate_if_not_paused();
@@ -2322,10 +2369,12 @@ impl<'a> UserModel<'a> {
     }
 
     pub(crate) fn push_diff_list(&mut self, diff_list: DiffList) {
-        self.send_queue.push(QueueDiffs {
-            r#type: DiffType::Redo,
-            list: diff_list.clone(),
-        });
+        if self.send_queue_enabled {
+            self.send_queue.push(QueueDiffs {
+                r#type: DiffType::Redo,
+                list: diff_list.clone(),
+            });
+        }
         self.history.push(diff_list);
     }
 

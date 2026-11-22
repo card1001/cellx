@@ -263,6 +263,15 @@ pub(crate) struct Side {
     tables: Vec<(String, ironcalc_base::types::Table)>,
 }
 
+impl Side {
+    /// Whether going from `self` to `other` can change what formulas compute:
+    /// data engine formulas and tables (structured references). Filters,
+    /// outline, comments, charts and the like cannot.
+    fn affects_values(&self, other: &Side) -> bool {
+        self.bridges != other.bridges || self.tables != other.tables
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Action {
     steps: usize,
@@ -358,6 +367,8 @@ impl Workbook {
     fn from_user_model(mut um: UserModel<'static>, data: DataStore, data_path: Option<PathBuf>) -> Result<Self> {
         // CellX decides when to evaluate (it has to refresh bridge results in between).
         um.pause_evaluation();
+        // No collaboration: the change queue would only grow and cost a copy of every change.
+        um.set_send_queue_enabled(false);
         Ok(Workbook {
             um,
             data,
@@ -467,7 +478,8 @@ impl Workbook {
             self.model_mut().workbook.tables = tables;
             self.model_mut().refresh_parser_tables();
         }
-        for (ws, c) in self.model_mut().workbook.worksheets.iter_mut().zip(side.comments.iter()) {
+        // Comments do not change values: no need to mark the model as changed untracked.
+        for (ws, c) in self.um.get_model_mut().workbook.worksheets.iter_mut().zip(side.comments.iter()) {
             ws.comments = c.clone();
         }
     }
@@ -479,7 +491,7 @@ impl Workbook {
     pub(crate) fn commit(&mut self, start: (usize, Side)) -> Result<RecalcStats> {
         let steps = self.um.undo_depth().saturating_sub(start.0);
         let after = self.side();
-        let changes = if start.1 == after { self.um.content_changes_since(start.0) } else { None };
+        let changes = if start.1.affects_values(&after) { None } else { self.um.content_changes_since(start.0) };
         if steps > 0 || start.1 != after {
             self.undo.push(Action { steps, before: start.1, after });
             self.redo.clear();
@@ -497,7 +509,7 @@ impl Workbook {
 
     pub fn undo(&mut self) -> Result<RecalcStats> {
         let Some(a) = self.undo.pop() else { return Ok(RecalcStats::default()) };
-        let changes = if a.before == a.after { self.um.content_changes_on_top(a.steps, false) } else { None };
+        let changes = if a.before.affects_values(&a.after) { None } else { self.um.content_changes_on_top(a.steps, false) };
         for _ in 0..a.steps {
             self.um.undo()?;
         }
@@ -509,7 +521,7 @@ impl Workbook {
 
     pub fn redo(&mut self) -> Result<RecalcStats> {
         let Some(a) = self.redo.pop() else { return Ok(RecalcStats::default()) };
-        let changes = if a.before == a.after { self.um.content_changes_on_top(a.steps, true) } else { None };
+        let changes = if a.before.affects_values(&a.after) { None } else { self.um.content_changes_on_top(a.steps, true) };
         for _ in 0..a.steps {
             self.um.redo()?;
         }

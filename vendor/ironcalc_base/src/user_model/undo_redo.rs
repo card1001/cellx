@@ -15,6 +15,10 @@ impl<'a> UserModel<'a> {
         let mut needs_evaluation = false;
         for diff in diff_list.iter().rev() {
             match diff {
+                Diff::SetCells { sheet, cells } => {
+                    needs_evaluation = true;
+                    self.model.put_cells(*sheet, cells.iter().map(|(r, c, old, _)| (*r, *c, old.clone())))?;
+                }
                 Diff::SetCellValue {
                     sheet,
                     row,
@@ -279,6 +283,7 @@ impl<'a> UserModel<'a> {
                     column,
                     count: _,
                     old_data,
+                    refs,
                 } => {
                     needs_evaluation = true;
                     self.model
@@ -295,6 +300,9 @@ impl<'a> UserModel<'a> {
                             let hidden = col.hidden;
                             worksheet.set_column_width_and_style(c, width, hidden, style)?;
                         }
+                    }
+                    for (s, r, c, formula) in refs {
+                        self.model.set_user_input(*s, *r, *c, formula.clone())?;
                     }
                 }
                 Diff::SetFrozenRowsCount {
@@ -659,6 +667,10 @@ impl<'a> UserModel<'a> {
         let mut needs_evaluation = false;
         for diff in diff_list {
             match diff {
+                Diff::SetCells { sheet, cells } => {
+                    needs_evaluation = true;
+                    self.model.put_cells(*sheet, cells.iter().map(|(r, c, _, new)| (*r, *c, new.clone())))?;
+                }
                 Diff::SetCellValue {
                     sheet,
                     row,
@@ -812,7 +824,7 @@ impl<'a> UserModel<'a> {
                     sheet,
                     column,
                     count,
-                    old_data: _,
+                    ..
                 } => {
                     self.model.delete_columns(*sheet, *column, *count)?;
                     needs_evaluation = true;

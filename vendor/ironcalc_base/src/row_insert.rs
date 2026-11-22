@@ -5,7 +5,7 @@
 //! worked out on the parsed formula. A formula that reads a deleted row (and
 //! becomes #REF!) still goes the text way, which decides what it turns into.
 
-use crate::constants::LAST_ROW;
+use crate::constants::{LAST_COLUMN, LAST_ROW};
 use crate::expressions::parser::stringify::{to_string_displaced, DisplaceData};
 use crate::expressions::types::CellReferenceRC;
 use crate::expressions::parser::static_analysis::run_static_analysis_on_node;
@@ -13,13 +13,14 @@ use crate::expressions::parser::Node;
 use crate::model::Model;
 use crate::types::Cell;
 
-/// `count` rows inserted before `row` on `sheet` (or deleted from `row` on,
-/// when `count` is negative).
+/// `count` rows (or columns) inserted before `row` on `sheet`, or deleted
+/// from `row` on when `count` is negative. With `columns`, `row` is a column.
 #[derive(Clone, Copy)]
 pub(crate) struct RowShift {
     pub(crate) sheet: u32,
     pub(crate) row: i32,
     pub(crate) count: i32,
+    pub(crate) columns: bool,
 }
 
 impl RowShift {
@@ -38,7 +39,7 @@ impl RowShift {
         self.count < 0 && sheet == self.sheet && row >= self.row && row < self.row - self.count
     }
 
-    /// Whether a formula that was at row `old` reads a deleted row.
+    /// Whether a formula that was at row (column) `old` reads a deleted one.
     fn reads_deleted(&self, node: &Node, old: i32) -> bool {
         if self.count >= 0 {
             return false;
@@ -46,9 +47,14 @@ impl RowShift {
         let mut refs = Vec::new();
         crate::dependencies::collect(node, &mut refs);
         refs.iter().any(|r| {
-            let whole = r.row1.absolute && r.row2.absolute && r.row1.value == 1 && r.row2.value == LAST_ROW;
+            let (a, b, last) = if self.columns {
+                (r.column1, r.column2, LAST_COLUMN)
+            } else {
+                (r.row1, r.row2, LAST_ROW)
+            };
+            let whole = a.absolute && b.absolute && a.value == 1 && b.value == last;
             let at = |c: crate::dependencies::Coord| if c.absolute { c.value } else { c.value + old };
-            !whole && (self.deleted(r.sheet, at(r.row1)) || self.deleted(r.sheet, at(r.row2)))
+            !whole && (self.deleted(r.sheet, at(a)) || self.deleted(r.sheet, at(b)))
         })
     }
 
@@ -101,14 +107,18 @@ fn displace(node: &Node, ins: &RowShift, old: i32, new: i32) -> Option<Node> {
             row,
             column,
         } => {
-            let r = ins.coordinate(*sheet_index, *absolute_row, *row, old, new);
-            (r != *row).then(|| ReferenceKind {
+            let (r, c) = if ins.columns {
+                (*row, ins.coordinate(*sheet_index, *absolute_column, *column, old, new))
+            } else {
+                (ins.coordinate(*sheet_index, *absolute_row, *row, old, new), *column)
+            };
+            (r != *row || c != *column).then(|| ReferenceKind {
                 sheet_name: sheet_name.clone(),
                 sheet_index: *sheet_index,
                 absolute_row: *absolute_row,
                 absolute_column: *absolute_column,
                 row: r,
-                column: *column,
+                column: c,
             })
         }
         RangeKind {
@@ -123,23 +133,39 @@ fn displace(node: &Node, ins: &RowShift, old: i32, new: i32) -> Option<Node> {
             row2,
             column2,
         } => {
-            // Whole columns (A:A) do not move.
-            if *absolute_row1 && *absolute_row2 && *row1 == 1 && *row2 == LAST_ROW {
-                return None;
-            }
-            let r1 = ins.coordinate(*sheet_index, *absolute_row1, *row1, old, new);
-            let r2 = ins.coordinate(*sheet_index, *absolute_row2, *row2, old, new);
-            (r1 != *row1 || r2 != *row2).then(|| RangeKind {
+            // Whole columns (A:A) do not move with rows, whole rows (1:1) with columns.
+            let (r1, r2, c1, c2) = if ins.columns {
+                if *absolute_column1 && *absolute_column2 && *column1 == 1 && *column2 == LAST_COLUMN {
+                    return None;
+                }
+                (
+                    *row1,
+                    *row2,
+                    ins.coordinate(*sheet_index, *absolute_column1, *column1, old, new),
+                    ins.coordinate(*sheet_index, *absolute_column2, *column2, old, new),
+                )
+            } else {
+                if *absolute_row1 && *absolute_row2 && *row1 == 1 && *row2 == LAST_ROW {
+                    return None;
+                }
+                (
+                    ins.coordinate(*sheet_index, *absolute_row1, *row1, old, new),
+                    ins.coordinate(*sheet_index, *absolute_row2, *row2, old, new),
+                    *column1,
+                    *column2,
+                )
+            };
+            (r1 != *row1 || r2 != *row2 || c1 != *column1 || c2 != *column2).then(|| RangeKind {
                 sheet_name: sheet_name.clone(),
                 sheet_index: *sheet_index,
                 absolute_row1: *absolute_row1,
                 absolute_column1: *absolute_column1,
                 row1: r1,
-                column1: *column1,
+                column1: c1,
                 absolute_row2: *absolute_row2,
                 absolute_column2: *absolute_column2,
                 row2: r2,
-                column2: *column2,
+                column2: c2,
             })
         }
         // Wrong references are written out unchanged by `stringify`; relative
@@ -207,10 +233,31 @@ fn displace(node: &Node, ins: &RowShift, old: i32, new: i32) -> Option<Node> {
 }
 
 impl Model<'_> {
+    /// CellX: puts whole cells in place (`None` removes the cell). See
+    /// `UserModel::set_cells`.
+    pub(crate) fn put_cells(
+        &mut self,
+        sheet: u32,
+        cells: impl Iterator<Item = (i32, i32, Option<Cell>)>,
+    ) -> Result<(), String> {
+        let data = &mut self.workbook.worksheet_mut(sheet)?.sheet_data;
+        for (row, column, cell) in cells {
+            match cell {
+                Some(cell) => {
+                    data.set_cell(row, column, cell);
+                }
+                None => {
+                    data.remove_cell(row, column);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The formulas outside rows `row..row + count` of `sheet` that read one of
     /// them, with their text: deleting the rows turns them into #REF!.
-    pub(crate) fn formulas_reading_rows(&self, sheet: u32, row: i32, count: i32) -> Vec<(u32, i32, i32, String)> {
-        let shift = RowShift { sheet, row, count: -count };
+    pub(crate) fn formulas_reading_rows(&self, sheet: u32, row: i32, count: i32, columns: bool) -> Vec<(u32, i32, i32, String)> {
+        let shift = RowShift { sheet, row, count: -count, columns };
         let mut out = Vec::new();
         for (s, worksheet) in self.workbook.worksheets.iter().enumerate() {
             let s = s as u32;
@@ -218,12 +265,13 @@ impl Model<'_> {
                 continue;
             }
             for (r, c, cell) in worksheet.sheet_data.cells() {
-                if shift.deleted(s, r) {
+                let along = if columns { c } else { r };
+                if shift.deleted(s, along) {
                     continue;
                 }
                 let Cell::CellFormula { f, .. } = &*cell else { continue };
                 let Some((node, _)) = self.parsed_formulas[s as usize].get(*f as usize) else { continue };
-                if shift.reads_deleted(node, r) {
+                if shift.reads_deleted(node, along) {
                     if let Ok(Some(text)) = self.get_cell_formula(s, r, c) {
                         out.push((s, r, c, text));
                     }
@@ -303,14 +351,80 @@ impl Model<'_> {
         Ok(())
     }
 
+    /// Moves the cells of columns `column..` right by `count`, row by row.
+    pub(crate) fn move_columns_right(&mut self, sheet: u32, column: i32, count: i32) -> Result<(), String> {
+        for r in self.workbook.worksheet(sheet)?.sheet_data.rows() {
+            let mut cells: Vec<(i32, Cell)> = self
+                .workbook
+                .worksheet(sheet)?
+                .sheet_data
+                .cells_in_row(r)
+                .into_iter()
+                .filter(|(c, _)| *c >= column)
+                .map(|(c, cell)| (c, cell.into_owned()))
+                .collect();
+            cells.sort_by(|a, b| b.0.cmp(&a.0));
+            for (c, cell) in cells {
+                self.move_one(sheet, r, c, r, c + count, cell)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Moves the cells of columns `column + count..` left by `count`, dropping
+    /// the columns in between, row by row.
+    pub(crate) fn move_columns_left(&mut self, sheet: u32, column: i32, count: i32) -> Result<(), String> {
+        for r in self.workbook.worksheet(sheet)?.sheet_data.rows() {
+            let mut cells: Vec<(i32, Cell)> = self
+                .workbook
+                .worksheet(sheet)?
+                .sheet_data
+                .cells_in_row(r)
+                .into_iter()
+                .filter(|(c, _)| *c >= column)
+                .map(|(c, cell)| (c, cell.into_owned()))
+                .collect();
+            cells.sort_by_key(|(c, _)| *c);
+            for (c, cell) in cells {
+                if c < column + count {
+                    self.workbook.worksheet_mut(sheet)?.sheet_data.remove_cell(r, c);
+                } else {
+                    self.move_one(sheet, r, c, r, c - count, cell)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One cell moved as it is, or through `move_cell` if it is part of an array.
+    fn move_one(&mut self, sheet: u32, r: i32, c: i32, to_r: i32, to_c: i32, cell: Cell) -> Result<(), String> {
+        match cell {
+            Cell::ArrayFormula { .. } | Cell::SpillCell { .. } => self.move_cell(sheet, r, c, to_r, to_c),
+            other => {
+                let data = &mut self.workbook.worksheet_mut(sheet)?.sheet_data;
+                data.remove_cell(r, c);
+                data.set_cell(to_r, to_c, other);
+                Ok(())
+            }
+        }
+    }
+
     /// Displaces every formula of the workbook for rows moved with
     /// `move_rows_down` or `move_rows_up`. Array formulas were moved as text
     /// and are displaced as text, the way `displace_cells` does it.
     pub(crate) fn displace_for_row_shift(&mut self, ins: RowShift) -> Result<(), String> {
-        let text = DisplaceData::Row {
-            sheet: ins.sheet,
-            row: ins.row,
-            delta: ins.count,
+        let text = if ins.columns {
+            DisplaceData::Column {
+                sheet: ins.sheet,
+                column: ins.row,
+                delta: ins.count,
+            }
+        } else {
+            DisplaceData::Row {
+                sheet: ins.sheet,
+                row: ins.row,
+                delta: ins.count,
+            }
         };
         for s in 0..self.workbook.worksheets.len() as u32 {
             let worksheet = self.workbook.worksheet(s)?;
@@ -331,25 +445,27 @@ impl Model<'_> {
                     self.shift_cell_formula(s, r, c, &text)?;
                     continue;
                 };
-                // Where the formula was before the cells moved.
-                let moved_here = if ins.count > 0 { r >= ins.row + ins.count } else { r >= ins.row };
-                let old = if s == ins.sheet && moved_here { r - ins.count } else { r };
+                // Where the formula was before the cells moved (along the shift).
+                let now = if ins.columns { c } else { r };
+                let moved_here = if ins.count > 0 { now >= ins.row + ins.count } else { now >= ins.row };
+                let old = if s == ins.sheet && moved_here { now - ins.count } else { now };
                 let Some(node) = self.parsed_formulas[s as usize].get(f as usize).map(|p| p.0.clone()) else {
                     continue;
                 };
                 if ins.reads_deleted(&node, old) {
                     // Written out from where it was, with the deleted rows
                     // turned into #REF!, and entered where it is now.
+                    let (row, column) = if ins.columns { (r, old) } else { (old, c) };
                     let context = CellReferenceRC {
                         sheet: self.workbook.worksheet(s)?.get_name(),
-                        row: old,
-                        column: c,
+                        row,
+                        column,
                     };
                     let formula = to_string_displaced(&node, &context, &text, self.locale, self.language);
                     self.update_cell_with_formula(s, r, c, format!("={formula}"))?;
                     continue;
                 }
-                if let Some(moved) = displace(&node, &ins, old, r) {
+                if let Some(moved) = displace(&node, &ins, old, now) {
                     // A range that grew has new dimensions.
                     let static_result = run_static_analysis_on_node(&moved);
                     let index = self.shared_formula_index(s, moved, static_result)?;

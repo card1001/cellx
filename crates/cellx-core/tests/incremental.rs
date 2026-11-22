@@ -294,3 +294,144 @@ fn deleted_rows_move_references_like_excel() {
     assert_eq!(input(&wb, 0, 8, 2), "=SUM(A6:A8)");
     check(&mut wb, "undo delete");
 }
+
+#[test]
+fn hiding_rows_updates_subtotal_incrementally() {
+    use cellx_core::refs::Axis;
+    let mut wb = Workbook::new().unwrap();
+    let mut cells: Vec<(i32, i32, String)> = (1..=10).map(|r| (r, 1, format!("{r}"))).collect();
+    cells.push((12, 1, "=SUBTOTAL(109,A1:A10)".into()));
+    cells.push((13, 1, "=SUM(A1:A10)".into()));
+    cells.push((14, 1, "=A13*2".into()));
+    wb.set_inputs(0, &cells).unwrap();
+    let v = |wb: &Workbook, r| wb.model().get_formatted_cell_value(0, r, 1).unwrap();
+    assert_eq!(v(&wb, 12), "55");
+    wb.set_hidden(0, Axis::Row, 2, 4, true).unwrap();
+    assert!(wb.last_recalc.evaluated.is_some(), "hiding rows should be incremental");
+    assert_eq!((v(&wb, 12), v(&wb, 13)), ("46".into(), "55".into()));
+    check(&mut wb, "rows hidden");
+    // Undo goes the same way, and so does a plain edit after it.
+    wb.undo().unwrap();
+    assert!(wb.last_recalc.evaluated.is_some(), "undo should be incremental");
+    assert_eq!(v(&wb, 12), "55");
+    wb.set_input(0, 1, 1, "100").unwrap();
+    assert_eq!((v(&wb, 12), v(&wb, 14)), ("154".into(), "308".into()));
+    check(&mut wb, "edit after undo");
+}
+
+#[test]
+fn sorting_moves_whole_cells() {
+    use cellx_core::datatools::SortKey;
+    use cellx_core::workbook::CellRange;
+    let mut wb = Workbook::new().unwrap();
+    let cells: Vec<(i32, i32, String)> = vec![
+        (1, 1, "3".into()),
+        (1, 2, "=A1*10+$D$1".into()),
+        (1, 3, "=0.1+0.2".into()),
+        (2, 1, "1".into()),
+        (2, 2, "=A2*10+$D$1".into()),
+        (2, 3, "0.30000000000000004".into()),
+        (3, 1, "2".into()),
+        (3, 2, "=A1+A3".into()),
+        (4, 1, "2".into()),
+        (4, 2, "dup".into()),
+        (1, 4, "1000".into()),
+    ];
+    wb.set_inputs(0, &cells).unwrap();
+    // A style on an empty cell travels with its row too.
+    wb.set_style(0, CellRange { r0: 2, c0: 3, r1: 2, c1: 3 }, "font.b", "true").unwrap();
+    wb.set_style(0, CellRange { r0: 3, c0: 3, r1: 3, c1: 3 }, "font.i", "true").unwrap();
+    let full = CellRange { r0: 1, c0: 1, r1: 4, c1: 3 };
+    let exact = |wb: &Workbook, r, c| match wb.model().get_cell_value_by_index(0, r, c).unwrap() {
+        ironcalc_base::cell::CellValue::Number(n) => n,
+        other => panic!("{other:?}"),
+    };
+    let before = exact(&wb, 2, 3);
+    wb.sort_range(0, full, &[SortKey { col: 1, descending: false }], false).unwrap();
+    let input = |wb: &Workbook, r, c| wb.input(0, r, c).unwrap();
+    let shown = |wb: &Workbook, r, c| wb.model().get_formatted_cell_value(0, r, c).unwrap();
+    assert_eq!((input(&wb, 1, 1), input(&wb, 2, 1), input(&wb, 3, 1), input(&wb, 4, 1)), ("1".into(), "2".into(), "2".into(), "3".into()));
+    // Relative references move with the row, absolute ones stay.
+    assert_eq!(input(&wb, 1, 2), "=A1*10+$D$1");
+    assert_eq!(input(&wb, 4, 2), "=A4*10+$D$1");
+    // The row that read "the row two above" still does (now above the top: #REF!), as Excel does.
+    assert_eq!(input(&wb, 2, 2), "=#REF!+A2");
+    assert_eq!(input(&wb, 3, 2), "dup");
+    assert_eq!(shown(&wb, 1, 2), "1010");
+    // The value is the very same number, not one rounded through text.
+    assert_eq!(exact(&wb, 1, 3), before);
+    assert!(wb.model().get_style_for_cell(0, 1, 3).unwrap().font.b);
+    assert!(wb.model().get_style_for_cell(0, 2, 3).unwrap().font.i);
+    check(&mut wb, "after sort");
+    wb.undo().unwrap();
+    assert_eq!((input(&wb, 1, 1), input(&wb, 3, 2)), ("3".into(), "=A1+A3".into()));
+    assert!(wb.model().get_style_for_cell(0, 2, 3).unwrap().font.b);
+    check(&mut wb, "undo sort");
+    wb.redo().unwrap();
+    assert_eq!(input(&wb, 4, 2), "=A4*10+$D$1");
+    check(&mut wb, "redo sort");
+
+    // Remove duplicates by column A: rows with 2 keep the first.
+    let result = wb.remove_duplicates(0, full, &[1], false).unwrap();
+    assert_eq!((result.removed, result.remaining), (1, 3));
+    assert_eq!((input(&wb, 3, 1), input(&wb, 4, 1), input(&wb, 4, 2)), ("3".into(), "".into(), "".into()));
+    check(&mut wb, "after remove duplicates");
+    wb.undo().unwrap();
+    assert_eq!(input(&wb, 4, 1), "3");
+}
+
+#[test]
+fn sorting_with_an_array_formula_goes_the_text_way() {
+    use cellx_core::datatools::SortKey;
+    use cellx_core::workbook::CellRange;
+    let mut wb = Workbook::new().unwrap();
+    wb.set_inputs(0, &[(1, 1, "2".into()), (2, 1, "1".into()), (1, 2, "=SEQUENCE(2)".into())]).unwrap();
+    wb.sort_range(0, CellRange { r0: 1, c0: 1, r1: 2, c1: 1 }, &[SortKey { col: 1, descending: false }], false).unwrap();
+    assert_eq!(wb.input(0, 1, 1).unwrap(), "1");
+    check(&mut wb, "sort next to a spill");
+}
+
+#[test]
+fn columns_inserted_and_deleted_move_references_like_excel() {
+    let mut wb = Workbook::new().unwrap();
+    wb.add_sheet().unwrap();
+    let cells: Vec<(i32, i32, String)> = vec![
+        (1, 1, "1".into()),
+        (1, 2, "2".into()),
+        (1, 3, "3".into()),
+        (1, 4, "4".into()),
+        (2, 1, "=D1".into()),
+        (2, 2, "=SUM(A1:D1)".into()),
+        (2, 3, "=$C$1+B1".into()),
+        (2, 4, "=SUM(1:1)".into()),
+        (2, 5, "=A1+C1".into()),
+    ];
+    wb.set_inputs(0, &cells).unwrap();
+    wb.set_inputs(1, &[(1, 1, "=Sheet1!C1+Sheet1!$D$1".into())]).unwrap();
+    let input = |wb: &Workbook, s, r, c| wb.input(s, r, c).unwrap();
+    wb.insert_columns(0, 2, 2).unwrap();
+    assert_eq!(input(&wb, 0, 2, 1), "=F1");
+    assert_eq!(input(&wb, 0, 2, 4), "=SUM(A1:F1)");
+    assert_eq!(input(&wb, 0, 2, 5), "=$E$1+D1");
+    assert_eq!(input(&wb, 0, 2, 6), "=SUM(1:1)");
+    assert_eq!(input(&wb, 0, 2, 7), "=A1+E1");
+    assert_eq!(input(&wb, 0, 1, 4), "2");
+    assert_eq!(input(&wb, 1, 1, 1), "=Sheet1!E1+Sheet1!$F$1");
+    check(&mut wb, "columns inserted");
+    wb.undo().unwrap();
+    assert_eq!(input(&wb, 0, 2, 2), "=SUM(A1:D1)");
+    check(&mut wb, "insert undone");
+
+    wb.delete_columns(0, 3, 1).unwrap();
+    assert_eq!(input(&wb, 0, 2, 1), "=C1");
+    assert_eq!(input(&wb, 0, 2, 2), "=SUM(A1:C1)");
+    assert!(input(&wb, 0, 2, 4).contains("#REF!"), "{}", input(&wb, 0, 2, 4));
+    assert_eq!(input(&wb, 0, 2, 3), "=SUM(1:1)");
+    assert!(input(&wb, 1, 1, 1).contains("#REF!"));
+    check(&mut wb, "column deleted");
+    wb.undo().unwrap();
+    assert_eq!(input(&wb, 0, 2, 5), "=A1+C1");
+    assert_eq!(input(&wb, 1, 1, 1), "=Sheet1!C1+Sheet1!$D$1");
+    assert_eq!(input(&wb, 0, 2, 3), "=$C$1+B1");
+    check(&mut wb, "delete undone");
+}

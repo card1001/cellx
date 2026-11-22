@@ -31,6 +31,13 @@ pub(crate) enum Diff {
         new_value: String,
         old_value: Box<Option<Cell>>,
     },
+    /// CellX: whole cells (content and style) put in place at once, each with
+    /// what was there before (`None`: no cell). Used to move cells around
+    /// (sorting) without writing them out as text and reading them back.
+    SetCells {
+        sheet: u32,
+        cells: Vec<(i32, i32, Option<Cell>, Option<Cell>)>,
+    },
     SetArrayValue {
         sheet: u32,
         row: i32,
@@ -150,6 +157,9 @@ pub(crate) enum Diff {
         column: i32,
         count: i32,
         old_data: Vec<ColumnData>,
+        /// CellX: formulas elsewhere that read the deleted columns, as written
+        /// (see `DeleteRows::refs`).
+        refs: Vec<(u32, i32, i32, String)>,
     },
     DeleteSheet {
         sheet: u32,
@@ -334,25 +344,7 @@ impl History {
         self.redo_stack = vec![];
     }
 
-    pub fn undo(&mut self) -> Option<Vec<Diff>> {
-        match self.undo_stack.pop() {
-            Some(diff_list) => {
-                self.redo_stack.push(diff_list.clone());
-                Some(diff_list)
-            }
-            None => None,
-        }
-    }
-
-    pub fn redo(&mut self) -> Option<Vec<Diff>> {
-        match self.redo_stack.pop() {
-            Some(diff_list) => {
-                self.undo_stack.push(diff_list.clone());
-                Some(diff_list)
-            }
-            None => None,
-        }
-    }
+    // CellX: undo and redo move the lists between the stacks in `UserModel`.
 }
 
 #[derive(Clone, Encode, Decode)]
@@ -369,13 +361,15 @@ pub struct QueueDiffs {
 
 /// CellX: adds to `out` the cells whose content the diffs set or cleared.
 /// Returns false when a diff can change values some other way (structure,
-/// names, hidden rows for SUBTOTAL, merges, arrays): then only a full
-/// evaluation is right.
+/// names, merges, arrays): then only a full evaluation is right. Hidden rows
+/// and columns only matter to SUBTOTAL, which the dependency index treats as
+/// volatile.
 pub(crate) fn content_changes(lists: &[DiffList], out: &mut Vec<(u32, i32, i32)>) -> bool {
     for list in lists {
         for diff in list {
             match diff {
                 Diff::SetCellValue { sheet, row, column, .. } => out.push((*sheet, *row, *column)),
+                Diff::SetCells { sheet, cells } => out.extend(cells.iter().map(|(r, c, _, _)| (*sheet, *r, *c))),
                 Diff::RangeClearContents { sheet, row, column, old_value, .. }
                 | Diff::RangeClearAll { sheet, row, column, old_value, .. } => {
                     for (i, line) in old_value.iter().enumerate() {
@@ -392,6 +386,8 @@ pub(crate) fn content_changes(lists: &[DiffList], out: &mut Vec<(u32, i32, i32)>
                 | Diff::SetCellStyle { .. }
                 | Diff::ApplyNamedStyle { .. }
                 | Diff::SetColumnWidth { .. }
+                | Diff::SetColumnHidden { .. }
+                | Diff::SetRowHidden { .. }
                 | Diff::SetRowHeight { .. }
                 | Diff::SetColumnStyle { .. }
                 | Diff::SetRowStyle { .. }

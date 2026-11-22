@@ -14,3 +14,4 @@ serde_json.workspace = true
 thiserror.workspace = true
 zip.workspace = true
 roxmltree.workspace = true
+quick-xml.workspace = true

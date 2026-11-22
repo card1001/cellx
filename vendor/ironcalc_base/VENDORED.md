@@ -20,3 +20,8 @@ CellX에서 바꾼 부분:
 12. 증분 재계산: `dependencies` 모듈(수식→참조 셀 역방향 인덱스), `Model::evaluate_changed`·`invalidate_dependencies`, `UserModel::content_changes_since`·`content_changes_on_top`.
 13. 조회 캐시: `functions/lookup_cache` — 한 번의 계산 안에서 VLOOKUP·HLOOKUP·MATCH 범위를 한 번만 읽고 정확히 일치 해시 인덱스 사용.
 14. 행 삽입·삭제: `row_insert` — 셀을 그대로 옮기고 참조는 해석된 수식에서 조정(#REF!가 되는 수식만 문자열 경로). 행 삭제 실행 취소 때 #REF!가 된 수식 복원(`Diff::DeleteRows::refs`).
+15. 숫자 반올림(`to_excel_precision`, `to_precision`): 자릿수가 정밀도보다 적은 정수는 문자열 왕복 없이 그대로 반환(결과 동일).
+16. 협업용 전송 대기열을 끌 수 있게 함(`UserModel::set_send_queue_enabled`). 실행 취소·다시 실행은 변경 목록을 복사하지 않고 옮김.
+17. 행·열 숨김(`SetRowHidden`, `SetColumnHidden`)은 증분 재계산 대상, SUBTOTAL은 휘발성.
+18. `Diff::SetCells`·`UserModel::set_cells`: 셀을 통째로(내용·서식·해석된 수식) 바꾸는 실행 취소 가능한 변경 — 정렬·중복 제거.
+19. 열 삽입·삭제도 패치 14와 같은 방식(`row_insert`의 `columns`), 열 삭제 실행 취소 때 #REF! 수식 복원(`Diff::DeleteColumns::refs`).

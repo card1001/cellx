@@ -370,6 +370,15 @@ pub fn bench_sheet(rows: i32, dir: &Path) -> Result<()> {
     wb.undo()?;
 
     let t = Instant::now();
+    wb.insert_columns(0, 1, 1)?;
+    report("맨 앞에 열 삽입", ms(t));
+    wb.undo()?;
+    let t = Instant::now();
+    wb.delete_columns(0, 1, 1)?;
+    report("맨 앞 열 삭제", ms(t));
+    wb.undo()?;
+
+    let t = Instant::now();
     wb.set_style(0, CellRange { r0: 2, c0: 7, r1: last, c1: 7 }, "num_fmt", "#,##0")?;
     report("열 전체 서식 (#,##0)", ms(t));
 
@@ -382,6 +391,8 @@ pub fn bench_sheet(rows: i32, dir: &Path) -> Result<()> {
     let t = Instant::now();
     std::hint::black_box(wb.find(0, "환불없음", (1, 1), false)?);
     report("찾기 (없는 값, 시트 전체)", ms(t));
-    std::fs::remove_file(&path).ok();
+    if std::env::var_os("CELLX_KEEP_BENCH_FILE").is_none() {
+        std::fs::remove_file(&path).ok();
+    }
     Ok(())
 }

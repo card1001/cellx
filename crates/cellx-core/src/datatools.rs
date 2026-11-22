@@ -676,6 +676,78 @@ impl Workbook {
         Ok(())
     }
 
+    /// Puts the rows of `r` in a new order: `sources[i]` is the row that ends
+    /// up at position i (`None`, or past the end: an emptied row). Whole cells
+    /// move, formulas with their relative references, as Excel does.
+    fn reorder_rows(&mut self, sheet: u32, r: CellRange, sources: &[Option<i32>]) -> Result<()> {
+        if self.move_cells_raw(sheet, r, sources)? {
+            return Ok(());
+        }
+        // Array formulas and data engine formulas go the text way.
+        let (inputs, styles) = self.row_block(sheet, r)?;
+        let rows: Vec<(i32, Vec<String>, Vec<i32>)> = sources
+            .iter()
+            .flatten()
+            .map(|&src| {
+                let i = (src - r.r0) as usize;
+                (src, inputs[i].clone(), styles[i].clone())
+            })
+            .collect();
+        self.write_rows(sheet, r, &inputs, &rows)
+    }
+
+    /// `reorder_rows` with the cells themselves, as one undoable change.
+    /// Returns false, changing nothing, when the block holds an array formula,
+    /// a spill or a data engine formula.
+    fn move_cells_raw(&mut self, sheet: u32, r: CellRange, sources: &[Option<i32>]) -> Result<bool> {
+        use ironcalc_base::types::Cell;
+        if self.bridges().keys().any(|(s, row, col)| *s == sheet && r.contains(*row, *col)) {
+            return Ok(false);
+        }
+        let model = self.model();
+        let worksheet = model.workbook.worksheet(sheet).map_err(CellxError::Calc)?;
+        let width = (r.c1 - r.c0 + 1) as usize;
+        // What every cell holds now, and the style it shows (its own, or its row's or column's).
+        let mut grid: Vec<(Option<Cell>, i32)> = Vec::with_capacity(width * (r.r1 - r.r0 + 1) as usize);
+        for row in r.r0..=r.r1 {
+            for col in r.c0..=r.c1 {
+                let cell = worksheet.cell(row, col).map(std::borrow::Cow::into_owned);
+                if matches!(cell, Some(Cell::ArrayFormula { .. } | Cell::SpillCell { .. })) {
+                    return Ok(false);
+                }
+                let style = model.get_cell_style_index(sheet, row, col).map_err(CellxError::Calc)?;
+                grid.push((cell, style));
+            }
+        }
+        let mut changes = Vec::new();
+        for i in 0..(r.r1 - r.r0 + 1) as usize {
+            for j in 0..width {
+                let (here, here_style) = &grid[i * width + j];
+                // The text way left emptied rows with the default style, and an
+                // empty source cell's style in place.
+                let (cell, style) = match sources.get(i).copied().flatten() {
+                    Some(src) => {
+                        let (c, s) = &grid[(src - r.r0) as usize * width + j];
+                        (c.clone(), *s)
+                    }
+                    None => (None, 0),
+                };
+                let new = match cell {
+                    Some(c) => Some(c),
+                    None if here.is_none() && *here_style == style => continue,
+                    None => Some(Cell::EmptyCell { s: style }),
+                };
+                if new.as_ref() != here.as_ref() {
+                    changes.push((r.r0 + i as i32, r.c0 + j as i32, new));
+                }
+            }
+        }
+        if !changes.is_empty() {
+            self.um.set_cells(sheet, changes).map_err(CellxError::Calc)?;
+        }
+        Ok(true)
+    }
+
     // ------------------------------------------------------------ sort
 
     /// 정렬: sorts the rows of `range` by `keys` (first key first).
@@ -692,29 +764,21 @@ impl Workbook {
             return Ok(RecalcStats::default());
         }
         let start = self.begin();
-        let (inputs, styles) = self.row_block(sheet, r)?;
-        let mut rows: Vec<(i32, Vec<String>, Vec<i32>, Vec<Scalar>)> = inputs
-            .iter()
-            .cloned()
-            .zip(styles)
-            .enumerate()
-            .map(|(i, (ins, sts))| {
-                let row = r.r0 + i as i32;
-                let k = keys.iter().map(|k| self.value(sheet, row, k.col).unwrap_or(Scalar::Empty)).collect();
-                (row, ins, sts, k)
-            })
+        let mut rows: Vec<(i32, Vec<Scalar>)> = (r.r0..=r.r1)
+            .map(|row| (row, keys.iter().map(|k| self.value(sheet, row, k.col).unwrap_or(Scalar::Empty)).collect()))
             .collect();
+        // Stable: rows that compare equal keep their order, as in Excel.
         rows.sort_by(|a, b| {
             for (i, k) in keys.iter().enumerate() {
-                let o = compare_values(&a.3[i], &b.3[i], k.descending);
+                let o = compare_values(&a.1[i], &b.1[i], k.descending);
                 if o != Ordering::Equal {
                     return o;
                 }
             }
             Ordering::Equal
         });
-        let rows: Vec<(i32, Vec<String>, Vec<i32>)> = rows.into_iter().map(|(a, b, c, _)| (a, b, c)).collect();
-        self.write_rows(sheet, r, &inputs, &rows)?;
+        let order: Vec<Option<i32>> = rows.iter().map(|(row, _)| Some(*row)).collect();
+        self.reorder_rows(sheet, r, &order)?;
         let out = self.commit(start)?;
         if self.filters.iter().any(|f| f.sheet == sheet) {
             self.apply_filter(sheet)?;
@@ -911,11 +975,9 @@ impl Workbook {
         }
         let cols: Vec<i32> = if cols.is_empty() { (r.c0..=r.c1).collect() } else { cols.to_vec() };
         let start = self.begin();
-        let (inputs, styles) = self.row_block(sheet, r)?;
         let mut seen = HashSet::new();
-        let mut kept = Vec::new();
-        for (i, (ins, sts)) in inputs.iter().cloned().zip(styles).enumerate() {
-            let row = r.r0 + i as i32;
+        let mut kept: Vec<Option<i32>> = Vec::new();
+        for row in r.r0..=r.r1 {
             let key: Vec<String> = cols
                 .iter()
                 .map(|c| match self.value(sheet, row, *c).unwrap_or(Scalar::Empty) {
@@ -925,13 +987,13 @@ impl Workbook {
                 })
                 .collect();
             if seen.insert(key) {
-                kept.push((row, ins, sts));
+                kept.push(Some(row));
             }
         }
         let total = (r.r1 - r.r0 + 1) as usize;
         let result = DuplicateResult { removed: total - kept.len(), remaining: kept.len() };
         if result.removed > 0 {
-            self.write_rows(sheet, r, &inputs, &kept)?;
+            self.reorder_rows(sheet, r, &kept)?;
         }
         self.commit(start)?;
         Ok(result)

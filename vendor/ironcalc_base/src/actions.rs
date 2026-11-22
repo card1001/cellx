@@ -636,19 +636,8 @@ impl<'a> Model<'a> {
         // Merged ranges are remapped at the end; take them out so the cell moves
         // (which go through `set_user_input`) do not trip the covered-cell guard.
         let merged_cells = std::mem::take(&mut self.workbook.worksheet_mut(sheet)?.merged_cells);
-        let worksheet = self.workbook.worksheet(sheet)?;
-        let all_rows = worksheet.sheet_data.rows();
-        for row in all_rows {
-            let sorted_columns = self.get_columns_for_row(sheet, row, true)?;
-            for col in sorted_columns {
-                if col >= column {
-                    self.move_cell(sheet, row, col, row, col + column_count)?;
-                } else {
-                    // Break because columns are in descending order.
-                    break;
-                }
-            }
-        }
+        // Move cells (CellX: as they are, see `row_insert`)
+        self.move_columns_right(sheet, column, column_count)?;
 
         // Links move with their cells
         displace_links(self.workbook.worksheet_mut(sheet)?, |r, c| {
@@ -687,7 +676,12 @@ impl<'a> Model<'a> {
             column,
             delta: column_count,
         };
-        self.displace_cells(&disp)?;
+        self.displace_for_row_shift(crate::row_insert::RowShift {
+            sheet,
+            row: column,
+            count: column_count,
+            columns: true,
+        })?;
         self.displace_cf_ranges(sheet, &disp);
 
         // In the list of columns:
@@ -757,22 +751,8 @@ impl<'a> Model<'a> {
         // last column being deleted
         let column_end = column + column_count - 1;
 
-        // Move cells
-        let worksheet = &self.workbook.worksheet(sheet)?;
-        let all_rows = worksheet.sheet_data.rows();
-
-        for r in all_rows {
-            let columns: Vec<i32> = self.get_columns_for_row(sheet, r, false)?;
-            for col in columns {
-                if col >= column_start {
-                    if col > column_end {
-                        self.move_cell(sheet, r, col, r, col - column_count)?;
-                    } else {
-                        self.workbook.worksheet_mut(sheet)?.remove_cell(r, col)?;
-                    }
-                }
-            }
-        }
+        // Move cells (CellX: as they are, see `row_insert`)
+        self.move_columns_left(sheet, column_start, column_count)?;
         // Links move with their cells; the links of the deleted columns are removed
         displace_links(self.workbook.worksheet_mut(sheet)?, |r, c| {
             if c < column_start {
@@ -816,7 +796,12 @@ impl<'a> Model<'a> {
             column,
             delta: -column_count,
         };
-        self.displace_cells(&disp)?;
+        self.displace_for_row_shift(crate::row_insert::RowShift {
+            sheet,
+            row: column_start,
+            count: -column_count,
+            columns: true,
+        })?;
         self.displace_cf_ranges(sheet, &disp);
         let worksheet = &mut self.workbook.worksheet_mut(sheet)?;
 
@@ -1082,6 +1067,7 @@ impl<'a> Model<'a> {
             sheet,
             row,
             count: row_count,
+            columns: false,
         })?;
         self.displace_cf_ranges(sheet, &disp);
 
@@ -1178,6 +1164,7 @@ impl<'a> Model<'a> {
             sheet,
             row,
             count: -row_count,
+            columns: false,
         })?;
         self.displace_cf_ranges(sheet, &disp);
         Ok(())

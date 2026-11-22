@@ -1,0 +1,34 @@
+# IronCalc xlsx import/export with CellX patches (see VENDORED.md).
+# Vendored from crates.io ironcalc 0.9.1: the library only (no binaries,
+# examples or test files).
+[package]
+edition = "2021"
+name = "ironcalc"
+version = "0.9.1"
+authors = ["Nicolás Hatcher <nicolas@theuniverse.today>"]
+description = "The democratization of spreadsheets"
+homepage = "https://www.ironcalc.com"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ironcalc/ironcalc/"
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+
+[features]
+mock_time = ["ironcalc_base/mock_time"]
+
+[lib]
+name = "ironcalc"
+path = "src/lib.rs"
+
+[dependencies]
+bitcode = "0.6.9"
+chrono = "0.4"
+ironcalc_base = "0.9"
+itertools = "0.15"
+quick-xml = "0.42"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+zip = { version = "9.0.5", features = ["deflate"], default-features = false }
