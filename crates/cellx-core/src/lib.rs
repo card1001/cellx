@@ -15,13 +15,18 @@ pub mod extras;
 pub mod objects;
 pub mod outline;
 pub mod audit;
+pub mod book;
 pub mod pictures;
 pub mod ooxml;
 pub mod project;
 pub mod refs;
 pub mod sheetopts;
+pub mod shapes;
 pub mod sheets;
+pub mod slicers;
+pub mod sparklines;
 pub mod value;
+pub mod whatif;
 pub mod workbook;
 
 pub use error::{CellxError, Result};

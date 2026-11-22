@@ -13,6 +13,13 @@ import {
   type Chart,
   type ChartKind,
   type Picture,
+  type Shape,
+  type ShapeKind,
+  type Slicer,
+  type SlicerView,
+  type SparkKind,
+  type SparklineGroup,
+  type SparklineView,
   type RecoveredFile,
   type Direction,
   type PasteSpecial,
@@ -26,6 +33,10 @@ import {
 import { colorScaleRule, dataBarRule, highlightRule, type HighlightKind, ICON_SETS, iconSetRule, ratingRule } from "./cf";
 import { CHART_KINDS, ChartLayer } from "./components/Chart";
 import { PictureLayer, pictureUrl } from "./components/Picture";
+import { ShapeFormatDialog, ShapeLayer } from "./components/Shape";
+import { BookProtectDialog, CustomViewsDialog, DataTableDialog, ScenarioDialog } from "./components/WhatIf";
+import { SlicerInsertDialog, SlicerLayer, SlicerSettingsDialog } from "./components/Slicer";
+import { SparklineCreateDialog, SparklineLayer, SparklineStyleDialog } from "./components/Sparkline";
 import { arrowKey, EvaluateDialog, TraceLayer, type TraceArrow } from "./components/Trace";
 import { RecoveryDialog, SaveChangesDialog, type SaveChoice } from "./components/FileDialogs";
 import { HeaderFooterDialog, MoveCopyDialog, UnhideDialog } from "./components/SheetDialogs";
@@ -96,6 +107,16 @@ type Dialog =
   | { kind: "hyperlink"; text: string; current: { target: string; internal: boolean } | null }
   | { kind: "goalSeek" }
   | { kind: "evaluate"; sheet: number; row: number; col: number }
+  | { kind: "shapeFormat"; shape: Shape }
+  | { kind: "sparkCreate"; spark: SparkKind; data: string; location: string }
+  | { kind: "sparkStyle"; group: SparklineGroup }
+  | { kind: "slicerInsert"; table: string; columns: string[] }
+  | { kind: "dataTable"; range: Range }
+  | { kind: "bookProtect" }
+  | { kind: "bookUnprotect" }
+  | { kind: "customViews" }
+  | { kind: "scenarios"; selection: string }
+  | { kind: "slicerSettings"; slicer: Slicer }
   | { kind: "print" }
   | { kind: "subtotal"; range: Range }
   | { kind: "createTable"; range: Range; header: boolean; style: string }
@@ -183,6 +204,12 @@ export default function App() {
   const [selectedChart, setSelectedChart] = useState<number | null>(null);
   const [pictures, setPictures] = useState<Picture[]>([]);
   const [selectedPicture, setSelectedPicture] = useState<number | null>(null);
+  const [shapes, setShapes] = useState<Shape[]>([]);
+  const [sparklines, setSparklines] = useState<SparklineView[]>([]);
+  const [slicers, setSlicers] = useState<SlicerView[]>([]);
+  const [selectedSlicer, setSelectedSlicer] = useState<number | null>(null);
+  const [selectedShape, setSelectedShape] = useState<number | null>(null);
+  const [editingShape, setEditingShape] = useState<number | null>(null);
   const [hoverMemo, setHoverMemo] = useState<Pos | null>(null);
   const [editMemo, setEditMemo] = useState<Pos | null>(null);
   const [showMemos, setShowMemos] = useState(false);
@@ -464,6 +491,37 @@ export default function App() {
         setPageSetupState(ps);
       })
       .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [tab, info, chartVersion]);
+
+  // Sparklines and slicers of the sheet on screen; they follow every recalculation.
+  useEffect(() => {
+    if (tab.kind !== "sheet") {
+      setSparklines([]);
+      setSlicers([]);
+      return;
+    }
+    let live = true;
+    void api.sparklines(tab.index).then((v) => live && setSparklines(v)).catch(() => live && setSparklines([]));
+    void api.slicers(tab.index).then((v) => live && setSlicers(v)).catch(() => live && setSlicers([]));
+    return () => {
+      live = false;
+    };
+  }, [tab, info, chartVersion]);
+
+  // Shapes of the sheet on screen.
+  useEffect(() => {
+    if (tab.kind !== "sheet") {
+      setShapes([]);
+      return;
+    }
+    let live = true;
+    api
+      .shapes(tab.index)
+      .then((p) => live && setShapes(p))
+      .catch(() => live && setShapes([]));
     return () => {
       live = false;
     };
@@ -1337,7 +1395,7 @@ export default function App() {
     let rg = selectionOnly ? range() : area ?? { r0: 1, c0: 1, r1: Math.max(1, src.lastRow), c1: Math.max(1, src.lastCol) };
     if (!selectionOnly && !area) {
       // Charts and pictures outside the cells widen the printed area, as in Excel.
-      for (const c of [...charts, ...pictures]) {
+      for (const c of [...charts, ...pictures, ...shapes]) {
         let w = c.anchor.dx + c.anchor.width;
         let col = c.anchor.col;
         while (w > 0 && col < 16384) w -= src.cols.size(col++);
@@ -1368,6 +1426,8 @@ export default function App() {
       font: src.font,
       charts: selectionOnly ? [] : chartData.filter((x): x is NonNullable<typeof x> => !!x),
       pictures: pics.filter((x): x is NonNullable<typeof x> => !!x),
+      shapes: selectionOnly ? [] : shapes,
+      sparklines,
     };
   };
 
@@ -1438,10 +1498,75 @@ export default function App() {
     if (st) await afterChange(st);
   };
 
+  // ---------------------------------------------------------------- sparklines, slicers
+  /** 삽입 → 스파크라인: data from the selection (or asked), placed where the user says. */
+  const insertSparklines = (kind: SparkKind) => {
+    const t = tabRef.current;
+    if (t.kind !== "sheet") return say("스파크라인은 일반 시트에 넣습니다", true);
+    const rg = range();
+    const sel = `${colName(rg.c0)}${rg.r0}${rg.r0 === rg.r1 && rg.c0 === rg.c1 ? "" : `:${colName(rg.c1)}${rg.r1}`}`;
+    const loc = rg.r0 === rg.r1 && rg.c0 === rg.c1 ? "" : rg.r1 > rg.r0 ? `${colName(rg.c1 + 1)}${rg.r0}:${colName(rg.c1 + 1)}${rg.r1}` : `${colName(rg.c1 + 1)}${rg.r0}`;
+    setDialog({ kind: "sparkCreate", spark: kind, data: sel, location: loc });
+  };
+
+  const createSparklines = async (kind: SparkKind, data: string, location: string) => {
+    const t = tabRef.current;
+    if (t.kind !== "sheet") return;
+    const [a, b] = location.trim().replace(/\$/g, "").split(":");
+    const p0 = parseAddr(a ?? "");
+    const p1 = b ? parseAddr(b) : p0;
+    if (!p0 || !p1) return say("위치 범위가 올바르지 않습니다 (예: F2:F10)", true);
+    const [r0, c0, r1, c1] = [p0.r, p0.c, p1.r, p1.c];
+    const g = await run("스파크라인 만들기", () => api.addSparklines(t.index, kind, data, { r0, c0, r1, c1 }));
+    if (g) await afterChange();
+  };
+
+  const sparklineAt = (p: Pos) => sparklines.find((s) => s.row === p.r && s.col === p.c);
+
+  const insertSlicer = async () => {
+    const t = tabRef.current;
+    if (t.kind !== "sheet" || !activeTable) return say("슬라이서를 만들 표 안의 셀을 선택하세요", true);
+    setDialog({ kind: "slicerInsert", table: activeTable.name, columns: activeTable.columns });
+  };
+
+  const pickSlicer = async (id: number, values: string[] | null) => {
+    const st = await run("슬라이서", () => api.slicerSelect(id, values));
+    if (st) await afterChange(st);
+  };
+
+  // ---------------------------------------------------------------- shapes
+  const deleteShape = async (id: number) => {
+    await api.deleteShape(id).catch(fail);
+    setSelectedShape(null);
+    setSelectedSlicer(null);
+    await afterChange();
+  };
+
+  const updateShape = async (s: Shape) => {
+    await api.updateShape(s).catch(fail);
+    await afterChange();
+  };
+
+  /** 삽입 → 도형 / 텍스트 상자, at the active cell. A text box is typed into right away. */
+  const insertShape = async (kind: ShapeKind) => {
+    const t = tabRef.current;
+    if (t.kind !== "sheet") return say("도형은 일반 시트에 넣습니다", true);
+    const f = selectionRef.current.focus;
+    const s = await run("도형 삽입", () => api.addShape(t.index, f.r, f.c, kind));
+    if (!s) return;
+    setSelectedChart(null);
+    setSelectedPicture(null);
+    setSelectedShape(s.id);
+    await afterChange();
+    if (kind === "textBox") setEditingShape(s.id);
+  };
+
   // ---------------------------------------------------------------- pictures
   const deletePicture = async (id: number) => {
     await api.deletePicture(id).catch(fail);
     setSelectedPicture(null);
+    setSelectedShape(null);
+    setSelectedSlicer(null);
     await afterChange();
   };
 
@@ -1572,6 +1697,35 @@ export default function App() {
     const mod = e.ctrlKey || e.metaKey;
     const f = selectionRef.current.focus;
     const t = tabRef.current;
+    if (selectedShape !== null) {
+      // A selected shape takes Delete, Esc, Enter/F2 (type into it) and the arrow keys.
+      const p = shapes.find((x) => x.id === selectedShape);
+      if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        await deleteShape(selectedShape);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setSelectedShape(null);
+    setSelectedSlicer(null);
+        return;
+      }
+      if (p && (e.key === "Enter" || e.key === "F2") && p.kind !== "line" && p.kind !== "arrow") {
+        e.preventDefault();
+        setEditingShape(p.id);
+        return;
+      }
+      const nudge: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+      if (p && nudge[e.key]) {
+        e.preventDefault();
+        const [x, y] = nudge[e.key];
+        const a = { ...p.anchor, dx: Math.max(0, p.anchor.dx + x * (mod ? 1 : 4)), dy: Math.max(0, p.anchor.dy + y * (mod ? 1 : 4)) };
+        await updateShape({ ...p, anchor: a });
+        return;
+      }
+      if (!mod) return;
+    }
     if (selectedPicture !== null) {
       // A selected picture takes Delete, Esc and the arrow keys (a nudge), like in Excel.
       const p = pictures.find((x) => x.id === selectedPicture);
@@ -1583,6 +1737,8 @@ export default function App() {
       if (e.key === "Escape") {
         e.preventDefault();
         setSelectedPicture(null);
+    setSelectedShape(null);
+    setSelectedSlicer(null);
         return;
       }
       const nudge: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
@@ -1931,6 +2087,8 @@ export default function App() {
     setMenu(null);
     setSelectedChart(null);
     setSelectedPicture(null);
+    setSelectedShape(null);
+    setSelectedSlicer(null);
     const s = sessionRef.current;
     const src = sourceRef.current;
     if (s && pointable(s)) {
@@ -1989,6 +2147,8 @@ export default function App() {
   const onContextMenu = async (h: Hit, x: number, y: number) => {
     setSelectedChart(null);
     setSelectedPicture(null);
+    setSelectedShape(null);
+    setSelectedSlicer(null);
     if (sessionRef.current) void commit("none");
     const rg = range();
     const inside = h.r >= rg.r0 && h.r <= rg.r1 && h.c >= rg.c0 && h.c <= rg.c1;
@@ -2061,6 +2221,26 @@ export default function App() {
         { label: "열 삭제", onClick: deleteColumns },
         { label: "내용 지우기", shortcut: "Delete", onClick: () => clearRange("contents") },
         { separator: true },
+        ...(sparklineAt(at)
+          ? [
+              {
+                label: "스파크라인 편집...",
+                onClick: async () => {
+                  const v = sparklineAt(at);
+                  const groups = t.kind === "sheet" ? await api.sparklineGroups(t.index).catch(() => []) : [];
+                  const g = groups.find((x) => x.id === v?.group);
+                  if (g) setDialog({ kind: "sparkStyle", group: g });
+                },
+              },
+              {
+                label: "스파크라인 지우기",
+                onClick: async () => {
+                  if (t.kind === "sheet" && (await run("스파크라인 지우기", () => api.deleteSparklines(t.index, range()))) !== null) await afterChange();
+                },
+              },
+              { separator: true },
+            ]
+          : []),
         { label: memo ? "메모 편집" : "새 메모", shortcut: "Shift+F2", onClick: () => actions.newMemo() },
         ...(memo ? [{ label: "메모 삭제", onClick: () => actions.deleteMemo() }] : []),
         { separator: true },
@@ -2203,6 +2383,19 @@ export default function App() {
     manageCf: () => tabRef.current.kind === "sheet" && setDialog({ kind: "cfManager" }),
     insertChart: (k) => void insertChart(k),
     insertPicture: () => void insertPicture(),
+    insertShape: (k) => void insertShape(k),
+    insertSparklines: (k) => insertSparklines(k),
+    insertSlicer: () => void insertSlicer(),
+    dataTable: () => {
+      const rg = range();
+      if (rg.r1 <= rg.r0 || rg.c1 <= rg.c0) return say("입력 값과 수식이 들어 있는 범위 전체를 선택한 뒤 데이터 표를 만드세요", true);
+      setDialog({ kind: "dataTable", range: rg });
+    },
+    scenarios: () => {
+      const rg = range();
+      const one = rg.r0 === rg.r1 && rg.c0 === rg.c1;
+      setDialog({ kind: "scenarios", selection: `$${colName(rg.c0)}$${rg.r0}${one ? "" : `:$${colName(rg.c1)}$${rg.r1}`}` });
+    },
     insertPivot: () => void openPivotDialog(),
     refreshAll: async () => {
       const st = await run("새로 고침", api.refreshPivots);
@@ -2346,6 +2539,12 @@ export default function App() {
       const st = await run("범위로 변환", () => api.convertTableToRange(activeTable.name));
       if (st) await afterChange(st);
     },
+    protectBook: () => {
+      if (!info?.book_protected) return setDialog({ kind: "bookProtect" });
+      if (info.book_password) return setDialog({ kind: "bookUnprotect" });
+      void run("통합 문서 보호 해제", () => api.unprotectBook(null)).then(() => refreshInfo());
+    },
+    customViews: () => setDialog({ kind: "customViews" }),
     protectSheet: () => {
       if (sheetOrSay() === null) return;
       if (protection?.protected) {
@@ -2476,6 +2675,7 @@ export default function App() {
         pageSetup={pageSetupState}
         showPageBreaks={showPageBreaks}
         showFormulas={sheetIndex >= 0 && formulaSheets.has(sheetIndex)}
+        protectedBook={!!info?.book_protected}
         hasArrows={arrows.length > 0}
       />
 
@@ -2483,13 +2683,21 @@ export default function App() {
         <input
           ref={nameBox}
           className="name-box"
-          defaultValue={pictures.find((p) => p.id === selectedPicture)?.name ?? rangeLabel(selection.anchor, selection.focus)}
-          key={`${tabKey(tab)}:${rangeLabel(selection.anchor, selection.focus)}:${pictures.find((p) => p.id === selectedPicture)?.name ?? ""}`}
+          defaultValue={
+            pictures.find((p) => p.id === selectedPicture)?.name ?? shapes.find((p) => p.id === selectedShape)?.name ?? rangeLabel(selection.anchor, selection.focus)
+          }
+          key={`${tabKey(tab)}:${rangeLabel(selection.anchor, selection.focus)}:${pictures.find((p) => p.id === selectedPicture)?.name ?? ""}:${shapes.find((p) => p.id === selectedShape)?.name ?? ""}`}
           onKeyDown={(e) => {
             if (e.key === "Escape") return focusGrid();
             if (e.key !== "Enter") return;
             const v = (e.target as HTMLInputElement).value.trim();
             // With a picture selected, the name box renames it, as in Excel.
+            const shape = shapes.find((p) => p.id === selectedShape);
+            if (shape) {
+              if (v && v !== shape.name) void updateShape({ ...shape, name: v });
+              focusGrid();
+              return;
+            }
             const pic = pictures.find((p) => p.id === selectedPicture);
             if (pic) {
               if (v && v !== pic.name) void updatePicture({ ...pic, name: v });
@@ -2704,7 +2912,65 @@ export default function App() {
                 };
                 return (
                   <>
+                    <SparklineLayer sparklines={sparklines} geo={geo} />
+                    <SlicerLayer
+                      slicers={slicers}
+                      geo={geo}
+                      selected={selectedSlicer}
+                      onSelect={setSelectedSlicer}
+                      onChange={async (s) => {
+                        if ((await run("슬라이서", () => api.updateSlicer(s))) !== null) await afterChange();
+                      }}
+                      onPick={(id, v) => void pickSlicer(id, v)}
+                      onContextMenu={(s, x, y) =>
+                        setMenu({
+                          x,
+                          y,
+                          items: [
+                            { label: `"${s.caption}"에서 필터 해제`, onClick: () => void pickSlicer(s.id, null) },
+                            { label: "슬라이서 설정...", onClick: () => setDialog({ kind: "slicerSettings", slicer: s }) },
+                            { separator: true },
+                            {
+                              label: `"${s.caption}" 제거`,
+                              onClick: async () => {
+                                if ((await run("슬라이서 제거", () => api.deleteSlicer(s.id))) !== null) await afterChange();
+                              },
+                            },
+                          ],
+                        })
+                      }
+                    />
                     {source instanceof SheetSource && <TraceLayer arrows={arrows} sheet={source.sheet} geo={geo} />}
+                    <ShapeLayer
+                      shapes={shapes}
+                      geo={geo}
+                      selected={selectedShape}
+                      editing={editingShape}
+                      onSelect={(id) => {
+                        if (sessionRef.current) void commit("none");
+                        setSelectedChart(null);
+                        setSelectedPicture(null);
+                        setSelectedShape(id);
+                        focusGrid();
+                      }}
+                      onEdit={(id) => {
+                        setEditingShape(id);
+                        if (id === null) focusGrid();
+                      }}
+                      onChange={(s) => void updateShape(s)}
+                      onContextMenu={(s, x, y) =>
+                        setMenu({
+                          x,
+                          y,
+                          items: [
+                            ...(s.kind === "line" || s.kind === "arrow" ? [] : [{ label: "텍스트 편집", onClick: () => setEditingShape(s.id) }]),
+                            { label: "도형 서식...", onClick: () => setDialog({ kind: "shapeFormat", shape: s }) },
+                            { separator: true },
+                            { label: "삭제", shortcut: "Delete", onClick: () => void deleteShape(s.id) },
+                          ],
+                        })
+                      }
+                    />
                     <PictureLayer
                       pictures={pictures}
                       geo={geo}
@@ -2712,6 +2978,8 @@ export default function App() {
                       onSelect={(id) => {
                         if (sessionRef.current) void commit("none");
                         setSelectedChart(null);
+                        setSelectedShape(null);
+    setSelectedSlicer(null);
                         setSelectedPicture(id);
                         focusGrid();
                       }}
@@ -2740,6 +3008,8 @@ export default function App() {
                       onSelect={(id) => {
                         if (sessionRef.current) void commit("none");
                         setSelectedPicture(null);
+    setSelectedShape(null);
+    setSelectedSlicer(null);
                         setSelectedChart(id);
                         focusGrid();
                       }}
@@ -3169,6 +3439,132 @@ export default function App() {
                 ? await onSheetOnly("링크 제거", (s) => api.deleteLink(s, f.r, f.c))
                 : await onSheetOnly("링크", (s) => api.setLink(s, f.r, f.c, r.target, r.internal, r.text || null));
             if (st) await afterChange(st);
+          }}
+        />
+      )}
+      {dialog?.kind === "bookProtect" && (
+        <BookProtectDialog
+          onDone={async (pw) => {
+            setDialog(null);
+            focusGrid();
+            if (pw === undefined) return;
+            if ((await run("통합 문서 보호", () => api.protectBook(pw))) !== null) await refreshInfo();
+          }}
+        />
+      )}
+      {dialog?.kind === "bookUnprotect" && (
+        <PasswordDialog
+          title="통합 문서 보호 해제"
+          onDone={async (pw) => {
+            setDialog(null);
+            focusGrid();
+            if (pw === null) return;
+            if ((await run("통합 문서 보호 해제", () => api.unprotectBook(pw))) !== null) await refreshInfo();
+          }}
+        />
+      )}
+      {dialog?.kind === "customViews" && (
+        <CustomViewsDialog
+          active={sheetIndex >= 0 ? sheetIndex : 0}
+          onShown={async (s) => {
+            setDialog(null);
+            await afterChange();
+            switchTab({ kind: "sheet", index: s });
+            focusGrid();
+          }}
+          onError={(e) => say(String(e), true)}
+          onClose={() => {
+            setDialog(null);
+            focusGrid();
+          }}
+        />
+      )}
+      {dialog?.kind === "dataTable" && (
+        <DataTableDialog
+          onDone={async (r) => {
+            const rg = dialog.range;
+            setDialog(null);
+            focusGrid();
+            const t = tabRef.current;
+            if (!r || t.kind !== "sheet") return;
+            const st = await run("데이터 표", () => api.addDataTable(t.index, rg, r.row.trim() || null, r.col.trim() || null));
+            if (st) await afterChange(st);
+          }}
+        />
+      )}
+      {dialog?.kind === "scenarios" && tab.kind === "sheet" && (
+        <ScenarioDialog
+          sheet={tab.index}
+          selection={dialog.selection}
+          onShown={() => void afterChange()}
+          onSummary={async (s) => {
+            setDialog(null);
+            await refreshInfo();
+            await afterChange();
+            switchTab({ kind: "sheet", index: s });
+          }}
+          onError={(e) => say(String(e), true)}
+          onClose={() => {
+            setDialog(null);
+            focusGrid();
+          }}
+        />
+      )}
+      {dialog?.kind === "sparkCreate" && (
+        <SparklineCreateDialog
+          kind={dialog.spark}
+          data={dialog.data}
+          location={dialog.location}
+          onDone={(r) => {
+            const k = dialog.spark;
+            setDialog(null);
+            focusGrid();
+            if (r) void createSparklines(k, r.data, r.location);
+          }}
+        />
+      )}
+      {dialog?.kind === "sparkStyle" && (
+        <SparklineStyleDialog
+          group={dialog.group}
+          onDone={async (g) => {
+            setDialog(null);
+            focusGrid();
+            if (g && (await run("스파크라인 디자인", () => api.updateSparklineGroup(g))) !== null) await afterChange();
+          }}
+        />
+      )}
+      {dialog?.kind === "slicerInsert" && (
+        <SlicerInsertDialog
+          table={dialog.table}
+          columns={dialog.columns}
+          onDone={async (cols) => {
+            const table = dialog.table;
+            setDialog(null);
+            focusGrid();
+            const t = tabRef.current;
+            if (!cols || t.kind !== "sheet") return;
+            for (const c of cols) await run("슬라이서 삽입", () => api.addSlicer(table, c, t.index));
+            await afterChange();
+          }}
+        />
+      )}
+      {dialog?.kind === "slicerSettings" && (
+        <SlicerSettingsDialog
+          slicer={dialog.slicer}
+          onDone={async (s) => {
+            setDialog(null);
+            focusGrid();
+            if (s && (await run("슬라이서 설정", () => api.updateSlicer(s))) !== null) await afterChange();
+          }}
+        />
+      )}
+      {dialog?.kind === "shapeFormat" && (
+        <ShapeFormatDialog
+          shape={dialog.shape}
+          onDone={(s) => {
+            setDialog(null);
+            focusGrid();
+            if (s) void updateShape(s);
           }}
         />
       )}

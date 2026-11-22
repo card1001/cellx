@@ -55,6 +55,21 @@ impl Workbook {
         for x in &mut self.pictures {
             x.sheet = map(x.sheet);
         }
+        for x in &mut self.shapes {
+            x.sheet = map(x.sheet);
+        }
+        for x in &mut self.sparklines {
+            x.sheet = map(x.sheet);
+        }
+        for x in &mut self.slicers {
+            x.sheet = map(x.sheet);
+        }
+        for x in &mut self.data_tables {
+            x.sheet = map(x.sheet);
+        }
+        for x in &mut self.scenarios {
+            x.sheet = map(x.sheet);
+        }
         for x in &mut self.pivots {
             x.sheet = map(x.sheet);
         }
@@ -97,6 +112,30 @@ impl Workbook {
             p.data = crate::pictures::Blob(Arc::clone(&p.data.0));
             self.pictures.push(p);
         }
+        // Sparklines of the copy show the copy's own data, as in Excel.
+        let names = self.sheet_names();
+        let prefix = |i: u32| names.get(i as usize).map(|n| format!("{}!", crate::workbook::quote_sheet(n)));
+        let groups: Vec<_> = self.sparklines.iter().filter(|g| g.sheet == from).cloned().collect();
+        for mut g in groups {
+            g.id = self.next_object_id;
+            self.next_object_id += 1;
+            g.sheet = to;
+            if let (Some(a), Some(b)) = (prefix(from), prefix(to)) {
+                for s in &mut g.items {
+                    if s.range.starts_with(&a) {
+                        s.range = s.range.replacen(&a, &b, 1);
+                    }
+                }
+            }
+            self.sparklines.push(g);
+        }
+        let shapes: Vec<_> = self.shapes.iter().filter(|p| p.sheet == from).cloned().collect();
+        for mut p in shapes {
+            p.id = self.next_object_id;
+            self.next_object_id += 1;
+            p.sheet = to;
+            self.shapes.push(p);
+        }
         let filters: Vec<_> = self.filters.iter().filter(|f| f.sheet == from).cloned().collect();
         self.filters.extend(filters.into_iter().map(|mut f| {
             f.sheet = to;
@@ -135,6 +174,7 @@ impl Workbook {
 
     /// 이동: sheet `from` goes to position `to` (0-based, counted after it was taken out).
     pub fn move_sheet(&mut self, from: u32, to: u32) -> Result<()> {
+        self.book_guard()?;
         self.check_sheet(from)?;
         self.check_sheet(to)?;
         if from == to {
@@ -160,6 +200,7 @@ impl Workbook {
     /// 복사본 만들기: a copy of sheet `sheet` named like Excel's ("Sheet1 (2)"),
     /// placed at position `to`. Returns its index.
     pub fn copy_sheet(&mut self, sheet: u32, to: u32) -> Result<u32> {
+        self.book_guard()?;
         self.check_sheet(sheet)?;
         let start = self.begin();
         self.um.duplicate_sheet(sheet)?;
@@ -214,6 +255,7 @@ impl Workbook {
 
     /// 숨기기 / 숨기기 취소. At least one sheet stays visible.
     pub fn set_sheet_hidden(&mut self, sheet: u32, hidden: bool) -> Result<()> {
+        self.book_guard()?;
         self.check_sheet(sheet)?;
         let tabs = self.sheet_tabs();
         if hidden && tabs.iter().enumerate().all(|(i, t)| i as u32 == sheet || t.hidden) {

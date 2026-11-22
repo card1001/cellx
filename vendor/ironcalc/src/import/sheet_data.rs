@@ -533,9 +533,9 @@ impl SheetDataReader<'_, '_> {
                         }
                     }
                 }
-                "dataTable" => {
-                    return Err(XlsxError::NotImplemented("data table formulas".to_string()));
-                }
+                // CellX: a data table's cells keep their values; CellX reads the
+                // table itself from the sheet and works it out again.
+                "dataTable" => {}
                 "array" => {
                     let range = match formula.reference {
                         Some(r) => r,

@@ -327,6 +327,8 @@ input.tiny { width: 28px !important; min-width: 0 !important; height: 20px; marg
 .picture-box.selected { outline: 1px solid #a1a1aa; }
 .print-picture { position: absolute; }
 .print-picture img { width: 100%; height: 100%; display: block; }
+.print-shape { position: absolute; }
+.print-shape .shape-svg { position: absolute; left: 0; top: 0; overflow: visible; }
 
 /* 문서 복구 */
 .recovery-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; max-height: 300px; overflow: auto; }
@@ -357,3 +359,51 @@ input.tiny { width: 28px !important; min-width: 0 !important; height: 20px; marg
 .eval-next { text-decoration: underline; text-decoration-thickness: 2px; }
 .eval-hint { min-height: 34px; margin: 6px 0; }
 .eval-last { font-style: italic; }
+
+/* 도형, 텍스트 상자 */
+.shape-box { position: absolute; z-index: 3; cursor: move; }
+.shape-box.line { pointer-events: none; }
+.shape-box.line .shape-svg line { pointer-events: stroke; stroke-linecap: round; }
+.shape-box.line .shape-svg { pointer-events: none; }
+.shape-box .shape-svg { position: absolute; left: 0; top: 0; overflow: visible; }
+.shape-box .shape-svg line { cursor: move; }
+.shape-box.line .chart-handle { pointer-events: auto; }
+.shape-box.selected:not(.line) { outline: 1px solid #8a8a8a; }
+.shape-text { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 4px 7px; overflow: hidden; line-height: 1.25; white-space: pre-wrap; word-break: break-word; pointer-events: none; }
+.shape-editor { position: absolute; inset: 0; width: 100%; height: 100%; box-sizing: border-box; padding: 4px 7px; border: none; outline: 1px dashed #8a8a8a; background: transparent; resize: none; font-family: inherit; line-height: 1.25; cursor: text; }
+.chart-handle.line-end { position: absolute; }
+.shape-fmt { min-width: 340px; }
+.shape-fmt-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+.shape-fmt-row > span:first-child { width: 90px; }
+.shape-fmt-row .check { display: flex; align-items: center; gap: 4px; }
+.shape-menu { display: grid; grid-template-columns: repeat(5, 30px); gap: 2px; padding: 4px; }
+.shape-menu button { width: 30px; height: 28px; font-size: 16px; border: 1px solid transparent; background: none; cursor: pointer; }
+.shape-menu button:hover { border-color: #9aa3e8; background: #eef0ff; }
+
+/* 스파크라인 */
+.sparkline-cell { position: absolute; pointer-events: none; z-index: 1; }
+.sparkline-svg { display: block; }
+
+/* 슬라이서 */
+.slicer { position: absolute; z-index: 3; background: #fff; border: 1px solid #c8c8c8; box-shadow: 0 1px 3px rgba(0,0,0,.15); display: flex; flex-direction: column; overflow: hidden; }
+.slicer.selected { outline: 2px solid #5a64d6; }
+.slicer-head { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px; font-weight: 600; cursor: move; border-bottom: 1px solid #e3e3e3; }
+.slicer-clear { border: none; background: none; cursor: pointer; font-size: 14px; color: #5a64d6; }
+.slicer-clear:disabled { color: #c0c0c0; cursor: default; }
+.slicer-items { display: grid; gap: 4px; padding: 6px; overflow: auto; align-content: start; }
+.slicer-item { border: 1px solid #d0d0d0; background: #fff; padding: 4px 6px; text-align: left; cursor: pointer; font-size: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slicer-item.on { background: #dfe3ff; border-color: #8f99e8; }
+.slicer-item.empty { color: #aaa; }
+.slicer-item.empty.on { background: #eef0fb; }
+.slicer-resize { position: absolute; right: 0; bottom: 0; width: 10px; height: 10px; cursor: nwse-resize; background: linear-gradient(135deg, transparent 50%, #8a8a8a 50%); }
+.slicer-pick { display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow: auto; margin: 8px 0; }
+.slicer-pick .check { display: flex; align-items: center; gap: 6px; }
+.print-sparkline { position: absolute; }
+.scenario-manager { min-width: 420px; }
+.scenario-main { display: flex; gap: 8px; }
+.scenario-list { flex: 1; min-height: 150px; max-height: 220px; overflow: auto; border: 1px solid #c8c8c8; }
+.scenario-list .list-item { padding: 2px 6px; cursor: default; }
+.scenario-list .list-item.on { background: #dfe3ff; }
+.scenario-buttons { display: flex; flex-direction: column; gap: 6px; }
+.scenario-buttons button { min-width: 90px; }
+.scenario-values { max-height: 260px; overflow: auto; }

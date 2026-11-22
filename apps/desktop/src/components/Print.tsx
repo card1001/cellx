@@ -1,9 +1,11 @@
 // Printing like Excel's 파일 → 인쇄: settings with a page preview, Excel's page breaks
 // (automatic and manual, down then over), print titles, page numbers and charts.
 // The system print dialog also saves PDF.
+import { ShapeFigure, ShapeText } from "./Shape";
+import { SparklineSvg } from "./Sparkline";
 import { useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import type { CellStyle, CellView, Chart, ChartData, PageSetup, Picture } from "../api";
+import type { CellStyle, CellView, Chart, ChartData, PageSetup, Picture, Shape, SparklineView } from "../api";
 import { fontCss } from "../grid/Grid";
 import type { Merge } from "../grid/sources";
 import { ChartSvg } from "./Chart";
@@ -26,6 +28,8 @@ export interface PrintJob {
   charts: { chart: Chart; data: ChartData }[];
   /** Pictures with their image data. */
   pictures: { picture: Picture; url: string }[];
+  shapes?: Shape[];
+  sparklines?: SparklineView[];
 }
 
 /** Printable A4 area at 96 dpi with Excel's normal margins (0.7" sides, 0.75" top/bottom). */
@@ -173,6 +177,7 @@ export function PageView(props: { job: PrintJob; setup: PageSetup; pag: Paginati
     for (let r = ra; r < ch.anchor.row; r++) top += job.rowHeight(r);
     return { left, top };
   };
+  const shapes = (job.shapes ?? []).filter((x) => x.anchor.row >= ra && x.anchor.row <= rb && x.anchor.col >= ca && x.anchor.col <= cb);
   const pictures = job.pictures.filter(
     (x) => x.picture.anchor.row >= ra && x.picture.anchor.row <= rb && x.picture.anchor.col >= ca && x.picture.anchor.col <= cb,
   );
@@ -230,6 +235,27 @@ export function PageView(props: { job: PrintJob; setup: PageSetup; pag: Paginati
           return (
             <div key={`p${picture.id}`} className="print-picture" style={{ left: p.left, top: p.top, width: picture.anchor.width, height: picture.anchor.height }}>
               <img src={url} alt={picture.name} />
+            </div>
+          );
+        })}
+        {(job.sparklines ?? [])
+          .filter((x) => x.row >= ra && x.row <= rb && x.col >= ca && x.col <= cb)
+          .map((sp) => {
+            const p = chartPos({ anchor: { row: sp.row, col: sp.col, dx: 0, dy: 0, width: 0, height: 0 } });
+            const w = job.colWidth(sp.col);
+            const h = job.rowHeight(sp.row);
+            return (
+              <div key={`k${sp.row}:${sp.col}`} className="print-sparkline" style={{ left: p.left, top: p.top, width: w, height: h }}>
+                <SparklineSvg s={sp} w={w} h={h} />
+              </div>
+            );
+          })}
+        {shapes.map((shape) => {
+          const p = chartPos(shape);
+          return (
+            <div key={`s${shape.id}`} className="print-shape" style={{ left: p.left, top: p.top, width: shape.anchor.width, height: shape.anchor.height }}>
+              <ShapeFigure shape={shape} w={shape.anchor.width} h={shape.anchor.height} />
+              <ShapeText shape={shape} />
             </div>
           );
         })}

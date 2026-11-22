@@ -482,8 +482,15 @@ impl Workbook {
         let wb = &mut self.model_mut().workbook;
         wb.tables.remove(&u.name);
         wb.tables.insert(t2.name.clone(), t2);
-        // Formulas that use the table follow its new name and size, as in Excel.
+        // Formulas and slicers that use the table follow its new name and size, as in Excel.
         self.model_mut().restructure(renamed.then_some((u.name.as_str(), new_name)), None);
+        if renamed {
+            for s in &mut self.slicers {
+                if s.table.eq_ignore_ascii_case(&u.name) {
+                    s.table = new_name.to_string();
+                }
+            }
+        }
         if let Some(f) = self.filters.iter_mut().find(|f| f.sheet == sheet && f.range.r0 == r.r0 && f.range.c0 == r.c0) {
             // Filters cover the data, not the total row.
             f.range = CellRange { r1: if u.totals { r.r1 - 1 } else { r.r1 }, ..r };
@@ -516,8 +523,10 @@ impl Workbook {
             }
         }
         self.model_mut().workbook.tables.remove(name);
-        // Its structured references become the ranges they stand for, as in Excel.
+        // Its structured references become the ranges they stand for, as in Excel;
+        // its slicers go.
         self.model_mut().restructure(None, Some(name));
+        self.slicers.retain(|s| !s.table.eq_ignore_ascii_case(name));
         self.filters.retain(|f| !(f.sheet == sheet && f.range.r0 == r.r0 && f.range.c0 == r.c0));
         self.um.set_rows_hidden(sheet, r.r0, r.r1, false)?;
         self.commit(start)
@@ -580,29 +589,108 @@ impl Workbook {
     }
 
     /// Excel's 표 자동 확장: typing in the row right under a table (without a
-    /// total row) makes that row part of it. Returns whether a table grew.
+    /// total row) makes that row part of it, and its calculated columns fill
+    /// in; typing in the column right of it adds a column (머리글 「열1」…).
+    /// Returns whether a table grew.
     pub(crate) fn grow_table_for(&mut self, sheet: u32, row: i32, col: i32, input: &str) -> bool {
         if input.is_empty() || !self.input(sheet, row, col).unwrap_or_default().is_empty() {
             return false;
         }
         let Some(name) = self.sheet_names().get(sheet as usize).cloned() else { return false };
+        enum Grow {
+            Row,
+            Column,
+        }
         let grown = self.model().workbook.tables.values().find_map(|t| {
-            if t.sheet_name != name || t.totals_row_count != 0 {
+            if t.sheet_name != name {
                 return None;
             }
             let (_, r0, c0, r1, c1) = parse_range(&t.reference)?;
             let r = CellRange { r0, c0, r1, c1 };
-            (row == r.r1 + 1 && (r.c0..=r.c1).contains(&col)).then(|| (t.name.clone(), CellRange { r1: row, ..r }, r))
+            if t.totals_row_count == 0 && row == r.r1 + 1 && (r.c0..=r.c1).contains(&col) {
+                Some((t.name.clone(), r, Grow::Row))
+            } else if col == r.c1 + 1 && (r.r0..=r.r1 - t.totals_row_count as i32).contains(&row) && self.input(sheet, r.r0, col).unwrap_or_default().is_empty() {
+                Some((t.name.clone(), r, Grow::Column))
+            } else {
+                None
+            }
         });
-        let Some((table, range, old)) = grown else { return false };
-        if let Some(t) = self.model_mut().workbook.tables.get_mut(&table) {
-            t.reference = range_a1(range);
+        let Some((table, old, how)) = grown else { return false };
+        let filter = self.filters.iter().position(|f| f.sheet == sheet && f.range.r0 == old.r0 && f.range.c0 == old.c0);
+        match how {
+            Grow::Row => {
+                let range = CellRange { r1: row, ..old };
+                if let Some(t) = self.model_mut().workbook.tables.get_mut(&table) {
+                    t.reference = range_a1(range);
+                }
+                if let Some(f) = filter {
+                    self.filters[f].range.r1 = self.filters[f].range.r1.max(row);
+                }
+                self.model_mut().restructure(None, None);
+                // 계산된 열: columns where every data row has the same formula follow into the new row.
+                let header = self.model().workbook.tables.get(&table).map_or(1, |t| t.header_row_count as i32);
+                for c in old.c0..=old.c1 {
+                    if c != col && self.calculated_column(sheet, old.r0 + header, old.r1, c) {
+                        let above = self.input(sheet, old.r1, c).unwrap_or_default();
+                        let _ = self.write_input(sheet, row, c, &refs::offset_refs(&above, 1, 0), true);
+                    }
+                }
+            }
+            Grow::Column => {
+                let range = CellRange { c1: col, ..old };
+                let header_name = {
+                    let t = &self.model().workbook.tables[&table];
+                    let taken: Vec<String> = t.columns.iter().map(|c| c.name.to_lowercase()).collect();
+                    let base = if row == old.r0 { input.to_string() } else { "열".to_string() };
+                    let mut n = 1;
+                    let mut name = if row == old.r0 { base.clone() } else { format!("{base}{n}") };
+                    while taken.contains(&name.to_lowercase()) {
+                        n += 1;
+                        name = format!("{base}{n}");
+                    }
+                    name
+                };
+                if let Some(t) = self.model_mut().workbook.tables.get_mut(&table) {
+                    t.reference = range_a1(range);
+                    let id = t.columns.iter().map(|c| c.id).max().unwrap_or(0) + 1;
+                    t.columns.push(TableColumn { id, name: header_name.clone(), ..TableColumn::default() });
+                }
+                if let Some(f) = filter {
+                    self.filters[f].range.c1 = self.filters[f].range.c1.max(col);
+                }
+                if row != old.r0 {
+                    let _ = self.write_input(sheet, old.r0, col, &header_name, true);
+                }
+                self.model_mut().restructure(None, None);
+            }
         }
-        if let Some(f) = self.filters.iter_mut().find(|f| f.sheet == sheet && f.range.r0 == old.r0 && f.range.c0 == old.c0) {
-            f.range.r1 = f.range.r1.max(row);
-        }
-        self.model_mut().restructure(None, None);
         true
+    }
+
+    /// Whether rows `r0..=r1` of column `col` all hold one formula (a 계산된 열).
+    fn calculated_column(&self, sheet: u32, r0: i32, r1: i32, col: i32) -> bool {
+        let Ok(ws) = self.model().workbook.worksheet(sheet) else { return false };
+        let f = |r: i32| ws.cell(r, col).and_then(|c| c.get_formula());
+        r1 >= r0 && f(r0).is_some() && (r0..=r1).all(|r| f(r) == f(r0))
+    }
+
+    /// 계산된 열: a formula typed in an otherwise empty table column fills the
+    /// whole column, as in Excel.
+    pub(crate) fn fill_calculated_column(&mut self, sheet: u32, row: i32, col: i32, input: &str) {
+        if !input.starts_with('=') {
+            return;
+        }
+        let Some(t) = self.table_at(sheet, row, col) else { return };
+        let (first, last) = (t.range.r0 + t.header as i32, t.range.r1 - t.totals as i32);
+        if row < first || row > last || first == last {
+            return;
+        }
+        if (first..=last).any(|r| r != row && !self.input(sheet, r, col).unwrap_or_default().is_empty()) {
+            return;
+        }
+        for r in (first..=last).filter(|r| *r != row) {
+            let _ = self.write_input(sheet, r, col, &refs::offset_refs(input, r - row, 0), true);
+        }
     }
 
     // ------------------------------------------------------------ protection
@@ -932,6 +1020,30 @@ mod tests {
         back.convert_table_to_range("표1").unwrap();
         assert_eq!(back.input(other, 1, 1).unwrap(), "=SUM(Sheet1!$B$2:$B$7)");
         assert_eq!(back.value(other, 1, 1).unwrap(), Scalar::Number(300.0));
+    }
+
+    #[test]
+    fn tables_grow_sideways_and_calculated_columns_fill() {
+        let mut wb = book();
+        wb.create_table(0, CellRange { r0: 1, c0: 1, r1: 4, c1: 2 }, true, "TableStyleMedium2").unwrap();
+        // Typing right of the table adds a column with an Excel-style header.
+        wb.set_input(0, 2, 3, "=[@금액]*2").unwrap();
+        let t = wb.table_at(0, 1, 1).unwrap();
+        assert_eq!(t.range, CellRange { r0: 1, c0: 1, r1: 4, c1: 3 });
+        assert_eq!(t.columns.last().unwrap(), "열1");
+        assert_eq!(wb.input(0, 1, 3).unwrap(), "열1");
+        // …and the formula fills the whole (empty) column: a calculated column.
+        assert_eq!(wb.value(0, 3, 3).unwrap(), Scalar::Number(100.0));
+        assert_eq!(wb.value(0, 4, 3).unwrap(), Scalar::Number(140.0));
+        // A new row picks the calculated column up.
+        wb.set_input(0, 5, 2, "30").unwrap();
+        assert_eq!(wb.value(0, 5, 3).unwrap(), Scalar::Number(60.0));
+        // A header typed next to the table names the new column.
+        wb.set_input(0, 1, 4, "비고").unwrap();
+        assert_eq!(wb.table_at(0, 1, 1).unwrap().columns.last().unwrap(), "비고");
+        // One undo takes the whole step back.
+        wb.undo().unwrap();
+        assert_eq!(wb.table_at(0, 1, 1).unwrap().range.c1, 3);
     }
 
     #[test]

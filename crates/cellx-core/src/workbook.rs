@@ -80,6 +80,10 @@ impl CellRange {
         let r = self.normalized();
         row >= r.r0 && row <= r.r1 && col >= r.c0 && col <= r.c1
     }
+    pub(crate) fn intersects(&self, other: &CellRange) -> bool {
+        let (a, b) = (self.normalized(), other.normalized());
+        a.r0 <= b.r1 && b.r0 <= a.r1 && a.c0 <= b.c1 && b.c0 <= a.c1
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Default, PartialEq)]
@@ -252,6 +256,13 @@ pub(crate) struct Side {
     bridges: BridgeMap,
     charts: Vec<Chart>,
     pictures: Vec<crate::pictures::Picture>,
+    shapes: Vec<crate::shapes::Shape>,
+    sparklines: Vec<crate::sparklines::SparklineGroup>,
+    slicers: Vec<crate::slicers::Slicer>,
+    data_tables: Vec<crate::whatif::DataTable>,
+    scenarios: Vec<crate::whatif::Scenario>,
+    book_protection: Option<crate::book::BookProtection>,
+    custom_views: Vec<crate::book::CustomView>,
     pivots: Vec<PivotDef>,
     comments: Vec<Vec<Comment>>,
     filters: Vec<AutoFilter>,
@@ -269,7 +280,7 @@ impl Side {
     /// data engine formulas and tables (structured references). Filters,
     /// outline, comments, charts and the like cannot.
     fn affects_values(&self, other: &Side) -> bool {
-        self.bridges != other.bridges || self.tables != other.tables
+        self.bridges != other.bridges || self.tables != other.tables || self.data_tables != other.data_tables
     }
 }
 
@@ -326,6 +337,13 @@ pub struct Workbook {
     pub(crate) clipboard: Option<StoredClipboard>,
     pub(crate) charts: Vec<Chart>,
     pub(crate) pictures: Vec<crate::pictures::Picture>,
+    pub(crate) shapes: Vec<crate::shapes::Shape>,
+    pub(crate) sparklines: Vec<crate::sparklines::SparklineGroup>,
+    pub(crate) slicers: Vec<crate::slicers::Slicer>,
+    pub(crate) data_tables: Vec<crate::whatif::DataTable>,
+    pub(crate) scenarios: Vec<crate::whatif::Scenario>,
+    pub(crate) book_protection: Option<crate::book::BookProtection>,
+    pub(crate) custom_views: Vec<crate::book::CustomView>,
     pub(crate) pivots: Vec<PivotDef>,
     pub(crate) filters: Vec<AutoFilter>,
     pub(crate) validations: Vec<Validation>,
@@ -382,6 +400,13 @@ impl Workbook {
             clipboard: None,
             charts: Vec::new(),
             pictures: Vec::new(),
+            shapes: Vec::new(),
+            sparklines: Vec::new(),
+            slicers: Vec::new(),
+            data_tables: Vec::new(),
+            scenarios: Vec::new(),
+            book_protection: None,
+            custom_views: Vec::new(),
             pivots: Vec::new(),
             filters: Vec::new(),
             validations: Vec::new(),
@@ -448,6 +473,13 @@ impl Workbook {
             bridges: self.bridges.clone(),
             charts: self.charts.clone(),
             pictures: self.pictures.clone(),
+            shapes: self.shapes.clone(),
+            sparklines: self.sparklines.clone(),
+            slicers: self.slicers.clone(),
+            data_tables: self.data_tables.clone(),
+            scenarios: self.scenarios.clone(),
+            book_protection: self.book_protection.clone(),
+            custom_views: self.custom_views.clone(),
             pivots: self.pivots.clone(),
             comments: self.model().workbook.worksheets.iter().map(|w| w.comments.clone()).collect(),
             filters: self.filters.clone(),
@@ -470,6 +502,18 @@ impl Workbook {
         self.bridges = side.bridges.clone();
         self.charts = side.charts.clone();
         self.pictures = side.pictures.clone();
+        self.shapes = side.shapes.clone();
+        self.sparklines = side.sparklines.clone();
+        self.slicers = side.slicers.clone();
+        // Data tables that go take their (untracked) results with them.
+        let gone: Vec<CellRange> = self.data_tables.iter().filter(|t| !side.data_tables.iter().any(|x| x.id == t.id)).map(|t| t.results()).collect();
+        for (t, r) in self.data_tables.iter().filter(|t| !side.data_tables.iter().any(|x| x.id == t.id)).map(|t| t.sheet).zip(gone) {
+            let _ = self.um.get_model_mut().range_clear_contents(&r.area(t));
+        }
+        self.data_tables = side.data_tables.clone();
+        self.scenarios = side.scenarios.clone();
+        self.book_protection = side.book_protection.clone();
+        self.custom_views = side.custom_views.clone();
         self.pivots = side.pivots.clone();
         self.filters = side.filters.clone();
         self.validations = side.validations.clone();
@@ -561,6 +605,7 @@ impl Workbook {
     }
 
     pub fn add_sheet(&mut self) -> Result<u32> {
+        self.book_guard()?;
         let start = self.begin();
         self.um.new_sheet()?;
         let index = self.sheet_names().len() as u32 - 1;
@@ -569,6 +614,7 @@ impl Workbook {
     }
 
     pub fn rename_sheet(&mut self, sheet: u32, name: &str) -> Result<()> {
+        self.book_guard()?;
         let old = self.sheet_names().get(sheet as usize).cloned().unwrap_or_default();
         let start = self.begin();
         self.um.rename_sheet(sheet, name)?;
@@ -595,6 +641,7 @@ impl Workbook {
     }
 
     pub fn delete_sheet(&mut self, sheet: u32) -> Result<()> {
+        self.book_guard()?;
         if self.sheet_names().len() <= 1 {
             return Err(CellxError::Calc("통합 문서에는 시트가 하나 이상 있어야 합니다".into()));
         }
@@ -667,6 +714,9 @@ impl Workbook {
     /// Writes one cell. `record` = through IronCalc's history (user edits) or not.
     pub(crate) fn write_input(&mut self, sheet: u32, row: i32, col: i32, input: &str, record: bool) -> Result<()> {
         self.guard(sheet, CellRange { r0: row, c0: col, r1: row, c1: col }, Guard::Content)?;
+        if self.data_table_at(sheet, row, col).is_some() {
+            return Err(CellxError::Calc("데이터 표의 일부를 변경할 수 없습니다.".into()));
+        }
         let is_bridge = self.is_bridge_input(input);
         let text = if is_bridge {
             self.bridges.insert((sheet, row, col), BridgeCell::new(input.to_string()));
@@ -692,6 +742,7 @@ impl Workbook {
         let start = self.begin();
         self.grow_table_for(sheet, row, col, input);
         self.write_input(sheet, row, col, input, true)?;
+        self.fill_calculated_column(sheet, row, col, input);
         self.commit(start)
     }
 
@@ -725,7 +776,16 @@ impl Workbook {
     /// Delete key: clears contents, keeps formatting.
     pub fn clear_contents(&mut self, sheet: u32, range: CellRange) -> Result<RecalcStats> {
         self.guard(sheet, range, Guard::Content)?;
+        // A data table goes only as a whole.
+        let r = range.normalized();
+        for t in self.data_tables.iter().filter(|t| t.sheet == sheet && t.results().intersects(&r)) {
+            let res = t.results();
+            if !(r.contains(res.r0, res.c0) && r.contains(res.r1, res.c1)) {
+                return Err(CellxError::Calc("데이터 표의 일부를 변경할 수 없습니다.".into()));
+            }
+        }
         let start = self.begin();
+        self.data_tables.retain(|t| !(t.sheet == sheet && r.contains(t.results().r0, t.results().c0) && r.contains(t.results().r1, t.results().c1)));
         self.um.range_clear_contents(&range.area(sheet))?;
         self.bridges.retain(|(s, r, c), _| !(*s == sheet && range.contains(*r, *c)));
         self.commit(start)
@@ -1203,8 +1263,12 @@ impl Workbook {
             stats.calc_ms += t.elapsed().as_secs_f64() * 1000.0;
 
             let t = Instant::now();
-            let changed = self.refresh_bridges(&mut stats);
+            let mut changed = self.refresh_bridges(&mut stats);
             stats.bridge_ms += t.elapsed().as_secs_f64() * 1000.0;
+            // 데이터 표 results, worked out against the model as it now is.
+            if !self.data_tables.is_empty() {
+                changed.extend(self.compute_data_tables());
+            }
             if changed.is_empty() {
                 break;
             }
@@ -1571,7 +1635,8 @@ impl Workbook {
     pub fn xlsx_bytes(&self) -> Result<Vec<u8>> {
         let mut xlsx = std::io::Cursor::new(Vec::new());
         ironcalc::export::save_xlsx_to_writer(self.model(), &mut xlsx).map_err(|e| CellxError::Xlsx(e.to_string()))?;
-        crate::ooxml::add_extras(xlsx.get_ref(), &self.sheet_parts(), &self.sheet_names())
+        let book = crate::ooxml::BookParts { protection: self.book_protection_xml(), views: self.custom_workbook_views_xml() };
+        crate::ooxml::add_extras_with(xlsx.get_ref(), &self.sheet_parts(), &self.sheet_names(), &book)
     }
 
     pub fn bridge_formula_count(&self) -> usize {

@@ -77,6 +77,9 @@ pub struct BookInfo {
     protected: Vec<bool>,
     /// Per sheet: hidden, tab color.
     tabs: Vec<cellx_core::sheets::SheetTab>,
+    /// 통합 문서 보호 (구조), and whether it has a password.
+    book_protected: bool,
+    book_password: bool,
 }
 
 pub(crate) fn info(book: &mut Book) -> CmdResult<BookInfo> {
@@ -90,6 +93,8 @@ pub(crate) fn info(book: &mut Book) -> CmdResult<BookInfo> {
         protected: (0..book.wb.sheet_names().len() as u32).map(|i| book.wb.protection(i).protected).collect(),
         font: book.wb.workbook_font(),
         tabs: book.wb.sheet_tabs(),
+        book_protected: book.wb.book_protection().is_some(),
+        book_password: book.wb.book_protection().is_some_and(|p| p.hash.is_some() || p.legacy.is_some()),
     })
 }
 
@@ -891,4 +896,159 @@ pub fn trace_dependents(state: State<'_, AppState>, sheet: u32, row: i32, col: i
 #[tauri::command]
 pub fn formula_steps(state: State<'_, AppState>, sheet: u32, row: i32, col: i32) -> CmdResult<Vec<EvalStep>> {
     read(&state, |wb| wb.formula_steps(sheet, row, col))
+}
+
+use cellx_core::shapes::{Shape, ShapeKind};
+
+#[tauri::command]
+pub fn shapes(state: State<'_, AppState>, sheet: u32) -> CmdResult<Vec<Shape>> {
+    read(&state, |wb| Ok(wb.shapes(sheet)))
+}
+
+#[tauri::command]
+pub fn add_shape(state: State<'_, AppState>, sheet: u32, row: i32, col: i32, kind: ShapeKind) -> CmdResult<Shape> {
+    edit(&state, |wb| wb.add_shape(sheet, row, col, kind))
+}
+
+#[tauri::command]
+pub fn update_shape(state: State<'_, AppState>, shape: Shape) -> CmdResult<()> {
+    edit(&state, |wb| wb.update_shape(shape))
+}
+
+#[tauri::command]
+pub fn delete_shape(state: State<'_, AppState>, id: u32) -> CmdResult<()> {
+    edit(&state, |wb| wb.delete_shape(id))
+}
+
+use cellx_core::slicers::{Slicer, SlicerView};
+use cellx_core::sparklines::{SparkKind, SparklineGroup, SparklineView};
+
+#[tauri::command]
+pub fn sparklines(state: State<'_, AppState>, sheet: u32) -> CmdResult<Vec<SparklineView>> {
+    read(&state, |wb| Ok(wb.sparklines(sheet)))
+}
+
+#[tauri::command]
+pub fn sparkline_groups(state: State<'_, AppState>, sheet: u32) -> CmdResult<Vec<SparklineGroup>> {
+    read(&state, |wb| Ok(wb.sparkline_groups(sheet)))
+}
+
+#[tauri::command]
+pub fn add_sparklines(state: State<'_, AppState>, sheet: u32, kind: SparkKind, data: String, location: CellRange) -> CmdResult<SparklineGroup> {
+    edit(&state, |wb| wb.add_sparklines(sheet, kind, &data, location))
+}
+
+#[tauri::command]
+pub fn update_sparkline_group(state: State<'_, AppState>, group: SparklineGroup) -> CmdResult<()> {
+    edit(&state, |wb| wb.update_sparkline_group(group))
+}
+
+#[tauri::command]
+pub fn delete_sparklines(state: State<'_, AppState>, sheet: u32, range: CellRange) -> CmdResult<()> {
+    edit(&state, |wb| wb.delete_sparklines(sheet, range))
+}
+
+#[tauri::command]
+pub fn slicers(state: State<'_, AppState>, sheet: u32) -> CmdResult<Vec<SlicerView>> {
+    read(&state, |wb| Ok(wb.slicers(sheet)))
+}
+
+#[tauri::command]
+pub fn add_slicer(state: State<'_, AppState>, table: String, column: String, sheet: u32) -> CmdResult<Slicer> {
+    edit(&state, |wb| wb.add_slicer(&table, &column, sheet))
+}
+
+#[tauri::command]
+pub fn update_slicer(state: State<'_, AppState>, slicer: Slicer) -> CmdResult<()> {
+    edit(&state, |wb| wb.update_slicer(slicer))
+}
+
+#[tauri::command]
+pub fn delete_slicer(state: State<'_, AppState>, id: u32) -> CmdResult<()> {
+    edit(&state, |wb| wb.delete_slicer(id))
+}
+
+#[tauri::command]
+pub fn slicer_select(state: State<'_, AppState>, id: u32, values: Option<Vec<String>>) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.slicer_select(id, values))
+}
+
+use cellx_core::whatif::Scenario;
+
+#[tauri::command]
+pub fn add_data_table(
+    state: State<'_, AppState>,
+    sheet: u32,
+    range: CellRange,
+    row_input: Option<String>,
+    col_input: Option<String>,
+) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.add_data_table(sheet, range, row_input.as_deref(), col_input.as_deref()))
+}
+
+#[tauri::command]
+pub fn delete_data_table(state: State<'_, AppState>, sheet: u32, row: i32, col: i32) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.delete_data_table(sheet, row, col))
+}
+
+#[tauri::command]
+pub fn data_table_at(state: State<'_, AppState>, sheet: u32, row: i32, col: i32) -> CmdResult<bool> {
+    read(&state, |wb| Ok(wb.data_table_at(sheet, row, col).is_some()))
+}
+
+#[tauri::command]
+pub fn scenarios(state: State<'_, AppState>, sheet: u32) -> CmdResult<Vec<Scenario>> {
+    read(&state, |wb| Ok(wb.scenarios(sheet)))
+}
+
+#[tauri::command]
+pub fn set_scenario(state: State<'_, AppState>, scenario: Scenario) -> CmdResult<()> {
+    edit(&state, |wb| wb.set_scenario(scenario))
+}
+
+#[tauri::command]
+pub fn delete_scenario(state: State<'_, AppState>, sheet: u32, name: String) -> CmdResult<()> {
+    edit(&state, |wb| wb.delete_scenario(sheet, &name))
+}
+
+#[tauri::command]
+pub fn show_scenario(state: State<'_, AppState>, sheet: u32, name: String) -> CmdResult<RecalcStats> {
+    edit(&state, |wb| wb.show_scenario(sheet, &name))
+}
+
+#[tauri::command]
+pub fn scenario_summary(state: State<'_, AppState>, sheet: u32, results: Vec<(i32, i32)>) -> CmdResult<u32> {
+    edit(&state, |wb| wb.scenario_summary(sheet, &results))
+}
+
+use cellx_core::book::CustomView;
+
+#[tauri::command]
+pub fn protect_book(state: State<'_, AppState>, password: Option<String>) -> CmdResult<()> {
+    edit(&state, |wb| wb.protect_book(password.as_deref()))
+}
+
+#[tauri::command]
+pub fn unprotect_book(state: State<'_, AppState>, password: Option<String>) -> CmdResult<()> {
+    edit(&state, |wb| wb.unprotect_book(password.as_deref()))
+}
+
+#[tauri::command]
+pub fn custom_views(state: State<'_, AppState>) -> CmdResult<Vec<CustomView>> {
+    read(&state, |wb| Ok(wb.custom_views()))
+}
+
+#[tauri::command]
+pub fn add_custom_view(state: State<'_, AppState>, name: String, active: u32) -> CmdResult<CustomView> {
+    edit(&state, |wb| wb.add_custom_view(&name, active))
+}
+
+#[tauri::command]
+pub fn delete_custom_view(state: State<'_, AppState>, name: String) -> CmdResult<()> {
+    edit(&state, |wb| wb.delete_custom_view(&name))
+}
+
+#[tauri::command]
+pub fn show_custom_view(state: State<'_, AppState>, name: String) -> CmdResult<u32> {
+    edit(&state, |wb| wb.show_custom_view(&name))
 }

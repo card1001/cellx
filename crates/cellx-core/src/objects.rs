@@ -167,6 +167,13 @@ impl Workbook {
                 c.range = c.range.replacen(old_prefix, new_prefix, 1);
             }
         }
+        for g in &mut self.sparklines {
+            for s in &mut g.items {
+                if s.range.starts_with(old_prefix) {
+                    s.range = s.range.replacen(old_prefix, new_prefix, 1);
+                }
+            }
+        }
         for p in &mut self.pivots {
             if let PivotSource::Range { range } = &mut p.source {
                 if range.starts_with(old_prefix) {
@@ -179,6 +186,36 @@ impl Workbook {
     pub(crate) fn objects_after_sheet_delete(&mut self, sheet: u32) {
         self.pictures.retain(|p| p.sheet != sheet);
         for p in &mut self.pictures {
+            if p.sheet > sheet {
+                p.sheet -= 1;
+            }
+        }
+        self.data_tables.retain(|p| p.sheet != sheet);
+        for p in &mut self.data_tables {
+            if p.sheet > sheet {
+                p.sheet -= 1;
+            }
+        }
+        self.scenarios.retain(|p| p.sheet != sheet);
+        for p in &mut self.scenarios {
+            if p.sheet > sheet {
+                p.sheet -= 1;
+            }
+        }
+        self.slicers.retain(|p| p.sheet != sheet);
+        for p in &mut self.slicers {
+            if p.sheet > sheet {
+                p.sheet -= 1;
+            }
+        }
+        self.sparklines.retain(|p| p.sheet != sheet);
+        for p in &mut self.sparklines {
+            if p.sheet > sheet {
+                p.sheet -= 1;
+            }
+        }
+        self.shapes.retain(|p| p.sheet != sheet);
+        for p in &mut self.shapes {
             if p.sheet > sheet {
                 p.sheet -= 1;
             }
@@ -221,6 +258,51 @@ impl Workbook {
                 .to_string()
         };
         for p in &mut self.pictures {
+            if p.sheet == sheet {
+                let v = if axis == Axis::Row { &mut p.anchor.row } else { &mut p.anchor.col };
+                *v = shift_index(*v, at, count).unwrap_or(at).max(1);
+            }
+        }
+        self.shift_sparklines(sheet, axis, at, count);
+        let mv = |v: i32| shift_index(v, at, count);
+        let row_axis = axis == Axis::Row;
+        self.data_tables.retain_mut(|t| {
+            if t.sheet != sheet {
+                return true;
+            }
+            let (a, b) = if row_axis { (&mut t.range.r0, &mut t.range.r1) } else { (&mut t.range.c0, &mut t.range.c1) };
+            match (mv(*a), mv(*b)) {
+                (Some(x), Some(y)) => {
+                    *a = x;
+                    *b = y;
+                }
+                _ => return false,
+            }
+            for input in [&mut t.row_input, &mut t.col_input].into_iter().flatten() {
+                let v = if row_axis { &mut input.0 } else { &mut input.1 };
+                *v = mv(*v).unwrap_or(*v);
+            }
+            true
+        });
+        for s in self.scenarios.iter_mut().filter(|s| s.sheet == sheet) {
+            s.cells.retain_mut(|(r, c, _)| {
+                let v = if row_axis { r } else { c };
+                match mv(*v) {
+                    Some(x) => {
+                        *v = x;
+                        true
+                    }
+                    None => false,
+                }
+            });
+        }
+        for p in &mut self.slicers {
+            if p.sheet == sheet {
+                let v = if axis == Axis::Row { &mut p.anchor.row } else { &mut p.anchor.col };
+                *v = shift_index(*v, at, count).unwrap_or(at).max(1);
+            }
+        }
+        for p in &mut self.shapes {
             if p.sheet == sheet {
                 let v = if axis == Axis::Row { &mut p.anchor.row } else { &mut p.anchor.col };
                 *v = shift_index(*v, at, count).unwrap_or(at).max(1);
@@ -510,6 +592,22 @@ impl Workbook {
                 p.pictures.push(pic);
             }
         }
+        for (i, p) in parts.iter_mut().enumerate() {
+            p.ext = self.sparkline_ext(i as u32);
+            p.scenarios = self.scenarios_xml(i as u32);
+            p.data_tables = self.data_table_formulas(i as u32);
+            p.views = self.custom_sheet_views_xml(i as u32);
+        }
+        for (sheet, x) in self.slicer_parts() {
+            if let Some(p) = parts.get_mut(sheet as usize) {
+                p.slicers.push(x);
+            }
+        }
+        for (sheet, shape) in self.shape_parts() {
+            if let Some(p) = parts.get_mut(sheet as usize) {
+                p.shapes.push(shape);
+            }
+        }
         for c in &self.charts {
             let Ok(data) = self.resolve_chart(c) else { continue };
             let Some(p) = parts.get_mut(c.sheet as usize) else { continue };
@@ -530,6 +628,11 @@ impl Workbook {
     pub(crate) fn import_extras(&mut self, xlsx: &[u8]) {
         self.import_charts(xlsx);
         self.import_pictures(xlsx);
+        self.import_shapes(xlsx);
+        self.import_slicers(xlsx);
+        self.import_whatif(xlsx);
+        self.import_book(xlsx);
+        self.import_sparklines(&ooxml::sheet_xmls(xlsx, "sparklineGroup"));
         // CellX writes these names itself on save.
         self.model_mut()
             .workbook
@@ -894,6 +997,7 @@ impl Workbook {
         }
         let start = self.begin();
         if new_sheet {
+            self.book_guard()?;
             self.um.new_sheet()?;
             def.sheet = self.sheet_names().len() as u32 - 1;
             def.row = 3;

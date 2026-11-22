@@ -1,4 +1,6 @@
 // The ribbon, laid out like Korean Excel's: 파일 · 홈 · 삽입 · 수식 · 데이터 · 보기.
+import { SHAPE_KINDS } from "./Shape";
+import { SPARK_KINDS } from "./Sparkline";
 import { useState, type ReactNode } from "react";
 import type { ChartKind, CurrentStyle, FitMode, PageSetup, TableView } from "../api";
 import { TABLE_STYLES, TableStyleSwatch } from "./DataDialogs";
@@ -62,6 +64,9 @@ export interface RibbonActions {
   manageCf(): void;
   insertChart(kind: ChartKind): void;
   insertPicture(): void;
+  insertShape(kind: import("../api").ShapeKind): void;
+  insertSparklines(kind: import("../api").SparkKind): void;
+  insertSlicer(): void;
   insertPivot(): void;
   refreshAll(): void;
   newMemo(): void;
@@ -79,6 +84,8 @@ export interface RibbonActions {
   removeDuplicates(): void;
   validation(): void;
   goalSeek(): void;
+  scenarios(): void;
+  dataTable(): void;
   replace(): void;
   goToDialog(): void;
   hyperlink(): void;
@@ -100,6 +107,8 @@ export interface RibbonActions {
   tableToggle(key: "stripes" | "totals", value: boolean): void;
   tableToRange(): void;
   protectSheet(): void;
+  protectBook(): void;
+  customViews(): void;
   orientation(landscape: boolean): void;
   fitWidth(fit: FitMode): void;
   printGrid(v: boolean): void;
@@ -128,6 +137,7 @@ interface Props {
   pageSetup: PageSetup | null;
   showPageBreaks: boolean;
   showFormulas: boolean;
+  protectedBook: boolean;
   hasArrows: boolean;
 }
 
@@ -611,6 +621,34 @@ export function Ribbon(props: Props) {
               <Btn big title="그림 삽입 (PNG, JPEG, GIF, BMP). 스크린샷은 Ctrl+V로 붙여넣을 수 있습니다." onClick={a.insertPicture}>
                 <span className="ic">🖼</span>그림
               </Btn>
+              <Dropdown
+                label={
+                  <span className="dd-big">
+                    <span className="ic">⬠</span>도형
+                  </span>
+                }
+                className="big-dd"
+                title="도형 삽입"
+                panel={(close) => (
+                  <div className="shape-menu">
+                    {SHAPE_KINDS.map((k) => (
+                      <button
+                        key={k.kind}
+                        title={k.label}
+                        onClick={() => {
+                          close();
+                          a.insertShape(k.kind);
+                        }}
+                      >
+                        {k.icon}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              />
+              <Btn big title="텍스트 상자 삽입" onClick={() => a.insertShape("textBox")}>
+                <span className="ic">🗛</span>텍스트 상자
+              </Btn>
             </Group>
             <Group label="차트">
               {CHART_KINDS.map((k) => (
@@ -619,6 +657,19 @@ export function Ribbon(props: Props) {
                   {k.label}
                 </Btn>
               ))}
+            </Group>
+            <Group label="스파크라인">
+              {SPARK_KINDS.map((k) => (
+                <Btn big key={k.kind} title={`${k.label} 스파크라인 삽입`} onClick={() => a.insertSparklines(k.kind)}>
+                  <span className="ic">{k.icon}</span>
+                  {k.label}
+                </Btn>
+              ))}
+            </Group>
+            <Group label="필터">
+              <Btn big title="표의 열로 필터링하는 슬라이서를 삽입합니다" disabled={!props.table} onClick={a.insertSlicer}>
+                <span className="ic">▦</span>슬라이서
+              </Btn>
             </Group>
             <Group label="링크">
               <Btn big title="하이퍼링크 (Ctrl+K)" onClick={a.hyperlink}>
@@ -851,7 +902,12 @@ export function Ribbon(props: Props) {
               </Btn>
             </Group>
             <Group label="예측">
-              <Dropdown label={<span className="dd-big"><span className="ic">❓</span>가상 분석</span>} className="big-dd" items={[{ label: "목표값 찾기...", onClick: a.goalSeek }]} />
+              <Dropdown label={<span className="dd-big"><span className="ic">❓</span>가상 분석</span>} className="big-dd" items={[
+                  { label: "시나리오 관리자...", onClick: a.scenarios },
+                  { label: "목표값 찾기...", onClick: a.goalSeek },
+                  { label: "데이터 표...", onClick: a.dataTable },
+                ]}
+              />
             </Group>
             <Group label="개요">
               <Dropdown
@@ -910,11 +966,19 @@ export function Ribbon(props: Props) {
                 <span className="ic">🔒</span>
                 {props.protectedSheet ? "시트 보호 해제" : "시트 보호"}
               </Btn>
+              <Btn big title="통합 문서 보호: 시트 추가·삭제·이름 바꾸기·이동·숨기기를 막습니다" on={props.protectedBook} onClick={a.protectBook}>
+                <span className="ic">📕</span>통합 문서 보호
+              </Btn>
             </Group>
           </>
         )}
         {tab === "보기" && (
           <>
+            <Group label="통합 문서 보기">
+              <Btn big title="사용자 지정 보기: 숨긴 행·열과 필터를 이름으로 저장하고 다시 표시합니다" onClick={a.customViews}>
+                <span className="ic">▣</span>사용자 지정 보기
+              </Btn>
+            </Group>
             <Group label="표시">
               <label className="rcheck">
                 <input type="checkbox" checked={props.showGrid} onChange={a.toggleGrid} /> 눈금선

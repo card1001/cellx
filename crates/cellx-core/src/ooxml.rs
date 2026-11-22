@@ -57,11 +57,46 @@ pub struct PictureXml {
     pub cy: i64,
 }
 
+/// A shape or text box for the drawing part of a sheet.
+pub struct ShapeXml {
+    pub from: Marker,
+    pub to: Marker,
+    /// The `<xdr:sp>` element; its `cNvPr id="0"` is numbered when written.
+    pub sp: String,
+}
+
+/// A table slicer for the drawing, slicer and slicer cache parts.
+pub struct SlicerXml {
+    pub name: String,
+    /// The cache's name, also a defined name of the workbook.
+    pub cache: String,
+    pub caption: String,
+    pub column: String,
+    pub table: String,
+    /// The `tableColumn` id of its column.
+    pub column_id: u32,
+    pub columns: u32,
+    pub from: Marker,
+    pub to: Marker,
+    pub cx: i64,
+    pub cy: i64,
+}
+
 #[derive(Default)]
 pub struct SheetParts {
     pub memos: Vec<MemoXml>,
     pub charts: Vec<ChartXml>,
     pub pictures: Vec<PictureXml>,
+    pub shapes: Vec<ShapeXml>,
+    pub slicers: Vec<SlicerXml>,
+    /// `<scenarios>` of the sheet.
+    pub scenarios: String,
+    /// (first result cell, `<f t="dataTable" …/>`) of each data table.
+    pub data_tables: Vec<(String, String)>,
+    /// `<customSheetViews>` of the sheet.
+    pub views: String,
+    /// `<ext>` elements for the worksheet's `<extLst>` (sparklines).
+    pub ext: String,
     pub filter: Option<AutoFilter>,
     pub validations: Vec<Validation>,
     pub outline_rows: Vec<(i32, u8)>,
@@ -89,6 +124,12 @@ impl SheetParts {
         self.memos.is_empty()
             && self.charts.is_empty()
             && self.pictures.is_empty()
+            && self.shapes.is_empty()
+            && self.ext.is_empty()
+            && self.slicers.is_empty()
+            && self.scenarios.is_empty()
+            && self.data_tables.is_empty()
+            && self.views.is_empty()
             && self.filter.is_none()
             && self.validations.is_empty()
             && self.outline_rows.is_empty()
@@ -343,7 +384,7 @@ fn a1(r: CellRange) -> String {
     format!("{}{}:{}{}", column_name(r.c0), r.r0, column_name(r.c1), r.r1)
 }
 
-fn auto_filter_xml(f: &AutoFilter) -> String {
+pub(crate) fn auto_filter_xml(f: &AutoFilter) -> String {
     let mut cols = String::new();
     for cf in &f.columns {
         let id = cf.col - f.range.c0;
@@ -467,9 +508,27 @@ fn abs_range(sheet: &str, (a, b): ((i32, i32), (i32, i32))) -> String {
     }
 }
 
+/// What the workbook part gets besides its sheets.
+#[derive(Default)]
+pub struct BookParts {
+    /// `<workbookProtection>`.
+    pub protection: String,
+    /// `<customWorkbookViews>`.
+    pub views: String,
+}
+
+pub(crate) fn workbook_xml(xlsx: &[u8]) -> Option<String> {
+    let mut zip = zip::ZipArchive::new(Cursor::new(xlsx)).ok()?;
+    read_part(&mut zip, "xl/workbook.xml")
+}
+
 /// Adds memos and charts (`parts[i]` belongs to sheet i+1) to an xlsx made by IronCalc.
 pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> Result<Vec<u8>> {
-    if parts.iter().all(SheetParts::is_empty) {
+    add_extras_with(xlsx, parts, sheet_names, &BookParts::default())
+}
+
+pub fn add_extras_with(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String], book: &BookParts) -> Result<Vec<u8>> {
+    if parts.iter().all(SheetParts::is_empty) && book.protection.is_empty() && book.views.is_empty() {
         return Ok(xlsx.to_vec());
     }
     let mut zin = zerr(zip::ZipArchive::new(Cursor::new(xlsx)))?;
@@ -490,7 +549,9 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
             [format!("xl/worksheets/sheet{}.xml", i + 1), format!("xl/worksheets/_rels/sheet{}.xml.rels", i + 1)]
         })
         .collect();
-    let wanted = |name: &str| name == "[Content_Types].xml" || name == "xl/workbook.xml" || sheets.contains(name);
+    let wanted = |name: &str| {
+        name == "[Content_Types].xml" || name == "xl/workbook.xml" || name == "xl/_rels/workbook.xml.rels" || sheets.contains(name)
+    };
     let mut map: HashMap<String, Vec<u8>> = HashMap::new();
     for name in order.iter().filter(|n| wanted(n)) {
         let mut f = zerr(zin.by_name(name))?;
@@ -515,6 +576,10 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
     let mut table_no = 0;
     let mut image_no = 0;
     let mut media_types: Vec<&'static str> = Vec::new();
+    // Table ids as written, for slicer caches; and the caches to write.
+    let mut table_ids: HashMap<String, usize> = HashMap::new();
+    let mut caches: Vec<&SlicerXml> = Vec::new();
+    let mut slicer_no = 0;
     for (i, p) in parts.iter().enumerate() {
         if p.is_empty() {
             continue;
@@ -527,7 +592,37 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
         let mut rels = Vec::new();
         let mut tags = String::new();
 
-        if !p.charts.is_empty() || !p.pictures.is_empty() {
+        let mut ext = p.ext.clone();
+        if !p.slicers.is_empty() {
+            slicer_no += 1;
+            let items: String = p
+                .slicers
+                .iter()
+                .map(|x| {
+                    format!(
+                        r#"<slicer name="{}" cache="{}" caption="{}"{} rowHeight="241300"/>"#,
+                        esc(&x.name),
+                        esc(&x.cache),
+                        esc(&x.caption),
+                        if x.columns > 1 { format!(r#" columnCount="{}""#, x.columns) } else { String::new() }
+                    )
+                })
+                .collect();
+            put(
+                &mut map,
+                &mut order,
+                format!("xl/slicers/slicer{slicer_no}.xml"),
+                format!(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><slicers xmlns="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="x" xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main">{items}</slicers>"#).into_bytes(),
+            );
+            overrides.push_str(&format!(r#"<Override PartName="/xl/slicers/slicer{slicer_no}.xml" ContentType="application/vnd.ms-excel.slicer+xml"/>"#));
+            rels.push(format!(
+                r#"<Relationship Id="rIdCxSlicer" Type="http://schemas.microsoft.com/office/2007/relationships/slicer" Target="../slicers/slicer{slicer_no}.xml"/>"#
+            ));
+            ext.push_str(r#"<ext uri="{3A4CF648-6AED-40f4-86FF-DC5316D8AED3}" xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"><x14:slicerList xmlns:x15="http://schemas.microsoft.com/office/spreadsheetml/2010/11/main"><x14:slicer r:id="rIdCxSlicer"/></x14:slicerList></ext>"#);
+            caches.extend(p.slicers.iter());
+        }
+
+        if !p.charts.is_empty() || !p.pictures.is_empty() || !p.shapes.is_empty() || !p.slicers.is_empty() {
             drawing_no += 1;
             let mut anchors = String::new();
             let mut drels = Vec::new();
@@ -544,6 +639,34 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
                 if !media_types.contains(&pic.ext) {
                     media_types.push(pic.ext);
                 }
+            }
+            for (k, x) in p.slicers.iter().enumerate() {
+                let m = |tag: &str, k: &Marker| {
+                    format!(
+                        "<xdr:{tag}><xdr:col>{}</xdr:col><xdr:colOff>{}</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>{}</xdr:rowOff></xdr:{tag}>",
+                        k.col, k.col_off, k.row, k.row_off
+                    )
+                };
+                anchors.push_str(&format!(
+                    r#"<xdr:twoCellAnchor editAs="oneCell">{}{}<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice xmlns:sle15="http://schemas.microsoft.com/office/drawing/2012/slicer" Requires="sle15"><xdr:graphicFrame macro=""><xdr:nvGraphicFramePr><xdr:cNvPr id="{}" name="{}"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr><xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/drawing/2010/slicer"><sle:slicer xmlns:sle="http://schemas.microsoft.com/office/drawing/2010/slicer" name="{}"/></a:graphicData></a:graphic></xdr:graphicFrame></mc:Choice><mc:Fallback><xdr:sp macro="" textlink=""><xdr:nvSpPr><xdr:cNvPr id="0" name=""/><xdr:cNvSpPr><a:spLocks noTextEdit="1"/></xdr:cNvSpPr></xdr:nvSpPr><xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{}" cy="{}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:prstClr val="white"/></a:solidFill><a:ln w="1"><a:solidFill><a:prstClr val="green"/></a:solidFill></a:ln></xdr:spPr><xdr:txBody><a:bodyPr vertOverflow="clip" horzOverflow="clip"/><a:lstStyle/><a:p><a:r><a:rPr lang="ko-KR" sz="1100"/><a:t>이 도형은 테이블 슬라이서를 나타냅니다. 테이블 슬라이서는 Excel 2013 이상에서 지원됩니다.</a:t></a:r></a:p></xdr:txBody></xdr:sp></mc:Fallback></mc:AlternateContent><xdr:clientData/></xdr:twoCellAnchor>"#,
+                    m("from", &x.from),
+                    m("to", &x.to),
+                    3000 + k,
+                    esc(&x.name),
+                    esc(&x.name),
+                    x.cx,
+                    x.cy
+                ));
+            }
+            for (k, sh) in p.shapes.iter().enumerate() {
+                let m = |tag: &str, k: &Marker| {
+                    format!(
+                        "<xdr:{tag}><xdr:col>{}</xdr:col><xdr:colOff>{}</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>{}</xdr:rowOff></xdr:{tag}>",
+                        k.col, k.col_off, k.row, k.row_off
+                    )
+                };
+                let sp = sh.sp.replacen(r#"cNvPr id="0""#, &format!(r#"cNvPr id="{}""#, 2000 + k), 1);
+                anchors.push_str(&format!(r#"<xdr:twoCellAnchor>{}{}{sp}<xdr:clientData/></xdr:twoCellAnchor>"#, m("from", &sh.from), m("to", &sh.to)));
             }
             for (k, ch) in p.charts.iter().enumerate() {
                 chart_no += 1;
@@ -598,6 +721,41 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
         }
 
         let mut sheet_xml = patch_rows(&sheet_xml, &p.outline_rows, &p.hidden_rows);
+        // 데이터 표: the formula goes in the first result cell, before its value.
+        for (cell, f) in &p.data_tables {
+            let key = format!("<c r=\"{cell}\"");
+            let Some(i) = sheet_xml.find(&key) else { continue };
+            let Some(e) = sheet_xml[i..].find('>') else { continue };
+            let end = i + e;
+            if sheet_xml[..end].ends_with('/') {
+                sheet_xml.replace_range(end - 1..end + 1, &format!(">{f}</c>"));
+            } else {
+                sheet_xml.insert_str(end + 1, f);
+            }
+        }
+        if !p.scenarios.is_empty() {
+            // After sheetData and its protection, before autoFilter and the rest.
+            let from = sheet_xml.find("</sheetData>").or_else(|| sheet_xml.find("<sheetData/>")).unwrap_or(0);
+            let at = ["<autoFilter", "<sortState", "<dataConsolidate", "<customSheetViews", "<mergeCells", "<phoneticPr", "<conditionalFormatting", "<dataValidations", "<hyperlinks", "<printOptions", "<pageMargins", "<pageSetup", "<headerFooter", "<rowBreaks", "<colBreaks", "<drawing", "<legacyDrawing", "<tableParts", "<extLst", "</worksheet>"]
+                .iter()
+                .filter_map(|t| sheet_xml[from..].find(t).map(|i| from + i))
+                .min()
+                .unwrap_or(sheet_xml.len());
+            let at = match sheet_xml[from..at].rfind("</protectedRanges>") {
+                Some(k) => from + k + "</protectedRanges>".len(),
+                None => at,
+            };
+            sheet_xml.insert_str(at, &p.scenarios);
+        }
+        if !p.views.is_empty() {
+            let from = sheet_xml.find("</sheetData>").or_else(|| sheet_xml.find("<sheetData/>")).unwrap_or(0);
+            let at = ["<mergeCells", "<phoneticPr", "<conditionalFormatting", "<dataValidations", "<hyperlinks", "<printOptions", "<pageMargins", "<pageSetup", "<headerFooter", "<rowBreaks", "<colBreaks", "<drawing", "<legacyDrawing", "<tableParts", "<extLst", "</worksheet>"]
+                .iter()
+                .filter_map(|t| sheet_xml[from..].find(t).map(|i| from + i))
+                .min()
+                .unwrap_or(sheet_xml.len());
+            sheet_xml.insert_str(at, &p.views);
+        }
         sheet_xml = patch_cols(&sheet_xml, &p.cols, &p.outline_cols);
         if !p.outline_rows.is_empty() || !p.outline_cols.is_empty() {
             let lr = p.outline_rows.iter().map(|x| x.1).max().unwrap_or(0);
@@ -634,6 +792,7 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
         let mut table_tags = String::new();
         for (k, t) in p.tables.iter().enumerate() {
             table_no += 1;
+            table_ids.insert(t.table.name.to_lowercase(), table_no);
             put(&mut map, &mut order, format!("xl/tables/table{table_no}.xml"), table_xml(table_no, t).into_bytes());
             overrides.push_str(&format!(
                 r#"<Override PartName="/xl/tables/table{table_no}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml"/>"#
@@ -687,7 +846,17 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
             .rfind("<extLst")
             .or_else(|| sheet_xml.rfind("</worksheet>"))
             .unwrap_or(sheet_xml.len());
-        let new_sheet = format!("{}{}{}", &sheet_xml[..at], tags, &sheet_xml[at..]);
+        let mut new_sheet = format!("{}{}{}", &sheet_xml[..at], tags, &sheet_xml[at..]);
+        if !ext.is_empty() {
+            // The worksheet's own extLst is its last element.
+            let end = new_sheet.rfind("</worksheet>").unwrap_or(new_sheet.len());
+            if new_sheet[..end].trim_end().ends_with("</extLst>") {
+                let at = new_sheet[..end].rfind("</extLst>").unwrap_or(end);
+                new_sheet.insert_str(at, &ext);
+            } else {
+                new_sheet.insert_str(end, &format!("<extLst>{ext}</extLst>"));
+            }
+        }
         put(&mut map, &mut order, sheet_path, new_sheet.into_bytes());
 
         if rels.is_empty() {
@@ -747,6 +916,41 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
             ))
         })
         .collect();
+    // Slicer caches: one part each, named in the workbook, listed in its extLst.
+    let mut slicer_names = String::new();
+    let mut cache_refs = String::new();
+    let mut wb_rels_new = String::new();
+    for (k, x) in caches.iter().enumerate() {
+        let Some(table_id) = table_ids.get(&x.table.to_lowercase()) else { continue };
+        let n = k + 1;
+        put(
+            &mut map,
+            &mut order,
+            format!("xl/slicerCaches/slicerCache{n}.xml"),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><slicerCacheDefinition xmlns="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="x" xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="{}" sourceName="{}"><extLst><x:ext uri="{{2F2917AC-EB37-4324-AD4E-5DD8C200BD13}}" xmlns:x15="http://schemas.microsoft.com/office/spreadsheetml/2010/11/main"><x15:tableSlicerCache tableId="{table_id}" column="{}"/></x:ext></extLst></slicerCacheDefinition>"#,
+                esc(&x.cache),
+                esc(&x.column),
+                x.column_id
+            )
+            .into_bytes(),
+        );
+        overrides.push_str(&format!(r#"<Override PartName="/xl/slicerCaches/slicerCache{n}.xml" ContentType="application/vnd.ms-excel.slicerCache+xml"/>"#));
+        wb_rels_new.push_str(&format!(
+            r#"<Relationship Id="rIdCxSlicerCache{n}" Type="http://schemas.microsoft.com/office/2007/relationships/slicerCache" Target="slicerCaches/slicerCache{n}.xml"/>"#
+        ));
+        cache_refs.push_str(&format!(r#"<x14:slicerCache r:id="rIdCxSlicerCache{n}"/>"#));
+        slicer_names.push_str(&format!(r#"<definedName name="{}">#N/A</definedName>"#, esc(&x.cache)));
+    }
+    if !wb_rels_new.is_empty() {
+        if let Some(r) = map.get("xl/_rels/workbook.xml.rels") {
+            let mut r = String::from_utf8_lossy(r).to_string();
+            let at = r.rfind("</Relationships>").unwrap_or(r.len());
+            r.insert_str(at, &wb_rels_new);
+            put(&mut map, &mut order, "xl/_rels/workbook.xml.rels".into(), r.into_bytes());
+        }
+    }
+    let area_names = format!("{area_names}{slicer_names}");
     let title_names = format!("{title_names}{area_names}");
     let filter_names = format!("{filter_names}{title_names}");
     if !filter_names.is_empty() {
@@ -756,6 +960,47 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
                 wb.insert_str(at, &filter_names);
             } else if let Some(at) = wb.find("<calcPr").or_else(|| wb.find("</workbook>")) {
                 wb.insert_str(at, &format!("<definedNames>{filter_names}</definedNames>"));
+            }
+            put(&mut map, &mut order, "xl/workbook.xml".into(), wb.into_bytes());
+        }
+    }
+    if !book.protection.is_empty() || !book.views.is_empty() {
+        if let Some(wb) = map.get("xl/workbook.xml") {
+            let mut wb = String::from_utf8_lossy(wb).to_string();
+            if !book.protection.is_empty() {
+                // After fileVersion, fileSharing and workbookPr, before bookViews.
+                if let Some(at) = wb.find("<bookViews").or_else(|| wb.find("<sheets")) {
+                    wb.insert_str(at, &book.protection);
+                }
+            }
+            if !book.views.is_empty() {
+                // After calcPr and oleSize, before pivotCaches and the rest.
+                let from = wb.find("<sheets").unwrap_or(0);
+                let at = ["<pivotCaches", "<smartTagPr", "<smartTagTypes", "<webPublishing", "<fileRecoveryPr", "<webPublishObjects", "<extLst", "</workbook>"]
+                    .iter()
+                    .filter_map(|t| wb[from..].find(t).map(|i| from + i))
+                    .min()
+                    .unwrap_or(wb.len());
+                wb.insert_str(at, &book.views);
+            }
+            put(&mut map, &mut order, "xl/workbook.xml".into(), wb.into_bytes());
+        }
+    }
+    if !cache_refs.is_empty() {
+        if let Some(wb) = map.get("xl/workbook.xml") {
+            let mut wb = String::from_utf8_lossy(wb).to_string();
+            let ext = format!(
+                r#"<ext uri="{{46BE6895-7355-4a93-B00E-2C351335B9C9}}" xmlns:x15="http://schemas.microsoft.com/office/spreadsheetml/2010/11/main"><x15:slicerCaches xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">{cache_refs}</x15:slicerCaches></ext>"#
+            );
+            let end = wb.rfind("</workbook>").unwrap_or(wb.len());
+            if wb[..end].trim_end().ends_with("</extLst>") {
+                let at = wb[..end].rfind("</extLst>").unwrap_or(end);
+                wb.insert_str(at, &ext);
+            } else {
+                wb.insert_str(end, &format!("<extLst>{ext}</extLst>"));
+            }
+            if !wb.contains("xmlns:r=") {
+                wb = wb.replacen("<workbook ", r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" "#, 1);
             }
             put(&mut map, &mut order, "xl/workbook.xml".into(), wb.into_bytes());
         }
@@ -1144,6 +1389,150 @@ fn read_part_bytes<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, name: 
     Some(v)
 }
 
+/// Shapes and text boxes of xlsx drawings: (sheet, from, to, size in EMU, shape).
+pub(crate) fn read_shapes(xlsx: &[u8]) -> Vec<(usize, Marker, Option<Marker>, Option<(i64, i64)>, crate::shapes::ImportedShape)> {
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(xlsx)) else { return Vec::new() };
+    if !zip.file_names().any(|n| n.is_ok_and(|n| n.starts_with("xl/drawings/drawing"))) {
+        return Vec::new();
+    }
+    let Some(wb_xml) = read_part(&mut zip, "xl/workbook.xml") else { return Vec::new() };
+    let wb_rels = rels_of(&mut zip, "xl/workbook.xml");
+    let Ok(wb_doc) = roxmltree::Document::parse(&wb_xml) else { return Vec::new() };
+    let sheet_parts: Vec<String> = wb_doc
+        .descendants()
+        .filter(|n| n.has_tag_name("sheet"))
+        .filter_map(|n| n.attribute((R_NS, "id")).and_then(|id| wb_rels.get(id)).map(|(_, t)| t.clone()))
+        .collect();
+    let mut out = Vec::new();
+    for (si, sheet_part) in sheet_parts.iter().enumerate() {
+        let rels = rels_of(&mut zip, sheet_part);
+        for (kind, drawing_part) in rels.values() {
+            if kind != "drawing" {
+                continue;
+            }
+            let Some(dxml) = read_part(&mut zip, drawing_part) else { continue };
+            let Ok(ddoc) = roxmltree::Document::parse(&dxml) else { continue };
+            for anchor in ddoc
+                .root_element()
+                .children()
+                .filter(|n| n.has_tag_name("twoCellAnchor") || n.has_tag_name("oneCellAnchor") || n.has_tag_name("absoluteAnchor"))
+            {
+                let Some(sp) = anchor.children().find(|n| n.has_tag_name("sp") || n.has_tag_name("cxnSp")) else { continue };
+                let Some(shape) = crate::shapes::read_sp(sp) else { continue };
+                let Some(from) = anchor.children().find(|n| n.has_tag_name("from")).map(marker) else { continue };
+                let to = anchor.children().find(|n| n.has_tag_name("to")).map(marker);
+                let size = |e: roxmltree::Node| {
+                    let g = |a: &str| e.attribute(a).and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                    (g("cx"), g("cy"))
+                };
+                let ext = anchor
+                    .children()
+                    .find(|n| n.has_tag_name("ext"))
+                    .map(size)
+                    .or_else(|| sp.descendants().find(|n| n.has_tag_name("xfrm")).and_then(|x| x.children().find(|n| n.has_tag_name("ext"))).map(size));
+                out.push((si, from, to, ext, shape));
+            }
+        }
+    }
+    out
+}
+
+/// A table slicer of an xlsx file.
+pub(crate) struct ImportedSlicer {
+    pub cache: String,
+    pub caption: String,
+    pub table: String,
+    pub column: String,
+    pub columns: u32,
+    pub from: Marker,
+    pub to: Marker,
+    pub cx: i64,
+    pub cy: i64,
+}
+
+pub(crate) fn read_slicers(xlsx: &[u8]) -> Vec<(usize, ImportedSlicer)> {
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(xlsx)) else { return Vec::new() };
+    if !zip.file_names().any(|n| n.is_ok_and(|n| n.starts_with("xl/slicerCaches/"))) {
+        return Vec::new();
+    }
+    let Some(wb_xml) = read_part(&mut zip, "xl/workbook.xml") else { return Vec::new() };
+    let wb_rels = rels_of(&mut zip, "xl/workbook.xml");
+    let Ok(wb_doc) = roxmltree::Document::parse(&wb_xml) else { return Vec::new() };
+    // Tables by id, from every table part.
+    let names: Vec<String> = zip.file_names().filter_map(|n| n.ok()).filter(|n| n.starts_with("xl/tables/") && n.ends_with(".xml")).map(|n| n.to_string()).collect();
+    let mut tables: HashMap<String, (String, HashMap<String, String>)> = HashMap::new();
+    for n in names {
+        let Some(x) = read_part(&mut zip, &n) else { continue };
+        let Ok(d) = roxmltree::Document::parse(&x) else { continue };
+        let r = d.root_element();
+        let cols = r.descendants().filter(|c| c.has_tag_name("tableColumn")).filter_map(|c| Some((c.attribute("id")?.to_string(), c.attribute("name")?.to_string()))).collect();
+        if let (Some(id), Some(name)) = (r.attribute("id"), r.attribute("name").or(r.attribute("displayName"))) {
+            tables.insert(id.to_string(), (name.to_string(), cols));
+        }
+    }
+    // Caches by name → (table, column).
+    let mut caches: HashMap<String, (String, String)> = HashMap::new();
+    for (kind, part) in wb_rels.values() {
+        if kind != "slicerCache" {
+            continue;
+        }
+        let Some(x) = read_part(&mut zip, part) else { continue };
+        let Ok(d) = roxmltree::Document::parse(&x) else { continue };
+        let r = d.root_element();
+        let Some(tc) = r.descendants().find(|n| n.has_tag_name("tableSlicerCache")) else { continue };
+        let (Some(name), Some(tid), Some(cid)) = (r.attribute("name"), tc.attribute("tableId"), tc.attribute("column")) else { continue };
+        let Some((table, cols)) = tables.get(tid) else { continue };
+        let Some(column) = cols.get(cid) else { continue };
+        caches.insert(name.to_string(), (table.clone(), column.clone()));
+    }
+    let sheet_parts: Vec<String> = wb_doc
+        .descendants()
+        .filter(|n| n.has_tag_name("sheet"))
+        .filter_map(|n| n.attribute((R_NS, "id")).and_then(|id| wb_rels.get(id)).map(|(_, t)| t.clone()))
+        .collect();
+    let mut out = Vec::new();
+    for (si, sheet_part) in sheet_parts.iter().enumerate() {
+        let rels = rels_of(&mut zip, sheet_part);
+        // slicer name → (cache, caption, columns)
+        let mut slicers: HashMap<String, (String, String, u32)> = HashMap::new();
+        for (kind, part) in rels.values() {
+            if kind != "slicer" {
+                continue;
+            }
+            let Some(x) = read_part(&mut zip, part) else { continue };
+            let Ok(d) = roxmltree::Document::parse(&x) else { continue };
+            for s in d.descendants().filter(|n| n.has_tag_name("slicer")) {
+                let (Some(name), Some(cache)) = (s.attribute("name"), s.attribute("cache")) else { continue };
+                let cols = s.attribute("columnCount").and_then(|c| c.parse().ok()).unwrap_or(1);
+                slicers.insert(name.to_string(), (cache.to_string(), s.attribute("caption").unwrap_or("").to_string(), cols));
+            }
+        }
+        if slicers.is_empty() {
+            continue;
+        }
+        for (kind, drawing_part) in rels.values() {
+            if kind != "drawing" {
+                continue;
+            }
+            let Some(dxml) = read_part(&mut zip, drawing_part) else { continue };
+            let Ok(ddoc) = roxmltree::Document::parse(&dxml) else { continue };
+            for anchor in ddoc.root_element().children().filter(|n| n.has_tag_name("twoCellAnchor")) {
+                let Some(name) = anchor.descendants().find(|n| n.has_tag_name("slicer") && n.attribute("name").is_some()).and_then(|n| n.attribute("name")) else { continue };
+                let Some((cache, caption, columns)) = slicers.get(name) else { continue };
+                let Some((table, column)) = caches.get(cache) else { continue };
+                let (Some(from), Some(to)) = (anchor.children().find(|n| n.has_tag_name("from")).map(marker), anchor.children().find(|n| n.has_tag_name("to")).map(marker)) else { continue };
+                let ext = anchor.descendants().find(|n| n.has_tag_name("ext") && n.attribute("cx").is_some_and(|v| v != "0"));
+                let g = |a: &str| ext.and_then(|e| e.attribute(a)).and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                out.push((
+                    si,
+                    ImportedSlicer { cache: cache.clone(), caption: caption.clone(), table: table.clone(), column: column.clone(), columns: *columns, from, to, cx: g("cx"), cy: g("cy") },
+                ));
+            }
+        }
+    }
+    out
+}
+
 pub fn read_pictures(xlsx: &[u8]) -> Vec<ImportedPicture> {
     let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(xlsx)) else { return Vec::new() };
     if !zip.file_names().any(|n| n.is_ok_and(|n| n.starts_with("xl/media/"))) {
@@ -1529,7 +1918,7 @@ fn parse_cell(s: &str) -> Option<(i32, i32)> {
     Some((digits.parse().ok()?, col))
 }
 
-fn parse_auto_filter(af: roxmltree::Node, si: u32) -> Option<AutoFilter> {
+pub(crate) fn parse_auto_filter(af: roxmltree::Node, si: u32) -> Option<AutoFilter> {
             let (_, r0, c0, r1, c1) = crate::extras::parse_range(af.attribute("ref")?)?;
             let mut columns = Vec::new();
             for fc in af.children().filter(|n| n.has_tag_name("filterColumn")) {
@@ -1645,6 +2034,50 @@ pub fn read_table_filter(xlsx: &[u8], name: &str) -> Option<AutoFilter> {
 }
 
 /// AutoFilter and data validation rules of every sheet, read from the sheet XML.
+/// The whole worksheet XML of the sheets whose XML mentions one of `markers`.
+pub(crate) fn raw_sheet_xmls(xlsx: &[u8], markers: &[&str]) -> Vec<(u32, String)> {
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(xlsx)) else { return Vec::new() };
+    let Some(wb_xml) = read_part(&mut zip, "xl/workbook.xml") else { return Vec::new() };
+    let wb_rels = rels_of(&mut zip, "xl/workbook.xml");
+    let Ok(wb_doc) = roxmltree::Document::parse(&wb_xml) else { return Vec::new() };
+    let parts: Vec<String> = wb_doc
+        .descendants()
+        .filter(|n| n.has_tag_name("sheet"))
+        .filter_map(|n| n.attribute((R_NS, "id")).and_then(|id| wb_rels.get(id)).map(|(_, t)| t.clone()))
+        .collect();
+    let mut out = Vec::new();
+    for (si, part) in parts.iter().enumerate() {
+        let Some(xml) = read_part(&mut zip, part) else { continue };
+        if markers.iter().any(|m| xml.contains(m)) {
+            out.push((si as u32, xml));
+        }
+    }
+    out
+}
+
+/// The worksheet XML (without its cells) of the sheets whose XML mentions `marker`.
+pub(crate) fn sheet_xmls(xlsx: &[u8], marker: &str) -> Vec<(u32, String)> {
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(xlsx)) else { return Vec::new() };
+    let Some(wb_xml) = read_part(&mut zip, "xl/workbook.xml") else { return Vec::new() };
+    let wb_rels = rels_of(&mut zip, "xl/workbook.xml");
+    let Ok(wb_doc) = roxmltree::Document::parse(&wb_xml) else { return Vec::new() };
+    let parts: Vec<String> = wb_doc
+        .descendants()
+        .filter(|n| n.has_tag_name("sheet"))
+        .filter_map(|n| n.attribute((R_NS, "id")).and_then(|id| wb_rels.get(id)).map(|(_, t)| t.clone()))
+        .collect();
+    let mut out = Vec::new();
+    for (si, part) in parts.iter().enumerate() {
+        let Some(xml) = read_part(&mut zip, part) else { continue };
+        if !xml.contains(marker) {
+            continue;
+        }
+        let (rest, _) = split_sheet_data(&xml);
+        out.push((si as u32, rest.into_owned()));
+    }
+    out
+}
+
 pub fn read_sheet_rules(xlsx: &[u8]) -> Vec<(usize, Option<AutoFilter>, Vec<Validation>)> {
     let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(xlsx)) else { return Vec::new() };
     let Some(wb_xml) = read_part(&mut zip, "xl/workbook.xml") else { return Vec::new() };

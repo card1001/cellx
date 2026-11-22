@@ -76,6 +76,86 @@ export interface EvalStep {
   value: string;
 }
 
+export type ShapeKind =
+  | "rect"
+  | "roundRect"
+  | "ellipse"
+  | "triangle"
+  | "diamond"
+  | "rightArrow"
+  | "pentagon"
+  | "line"
+  | "arrow"
+  | "textBox";
+
+export interface Shape {
+  id: number;
+  sheet: number;
+  name: string;
+  kind: ShapeKind;
+  anchor: ChartAnchor;
+  fill: string | null;
+  line: string | null;
+  line_width: number;
+  text: string;
+  text_color: string;
+  font_size: number;
+  bold: boolean;
+  align: "l" | "ctr" | "r";
+  valign: "t" | "ctr" | "b";
+  flip_v: boolean;
+  flip_h: boolean;
+}
+
+export type SparkKind = "line" | "column" | "winLoss";
+
+export interface SparklineGroup {
+  id: number;
+  sheet: number;
+  kind: SparkKind;
+  color: string;
+  negative_color: string;
+  markers: boolean;
+  high_low: boolean;
+  items: { row: number; col: number; range: string }[];
+}
+
+export interface SparklineView {
+  group: number;
+  row: number;
+  col: number;
+  kind: SparkKind;
+  color: string;
+  negative_color: string;
+  markers: boolean;
+  high_low: boolean;
+  values: (number | null)[];
+}
+
+export interface Slicer {
+  id: number;
+  sheet: number;
+  name: string;
+  caption: string;
+  table: string;
+  column: string;
+  anchor: ChartAnchor;
+  columns: number;
+}
+
+export interface SlicerView {
+  slicer: Slicer;
+  items: { text: string; selected: boolean; available: boolean }[];
+  filtered: boolean;
+}
+
+export interface Scenario {
+  sheet: number;
+  name: string;
+  comment: string;
+  cells: [number, number, string][];
+}
+
 export interface Picture {
   id: number;
   sheet: number;
@@ -409,6 +489,8 @@ export interface BookInfo {
   can_redo: boolean;
   font: [string, number];
   protected: boolean[];
+  book_protected: boolean;
+  book_password: boolean;
 }
 
 export interface Range {
@@ -438,6 +520,36 @@ export const api = {
     invoke<Viewport>("viewport", { sheet, row0, col0, row1, col1, formulas }),
   tracePrecedents: (sheet: number, row: number, col: number) => invoke<TraceArea[]>("trace_precedents", { sheet, row, col }),
   traceDependents: (sheet: number, row: number, col: number) => invoke<TraceArea[]>("trace_dependents", { sheet, row, col }),
+  shapes: (sheet: number) => invoke<Shape[]>("shapes", { sheet }),
+  addShape: (sheet: number, row: number, col: number, kind: ShapeKind) => invoke<Shape>("add_shape", { sheet, row, col, kind }),
+  updateShape: (shape: Shape) => invoke<void>("update_shape", { shape }),
+  deleteShape: (id: number) => invoke<void>("delete_shape", { id }),
+  sparklines: (sheet: number) => invoke<SparklineView[]>("sparklines", { sheet }),
+  sparklineGroups: (sheet: number) => invoke<SparklineGroup[]>("sparkline_groups", { sheet }),
+  addSparklines: (sheet: number, kind: SparkKind, data: string, location: Range) =>
+    invoke<SparklineGroup>("add_sparklines", { sheet, kind, data, location }),
+  updateSparklineGroup: (group: SparklineGroup) => invoke<void>("update_sparkline_group", { group }),
+  deleteSparklines: (sheet: number, range: Range) => invoke<void>("delete_sparklines", { sheet, range }),
+  slicers: (sheet: number) => invoke<SlicerView[]>("slicers", { sheet }),
+  addSlicer: (table: string, column: string, sheet: number) => invoke<Slicer>("add_slicer", { table, column, sheet }),
+  updateSlicer: (slicer: Slicer) => invoke<void>("update_slicer", { slicer }),
+  deleteSlicer: (id: number) => invoke<void>("delete_slicer", { id }),
+  slicerSelect: (id: number, values: string[] | null) => invoke<RecalcStats>("slicer_select", { id, values }),
+  addDataTable: (sheet: number, range: Range, rowInput: string | null, colInput: string | null) =>
+    invoke<RecalcStats>("add_data_table", { sheet, range, rowInput, colInput }),
+  deleteDataTable: (sheet: number, row: number, col: number) => invoke<RecalcStats>("delete_data_table", { sheet, row, col }),
+  dataTableAt: (sheet: number, row: number, col: number) => invoke<boolean>("data_table_at", { sheet, row, col }),
+  scenarios: (sheet: number) => invoke<Scenario[]>("scenarios", { sheet }),
+  setScenario: (scenario: Scenario) => invoke<void>("set_scenario", { scenario }),
+  deleteScenario: (sheet: number, name: string) => invoke<void>("delete_scenario", { sheet, name }),
+  showScenario: (sheet: number, name: string) => invoke<RecalcStats>("show_scenario", { sheet, name }),
+  scenarioSummary: (sheet: number, results: [number, number][]) => invoke<number>("scenario_summary", { sheet, results }),
+  protectBook: (password: string | null) => invoke<void>("protect_book", { password }),
+  unprotectBook: (password: string | null) => invoke<void>("unprotect_book", { password }),
+  customViews: () => invoke<{ name: string; active_sheet: number }[]>("custom_views"),
+  addCustomView: (name: string, active: number) => invoke<unknown>("add_custom_view", { name, active }),
+  deleteCustomView: (name: string) => invoke<void>("delete_custom_view", { name }),
+  showCustomView: (name: string) => invoke<number>("show_custom_view", { name }),
   formulaSteps: (sheet: number, row: number, col: number) => invoke<EvalStep[]>("formula_steps", { sheet, row, col }),
   cellDetail: (sheet: number, row: number, col: number) => invoke<CellDetail>("cell_detail", { sheet, row, col }),
   selectionStats: (sheet: number, range: Range) => invoke<SelectionStats>("selection_stats", { sheet, range }),

@@ -188,7 +188,7 @@ fn sort_rank(v: &Scalar) -> u8 {
     }
 }
 
-fn compare_values(a: &Scalar, b: &Scalar, descending: bool) -> Ordering {
+pub(crate) fn compare_values(a: &Scalar, b: &Scalar, descending: bool) -> Ordering {
     // Blanks stay at the bottom in both directions.
     match (a, b) {
         (Scalar::Empty, Scalar::Empty) => return Ordering::Equal,
@@ -291,7 +291,7 @@ fn condition_holds(c: &FilterCondition, shown: &str, value: &Scalar) -> bool {
     }
 }
 
-fn column_passes(f: &ColumnFilter, shown: &str, value: &Scalar) -> bool {
+pub(crate) fn column_passes(f: &ColumnFilter, shown: &str, value: &Scalar) -> bool {
     if let Some(vals) = &f.values {
         let key = shown.trim();
         if !vals.iter().any(|v| v.trim().eq_ignore_ascii_case(key) || v.trim() == key) {
