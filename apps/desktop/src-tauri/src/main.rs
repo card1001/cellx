@@ -2,8 +2,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod recovery;
 
 use std::sync::Mutex;
+
+use tauri::Manager;
 
 fn main() {
     // A file passed on the command line (double-click on a .cellx/.xlsx file) opens at start.
@@ -19,8 +22,22 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(commands::AppState(Mutex::new(book)))
+        .setup(|app| {
+            // 자동 복구 files live with the app's local data.
+            let dir = app
+                .path()
+                .app_local_data_dir()
+                .unwrap_or_else(|_| std::env::temp_dir().join("CellX"))
+                .join("recovery");
+            app.manage(recovery::RecoveryState(Mutex::new(recovery::Recovery::new(dir))));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::book_info,
+            recovery::autosave,
+            recovery::recovery_list,
+            recovery::recovery_open,
+            recovery::recovery_discard,
             commands::new_book,
             commands::open_file,
             commands::save_file,
@@ -68,6 +85,19 @@ fn main() {
             commands::memos,
             commands::set_memo,
             commands::clear_memos,
+            commands::move_sheet,
+            commands::copy_sheet,
+            commands::set_sheet_color,
+            commands::set_sheet_hidden,
+            commands::pictures,
+            commands::picture_data,
+            commands::add_picture_file,
+            commands::add_picture_data,
+            commands::update_picture,
+            commands::delete_picture,
+            commands::trace_precedents,
+            commands::trace_dependents,
+            commands::formula_steps,
             commands::charts,
             commands::add_chart,
             commands::update_chart,
@@ -132,6 +162,16 @@ fn main() {
             commands::remove_page_break,
             commands::reset_page_breaks,
         ])
-        .run(tauri::generate_context!())
-        .expect("CellX를 실행하지 못했습니다");
+        .build(tauri::generate_context!())
+        .expect("CellX를 실행하지 못했습니다")
+        .run(|app, event| {
+            // A clean exit leaves no recovery file behind.
+            if let tauri::RunEvent::Exit = event {
+                if let Some(r) = app.try_state::<recovery::RecoveryState>() {
+                    if let Ok(mut r) = r.0.lock() {
+                        r.finish();
+                    }
+                }
+            }
+        });
 }

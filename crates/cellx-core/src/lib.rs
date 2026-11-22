@@ -14,10 +14,13 @@ pub mod error;
 pub mod extras;
 pub mod objects;
 pub mod outline;
+pub mod audit;
+pub mod pictures;
 pub mod ooxml;
 pub mod project;
 pub mod refs;
 pub mod sheetopts;
+pub mod sheets;
 pub mod value;
 pub mod workbook;
 

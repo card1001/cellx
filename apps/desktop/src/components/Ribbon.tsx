@@ -61,6 +61,7 @@ export interface RibbonActions {
   clearCf(scope: "selection" | "sheet"): void;
   manageCf(): void;
   insertChart(kind: ChartKind): void;
+  insertPicture(): void;
   insertPivot(): void;
   refreshAll(): void;
   newMemo(): void;
@@ -82,6 +83,11 @@ export interface RibbonActions {
   goToDialog(): void;
   hyperlink(): void;
   nameManager(): void;
+  tracePrecedents(): void;
+  traceDependents(): void;
+  removeArrows(): void;
+  toggleShowFormulas(): void;
+  evaluateFormula(): void;
   defineName(): void;
   print(): void;
   group(rows: boolean): void;
@@ -99,6 +105,8 @@ export interface RibbonActions {
   printGrid(v: boolean): void;
   printHeadings(v: boolean): void;
   printTitles(): void;
+  printArea(set: boolean): void;
+  headerFooter(): void;
   pageBreak(kind: "insert" | "remove" | "reset"): void;
   togglePageBreaks(): void;
 }
@@ -119,6 +127,8 @@ interface Props {
   protectedSheet: boolean;
   pageSetup: PageSetup | null;
   showPageBreaks: boolean;
+  showFormulas: boolean;
+  hasArrows: boolean;
 }
 
 const TABS = ["파일", "홈", "삽입", "페이지 레이아웃", "수식", "데이터", "검토", "보기"] as const;
@@ -597,6 +607,11 @@ export function Ribbon(props: Props) {
                 <span className="ic">▤</span>표
               </Btn>
             </Group>
+            <Group label="일러스트레이션">
+              <Btn big title="그림 삽입 (PNG, JPEG, GIF, BMP). 스크린샷은 Ctrl+V로 붙여넣을 수 있습니다." onClick={a.insertPicture}>
+                <span className="ic">🖼</span>그림
+              </Btn>
+            </Group>
             <Group label="차트">
               {CHART_KINDS.map((k) => (
                 <Btn big key={k.kind} title={`${k.label} 차트 삽입`} onClick={() => a.insertChart(k.kind)}>
@@ -642,8 +657,19 @@ export function Ribbon(props: Props) {
                   { label: "페이지 나누기 모두 원래대로", onClick: () => a.pageBreak("reset") },
                 ]}
               />
+              <Dropdown
+                label={<span className="dd-big"><span className="ic">▣</span>인쇄 영역</span>}
+                className="big-dd"
+                items={[
+                  { label: "인쇄 영역 설정", onClick: () => a.printArea(true) },
+                  { label: "인쇄 영역 해제", disabled: !props.pageSetup?.print_area, onClick: () => a.printArea(false) },
+                ]}
+              />
               <Btn big title="모든 페이지에 반복할 행" onClick={a.printTitles}>
                 <span className="ic">☰</span>인쇄 제목
+              </Btn>
+              <Btn big title="머리글과 바닥글 (페이지 번호, 날짜, 시트 이름…)" onClick={a.headerFooter}>
+                <span className="ic">▤</span>머리글/바닥글
               </Btn>
             </Group>
             <Group label="크기 조정">
@@ -748,6 +774,27 @@ export function Ribbon(props: Props) {
               </Btn>
               <Btn big title="선택 영역에 이름을 붙입니다" onClick={a.defineName}>
                 <span className="ic">✎</span>이름 정의
+              </Btn>
+            </Group>
+            <Group label="수식 분석">
+              <div className="col">
+                <Btn title="현재 셀의 값에 영향을 주는 셀을 화살표로 표시합니다" onClick={a.tracePrecedents}>
+                  ⇥ 참조되는 셀 추적
+                </Btn>
+                <Btn title="현재 셀의 값을 사용하는 셀을 화살표로 표시합니다" onClick={a.traceDependents}>
+                  ⇤ 참조하는 셀 추적
+                </Btn>
+              </div>
+              <div className="col">
+                <Btn title="추적 화살표를 모두 지웁니다" disabled={!props.hasArrows} onClick={a.removeArrows}>
+                  ✕ 연결선 제거
+                </Btn>
+                <Btn title="각 셀에 결과 대신 수식을 표시합니다 (Ctrl+`)" on={props.showFormulas} onClick={a.toggleShowFormulas}>
+                  ƒx 수식 표시
+                </Btn>
+              </div>
+              <Btn big title="수식을 단계별로 계산합니다" onClick={a.evaluateFormula}>
+                <span className="ic">ⓕ</span>수식 계산
               </Btn>
             </Group>
           </>

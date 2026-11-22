@@ -546,12 +546,27 @@ fn stringify(
             false,
         ),
         ReferenceKind {
+            structured: Some(sr),
+            ..
+        }
+        | RangeKind {
+            structured: Some(sr),
+            ..
+        } => {
+            if export_to_excel {
+                sr.file_text()
+            } else {
+                sr.text(false)
+            }
+        }
+        ReferenceKind {
             sheet_name,
             sheet_index,
             column,
             row,
             absolute_row,
             absolute_column,
+            structured: None,
         } => stringify_reference(
             context,
             displace_data,
@@ -577,6 +592,7 @@ fn stringify(
             absolute_column2,
             row2,
             column2,
+            structured: None,
         } => {
             // Note that open ranges SUM(A:A) or SUM(1:1) will be treated as normal ranges in the R1C1 (internal) representation
             // A:A will be R1C[0]:R1048576C[0]

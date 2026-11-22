@@ -110,9 +110,18 @@ pub struct Lexer<'a> {
     mode: LexerMode,
     locale: &'a Locale,
     language: &'a Language,
+    /// CellX: the table the formula is in, for `[@금액]` written without the
+    /// table's name.
+    implicit_table: Option<String>,
+    in_structured: bool,
 }
 
 impl<'a> Lexer<'a> {
+    /// CellX: the table `[Column]` without a table name refers to.
+    pub fn set_implicit_table(&mut self, table: Option<String>) {
+        self.implicit_table = table;
+    }
+
     /// Creates a new `Lexer` that returns the tokens of a formula.
     pub fn new(
         formula: &str,
@@ -130,6 +139,8 @@ impl<'a> Lexer<'a> {
             mode,
             locale,
             language,
+            implicit_table: None,
+            in_structured: false,
         }
     }
 
@@ -221,7 +232,17 @@ impl<'a> Lexer<'a> {
                     '=' => TokenType::Compare(OpCompare::Equal),
                     '{' => TokenType::LeftBrace,
                     '}' => TokenType::RightBrace,
-                    '[' => TokenType::LeftBracket,
+                    '[' => {
+                        if let (Some(table), false) = (self.implicit_table.clone(), self.in_structured) {
+                            let pos = self.position;
+                            self.position -= 1;
+                            if let Ok(token) = self.consume_structured_reference(&table) {
+                                return token;
+                            }
+                            self.position = pos;
+                        }
+                        TokenType::LeftBracket
+                    }
                     ']' => TokenType::RightBracket,
                     ':' => TokenType::Colon,
                     ';' => TokenType::Semicolon,
@@ -470,6 +491,14 @@ impl<'a> Lexer<'a> {
                                         }
                                         self.position = pos;
 
+                                        // CellX: structured references are kept as
+                                        // written in the R1C1 text too.
+                                        if self.peek_char() == Some('[') && utils::is_valid_identifier(&name) {
+                                            if let Ok(r) = self.consume_structured_reference(&name) {
+                                                return r;
+                                            }
+                                            self.position = pos;
+                                        }
                                         if is_valid_r1c1_identifier(&name, self.peek_char()) {
                                             return TokenType::Ident(name);
                                         } else {

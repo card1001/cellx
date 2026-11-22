@@ -114,7 +114,17 @@ fn to_string_moved(
         BooleanKind(value) => format!("{value}").to_uppercase(),
         NumberKind(number) => format_number_locale(*number, locale),
         StringKind(value) => format!("\"{value}\""),
+        // CellX: a structured reference names the table, wherever it goes.
         ReferenceKind {
+            structured: Some(sr),
+            ..
+        }
+        | RangeKind {
+            structured: Some(sr),
+            ..
+        } => sr.text(false),
+        ReferenceKind {
+            structured: None,
             sheet_name,
             sheet_index,
             absolute_row,
@@ -178,6 +188,7 @@ fn to_string_moved(
             )
         }
         RangeKind {
+            structured: None,
             sheet_name,
             sheet_index,
             absolute_row1,

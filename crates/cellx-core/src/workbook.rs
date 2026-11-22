@@ -251,6 +251,7 @@ pub enum Direction {
 pub(crate) struct Side {
     bridges: BridgeMap,
     charts: Vec<Chart>,
+    pictures: Vec<crate::pictures::Picture>,
     pivots: Vec<PivotDef>,
     comments: Vec<Vec<Comment>>,
     filters: Vec<AutoFilter>,
@@ -324,6 +325,7 @@ pub struct Workbook {
     redo: Vec<Action>,
     pub(crate) clipboard: Option<StoredClipboard>,
     pub(crate) charts: Vec<Chart>,
+    pub(crate) pictures: Vec<crate::pictures::Picture>,
     pub(crate) pivots: Vec<PivotDef>,
     pub(crate) filters: Vec<AutoFilter>,
     pub(crate) validations: Vec<Validation>,
@@ -379,6 +381,7 @@ impl Workbook {
             redo: Vec::new(),
             clipboard: None,
             charts: Vec::new(),
+            pictures: Vec::new(),
             pivots: Vec::new(),
             filters: Vec::new(),
             validations: Vec::new(),
@@ -444,6 +447,7 @@ impl Workbook {
         Side {
             bridges: self.bridges.clone(),
             charts: self.charts.clone(),
+            pictures: self.pictures.clone(),
             pivots: self.pivots.clone(),
             comments: self.model().workbook.worksheets.iter().map(|w| w.comments.clone()).collect(),
             filters: self.filters.clone(),
@@ -465,6 +469,7 @@ impl Workbook {
     fn restore_side(&mut self, side: &Side) {
         self.bridges = side.bridges.clone();
         self.charts = side.charts.clone();
+        self.pictures = side.pictures.clone();
         self.pivots = side.pivots.clone();
         self.filters = side.filters.clone();
         self.validations = side.validations.clone();
@@ -475,8 +480,20 @@ impl Workbook {
         self.page_setups = side.page_setups.clone();
         let tables: HashMap<String, ironcalc_base::types::Table> = side.tables.iter().cloned().collect();
         if self.model().workbook.tables != tables {
-            self.model_mut().workbook.tables = tables;
-            self.model_mut().refresh_parser_tables();
+            let old = std::mem::replace(&mut self.model_mut().workbook.tables, tables);
+            // A table that comes back under another name (undoing a rename):
+            // its formulas follow it back.
+            let first = |t: &ironcalc_base::types::Table| (t.sheet_name.clone(), t.reference.split(':').next().unwrap_or_default().to_string());
+            let now = &self.model().workbook.tables;
+            let renames: Vec<(String, String)> = now
+                .values()
+                .filter(|t| !old.contains_key(&t.name))
+                .filter_map(|t| old.values().find(|o| !now.contains_key(&o.name) && first(o) == first(t)).map(|o| (o.name.clone(), t.name.clone())))
+                .collect();
+            for (from, to) in &renames {
+                self.model_mut().restructure(Some((from, to)), None);
+            }
+            self.model_mut().restructure(None, None);
         }
         // Comments do not change values: no need to mark the model as changed untracked.
         for (ws, c) in self.um.get_model_mut().workbook.worksheets.iter_mut().zip(side.comments.iter()) {
@@ -673,6 +690,7 @@ impl Workbook {
             return Ok(RecalcStats::default());
         }
         let start = self.begin();
+        self.grow_table_for(sheet, row, col, input);
         self.write_input(sheet, row, col, input, true)?;
         self.commit(start)
     }
@@ -681,6 +699,7 @@ impl Workbook {
     pub fn set_inputs(&mut self, sheet: u32, cells: &[(i32, i32, String)]) -> Result<RecalcStats> {
         let start = self.begin();
         for (row, col, input) in cells {
+            self.grow_table_for(sheet, *row, *col, input);
             self.write_input(sheet, *row, *col, input, true)?;
         }
         self.commit(start)

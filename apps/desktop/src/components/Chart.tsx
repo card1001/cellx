@@ -357,7 +357,7 @@ export function ChartLayer(props: {
 }
 
 /** After a move, re-anchor the chart to the cell under its top-left corner (Excel's model). */
-function normalizeAnchor(c: Chart, geo: OverlayGeometry): Chart {
+export function normalizeAnchor<T extends { anchor: Chart["anchor"] }>(c: T, geo: OverlayGeometry): T {
   const a = { ...c.anchor };
   const z = geo.zoom;
   // Walk left/up when the offset went negative, right/down while it exceeds the cell.

@@ -25,3 +25,5 @@ CellX에서 바꾼 부분:
 17. 행·열 숨김(`SetRowHidden`, `SetColumnHidden`)은 증분 재계산 대상, SUBTOTAL은 휘발성.
 18. `Diff::SetCells`·`UserModel::set_cells`: 셀을 통째로(내용·서식·해석된 수식) 바꾸는 실행 취소 가능한 변경 — 정렬·중복 제거.
 19. 열 삽입·삭제도 패치 14와 같은 방식(`row_insert`의 `columns`), 열 삭제 실행 취소 때 #REF! 수식 복원(`Diff::DeleteColumns::refs`).
+20. 수식 분석: `audit` 모듈 — `Model::cell_precedents`(참조되는 셀), `cell_dependents`(참조하는 셀), `formula_steps`(수식 계산: IF·IFERROR·IFNA는 선택된 분기만 계산).
+21. 구조적 참조 유지: `Node::ReferenceKind`·`RangeKind`의 `structured` 필드(`StructuredRef`)로 `표1[금액]`·`표1[@금액]`을 쓴 그대로 표시·저장(R1C1 내부 문자열 포함, xlsx에는 `[#This Row]` 표기). `[#This Row]`는 행 기준 상대 참조로 해석해 열 전체가 수식 하나를 공유. 렉서가 `@` 표기와 표 안의 이름 없는 `[@열]`을 읽음. 표 이름·열 이름은 대소문자 무시. `Model::restructure` — 표가 커지거나 이름이 바뀌거나 범위로 변환될 때 수식을 다시 해석.

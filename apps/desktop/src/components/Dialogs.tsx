@@ -7,7 +7,17 @@ import { ColorPicker } from "./ColorPicker";
 export function Modal(props: { title: string; children: ReactNode; onClose(): void; wide?: boolean }) {
   return (
     <div className="modal-back" onMouseDown={props.onClose}>
-      <div className={`modal ${props.wide ? "wide" : ""}`} onMouseDown={(e) => e.stopPropagation()}>
+      <div
+        className={`modal ${props.wide ? "wide" : ""}`}
+        onMouseDown={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          // Esc closes a dialog, as in Excel.
+          if (e.key === "Escape" && !e.defaultPrevented) {
+            e.stopPropagation();
+            props.onClose();
+          }
+        }}
+      >
         <div className="modal-title">
           <span>{props.title}</span>
           <button className="x" onClick={props.onClose} aria-label="닫기">

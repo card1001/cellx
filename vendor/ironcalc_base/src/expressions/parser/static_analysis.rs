@@ -99,6 +99,7 @@ pub fn add_implicit_intersection(node: &mut Node, add: bool) {
             absolute_column1,
             absolute_row2,
             absolute_column2,
+            structured,
         } => {
             if add {
                 *node = Node::ImplicitIntersection {
@@ -114,6 +115,7 @@ pub fn add_implicit_intersection(node: &mut Node, add: bool) {
                         absolute_column2: *absolute_column2,
                         row2: *row2,
                         column2: *column2,
+                        structured: structured.clone(),
                     }),
                 };
             }

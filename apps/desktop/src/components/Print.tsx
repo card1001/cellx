@@ -3,7 +3,7 @@
 // The system print dialog also saves PDF.
 import { useMemo, useState } from "react";
 import { createPortal } from "react-dom";
-import type { CellStyle, CellView, Chart, ChartData, PageSetup } from "../api";
+import type { CellStyle, CellView, Chart, ChartData, PageSetup, Picture } from "../api";
 import { fontCss } from "../grid/Grid";
 import type { Merge } from "../grid/sources";
 import { ChartSvg } from "./Chart";
@@ -11,6 +11,8 @@ import { Modal } from "./Dialogs";
 
 export interface PrintJob {
   title: string;
+  /** File name, for &F in headers and footers. */
+  file: string;
   r0: number;
   c0: number;
   r1: number;
@@ -22,6 +24,8 @@ export interface PrintJob {
   merges: Merge[];
   font: [string, number];
   charts: { chart: Chart; data: ChartData }[];
+  /** Pictures with their image data. */
+  pictures: { picture: Picture; url: string }[];
 }
 
 /** Printable A4 area at 96 dpi with Excel's normal margins (0.7" sides, 0.75" top/bottom). */
@@ -55,6 +59,25 @@ function split(from: number, to: number, size: (i: number) => number, avail: (pa
   return out;
 }
 
+/** The footer as printed: 「페이지 번호」 stands for a centered "&P / &N" when no footer is set. */
+export function effectiveFooter(setup: PageSetup): [string, string, string] {
+  const f = setup.footer ?? ["", "", ""];
+  return setup.page_numbers && f.every((x) => !x) ? ["", "&P / &N", ""] : f;
+}
+
+/** A header or footer part with its codes filled in (&P, &N, &D, &T, &F, &A, &&). */
+export function renderHeaderFooter(part: string, page: number, pages: number, file: string, sheet: string): string {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  const time = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  return part.replace(/&([PNDTFA&])/g, (_, c: string) =>
+    c === "P" ? String(page) : c === "N" ? String(pages) : c === "D" ? date : c === "T" ? time : c === "F" ? file : c === "A" ? sheet : "&",
+  );
+}
+
+const HF_H = 28;
+
 export function paginate(job: PrintJob, setup: PageSetup): Pagination {
   const page = pageSize(setup.landscape);
   const headW = setup.headings ? 40 : 0;
@@ -63,7 +86,8 @@ export function paginate(job: PrintJob, setup: PageSetup): Pagination {
   for (let c = job.c0; c <= job.c1; c++) totalW += job.colWidth(c);
   let totalH = headH;
   for (let r = job.r0; r <= job.r1; r++) totalH += job.rowHeight(r);
-  const footer = setup.page_numbers ? 28 : 0;
+  // Room for the header and the footer.
+  const footer = ((setup.header ?? []).some((x) => x) ? HF_H : 0) + (effectiveFooter(setup).some((x) => x) ? HF_H : 0);
   const scale = setup.fit === "None" ? 1 : Math.min(1, page.w / totalW, setup.fit === "Page" ? (page.h - footer) / totalH : 1);
   const titles = setup.title_rows;
   let titleH = 0;
@@ -122,6 +146,8 @@ export function PageView(props: { job: PrintJob; setup: PageSetup; pag: Paginati
   const [ra, rb] = pag.rowPages[rp];
   const [ca, cb] = pag.colPages[cp];
   const page = pageSize(setup.landscape);
+  const header = setup.header ?? ["", "", ""];
+  const footer = effectiveFooter(setup);
   const t = setup.title_rows;
   const titleRows: number[] = [];
   if (t && (rp > 0 || t[0] < job.r0)) for (let r = t[0]; r <= t[1]; r++) if (r < ra) titleRows.push(r);
@@ -140,16 +166,26 @@ export function PageView(props: { job: PrintJob; setup: PageSetup; pag: Paginati
   for (const r of titleRows) titleH += job.rowHeight(r);
   // Charts whose top-left cell is on this page.
   const charts = job.charts.filter((x) => x.chart.anchor.row >= ra && x.chart.anchor.row <= rb && x.chart.anchor.col >= ca && x.chart.anchor.col <= cb);
-  const chartPos = (ch: Chart) => {
+  const chartPos = (ch: { anchor: Chart["anchor"] }) => {
     let left = headW + ch.anchor.dx;
     for (let c = ca; c < ch.anchor.col; c++) left += job.colWidth(c);
     let top = headH + titleH + ch.anchor.dy;
     for (let r = ra; r < ch.anchor.row; r++) top += job.rowHeight(r);
     return { left, top };
   };
+  const pictures = job.pictures.filter(
+    (x) => x.picture.anchor.row >= ra && x.picture.anchor.row <= rb && x.picture.anchor.col >= ca && x.picture.anchor.col <= cb,
+  );
   return (
     <div className="print-page" style={{ width: page.w, height: page.h }}>
-      <div style={{ zoom: pag.scale, position: "relative", width }}>
+      {header.some((x) => x) && (
+        <div className="print-hf print-header">
+          {header.map((x, i) => (
+            <span key={i}>{renderHeaderFooter(x, props.index + 1, pag.order.length, job.file, job.title)}</span>
+          ))}
+        </div>
+      )}
+      <div style={{ zoom: pag.scale, position: "relative", width, marginTop: header.some((x) => x) ? HF_H : 0 }}>
         <table className="print-table" style={{ width }}>
           <colgroup>
             {setup.headings && <col style={{ width: headW }} />}
@@ -189,6 +225,14 @@ export function PageView(props: { job: PrintJob; setup: PageSetup; pag: Paginati
             })}
           </tbody>
         </table>
+        {pictures.map(({ picture, url }) => {
+          const p = chartPos(picture);
+          return (
+            <div key={`p${picture.id}`} className="print-picture" style={{ left: p.left, top: p.top, width: picture.anchor.width, height: picture.anchor.height }}>
+              <img src={url} alt={picture.name} />
+            </div>
+          );
+        })}
         {charts.map(({ chart, data }) => {
           const p = chartPos(chart);
           return (
@@ -198,9 +242,11 @@ export function PageView(props: { job: PrintJob; setup: PageSetup; pag: Paginati
           );
         })}
       </div>
-      {setup.page_numbers && (
-        <div className="print-footer">
-          {props.index + 1} / {pag.order.length}
+      {footer.some((x) => x) && (
+        <div className="print-hf print-footer">
+          {footer.map((x, i) => (
+            <span key={i}>{renderHeaderFooter(x, props.index + 1, pag.order.length, job.file, job.title)}</span>
+          ))}
         </div>
       )}
     </div>

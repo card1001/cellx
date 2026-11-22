@@ -301,6 +301,7 @@ impl<'a> Model<'a> {
                 absolute_column,
                 row,
                 column,
+                structured: _,
             } => {
                 let mut row1 = *row;
                 let mut column1 = *column;
@@ -334,6 +335,7 @@ impl<'a> Model<'a> {
                 absolute_column2,
                 row2,
                 column2,
+                structured: _,
             } => {
                 let mut row_left = *row1;
                 let mut column_left = *column1;
@@ -678,6 +680,7 @@ impl<'a> Model<'a> {
                 absolute_column,
                 row,
                 column,
+                structured: _,
             } => {
                 let mut row1 = *row;
                 let mut column1 = *column;
@@ -711,6 +714,7 @@ impl<'a> Model<'a> {
                 absolute_row1,
                 absolute_column2,
                 sheet_name: _,
+                structured: _,
             } => {
                 let r1 = if *absolute_row1 {
                     *row1

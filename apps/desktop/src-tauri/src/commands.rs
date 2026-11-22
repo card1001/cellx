@@ -12,15 +12,19 @@ use cellx_core::Workbook;
 use serde::Serialize;
 use tauri::State;
 
+use crate::recovery::RecoveryState;
+
 pub struct Book {
-    wb: Workbook,
-    path: Option<PathBuf>,
-    dirty: bool,
+    pub(crate) wb: Workbook,
+    pub(crate) path: Option<PathBuf>,
+    pub(crate) dirty: bool,
+    /// Counts changes, so autosave knows whether there is anything new.
+    pub(crate) edits: u64,
 }
 
 impl Book {
     pub fn new() -> cellx_core::Result<Self> {
-        Ok(Book { wb: Workbook::new()?, path: None, dirty: false })
+        Ok(Book { wb: Workbook::new()?, path: None, dirty: false, edits: 0 })
     }
 
     pub fn open(path: &Path) -> cellx_core::Result<Self> {
@@ -30,13 +34,13 @@ impl Book {
             Workbook::open_xlsx(path)?
         };
         wb.recalc()?;
-        Ok(Book { wb, path: Some(path.to_path_buf()), dirty: false })
+        Ok(Book { wb, path: Some(path.to_path_buf()), dirty: false, edits: 0 })
     }
 }
 
 pub struct AppState(pub Mutex<Book>);
 
-type CmdResult<T> = Result<T, String>;
+pub(crate) type CmdResult<T> = Result<T, String>;
 
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -51,6 +55,7 @@ fn edit<T>(state: &State<'_, AppState>, f: impl FnOnce(&mut Workbook) -> cellx_c
     let mut book = lock(state)?;
     let out = f(&mut book.wb).map_err(err)?;
     book.dirty = true;
+    book.edits += 1;
     Ok(out)
 }
 
@@ -70,9 +75,11 @@ pub struct BookInfo {
     font: (String, f64),
     /// Per sheet: is it protected (시트 보호)?
     protected: Vec<bool>,
+    /// Per sheet: hidden, tab color.
+    tabs: Vec<cellx_core::sheets::SheetTab>,
 }
 
-fn info(book: &mut Book) -> CmdResult<BookInfo> {
+pub(crate) fn info(book: &mut Book) -> CmdResult<BookInfo> {
     Ok(BookInfo {
         sheets: book.wb.sheet_names(),
         tables: book.wb.tables().map_err(err)?,
@@ -82,6 +89,7 @@ fn info(book: &mut Book) -> CmdResult<BookInfo> {
         can_redo: book.wb.can_redo(),
         protected: (0..book.wb.sheet_names().len() as u32).map(|i| book.wb.protection(i).protected).collect(),
         font: book.wb.workbook_font(),
+        tabs: book.wb.sheet_tabs(),
     })
 }
 
@@ -100,22 +108,28 @@ pub fn book_info(state: State<'_, AppState>) -> CmdResult<BookInfo> {
 }
 
 #[tauri::command]
-pub fn new_book(state: State<'_, AppState>) -> CmdResult<BookInfo> {
+pub fn new_book(state: State<'_, AppState>, recovery: State<'_, RecoveryState>) -> CmdResult<BookInfo> {
     let mut book = lock(&state)?;
     *book = Book::new().map_err(err)?;
+    if let Ok(mut r) = recovery.0.lock() {
+        r.clear();
+    }
     info(&mut book)
 }
 
 #[tauri::command]
-pub async fn open_file(state: State<'_, AppState>, path: String) -> CmdResult<BookInfo> {
+pub async fn open_file(state: State<'_, AppState>, recovery: State<'_, RecoveryState>, path: String) -> CmdResult<BookInfo> {
     let opened = Book::open(Path::new(&path)).map_err(err)?;
     let mut book = lock(&state)?;
     *book = opened;
+    if let Ok(mut r) = recovery.0.lock() {
+        r.clear();
+    }
     info(&mut book)
 }
 
 #[tauri::command]
-pub async fn save_file(state: State<'_, AppState>, path: String) -> CmdResult<BookInfo> {
+pub async fn save_file(state: State<'_, AppState>, recovery: State<'_, RecoveryState>, path: String) -> CmdResult<BookInfo> {
     let p = PathBuf::from(&path);
     let mut book = lock(&state)?;
     if is_project(&p) {
@@ -125,6 +139,9 @@ pub async fn save_file(state: State<'_, AppState>, path: String) -> CmdResult<Bo
     }
     book.path = Some(p);
     book.dirty = false;
+    if let Ok(mut r) = recovery.0.lock() {
+        r.clear();
+    }
     info(&mut book)
 }
 
@@ -140,6 +157,7 @@ pub fn add_sheet(state: State<'_, AppState>) -> CmdResult<BookInfo> {
     let mut book = lock(&state)?;
     book.wb.add_sheet().map_err(err)?;
     book.dirty = true;
+    book.edits += 1;
     info(&mut book)
 }
 
@@ -148,6 +166,7 @@ pub fn rename_sheet(state: State<'_, AppState>, sheet: u32, name: String) -> Cmd
     let mut book = lock(&state)?;
     book.wb.rename_sheet(sheet, &name).map_err(err)?;
     book.dirty = true;
+    book.edits += 1;
     info(&mut book)
 }
 
@@ -156,6 +175,7 @@ pub fn delete_sheet(state: State<'_, AppState>, sheet: u32) -> CmdResult<BookInf
     let mut book = lock(&state)?;
     book.wb.delete_sheet(sheet).map_err(err)?;
     book.dirty = true;
+    book.edits += 1;
     info(&mut book)
 }
 
@@ -167,8 +187,22 @@ pub fn layout(state: State<'_, AppState>, sheet: u32) -> CmdResult<SheetLayout> 
 }
 
 #[tauri::command]
-pub fn viewport(state: State<'_, AppState>, sheet: u32, row0: i32, col0: i32, row1: i32, col1: i32) -> CmdResult<Viewport> {
-    read(&state, |wb| wb.viewport(sheet, row0, col0, row1, col1))
+pub fn viewport(
+    state: State<'_, AppState>,
+    sheet: u32,
+    row0: i32,
+    col0: i32,
+    row1: i32,
+    col1: i32,
+    formulas: Option<bool>,
+) -> CmdResult<Viewport> {
+    read(&state, |wb| {
+        if formulas == Some(true) {
+            wb.viewport_formulas(sheet, row0, col0, row1, col1)
+        } else {
+            wb.viewport(sheet, row0, col0, row1, col1)
+        }
+    })
 }
 
 #[tauri::command]
@@ -376,12 +410,13 @@ pub fn drop_table(state: State<'_, AppState>, table: String) -> CmdResult<BookIn
     let mut book = lock(&state)?;
     book.wb.drop_table(&table).map_err(err)?;
     book.dirty = true;
+    book.edits += 1;
     info(&mut book)
 }
 
 // ---------------------------------------------------------------- memos, charts, conditional formats, pivots
 
-use cellx_core::extras::{Chart, ChartData, ChartKind, PivotDef, PivotSource};
+use cellx_core::extras::{Anchor, Chart, ChartData, ChartKind, PivotDef, PivotSource};
 use cellx_core::objects::{CfRuleInput, ConditionalFormattingView, Memo, PasteSpecial};
 
 #[tauri::command]
@@ -397,6 +432,73 @@ pub fn set_memo(state: State<'_, AppState>, sheet: u32, row: i32, col: i32, text
 #[tauri::command]
 pub fn clear_memos(state: State<'_, AppState>, sheet: u32, range: CellRange) -> CmdResult<RecalcStats> {
     edit(&state, |wb| wb.clear_memos(sheet, range))
+}
+
+#[tauri::command]
+pub fn move_sheet(state: State<'_, AppState>, from: u32, to: u32) -> CmdResult<BookInfo> {
+    let mut book = lock(&state)?;
+    book.wb.move_sheet(from, to).map_err(err)?;
+    book.dirty = true;
+    book.edits += 1;
+    info(&mut book)
+}
+
+#[tauri::command]
+pub fn copy_sheet(state: State<'_, AppState>, sheet: u32, to: u32) -> CmdResult<BookInfo> {
+    let mut book = lock(&state)?;
+    book.wb.copy_sheet(sheet, to).map_err(err)?;
+    book.dirty = true;
+    book.edits += 1;
+    info(&mut book)
+}
+
+#[tauri::command]
+pub fn set_sheet_color(state: State<'_, AppState>, sheet: u32, color: Option<String>) -> CmdResult<BookInfo> {
+    let mut book = lock(&state)?;
+    book.wb.set_sheet_color(sheet, color).map_err(err)?;
+    book.dirty = true;
+    book.edits += 1;
+    info(&mut book)
+}
+
+#[tauri::command]
+pub fn set_sheet_hidden(state: State<'_, AppState>, sheet: u32, hidden: bool) -> CmdResult<BookInfo> {
+    let mut book = lock(&state)?;
+    book.wb.set_sheet_hidden(sheet, hidden).map_err(err)?;
+    book.dirty = true;
+    book.edits += 1;
+    info(&mut book)
+}
+
+#[tauri::command]
+pub fn pictures(state: State<'_, AppState>, sheet: u32) -> CmdResult<Vec<cellx_core::pictures::Picture>> {
+    read(&state, |wb| Ok(wb.pictures(sheet)))
+}
+
+#[tauri::command]
+pub fn picture_data(state: State<'_, AppState>, id: u32) -> CmdResult<String> {
+    read(&state, |wb| wb.picture_data_url(id))
+}
+
+#[tauri::command]
+pub fn add_picture_file(state: State<'_, AppState>, sheet: u32, row: i32, col: i32, path: String) -> CmdResult<cellx_core::pictures::Picture> {
+    let bytes = std::fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+    edit(&state, |wb| wb.add_picture(sheet, row, col, bytes))
+}
+
+#[tauri::command]
+pub fn add_picture_data(state: State<'_, AppState>, sheet: u32, row: i32, col: i32, data: String) -> CmdResult<cellx_core::pictures::Picture> {
+    edit(&state, |wb| wb.add_picture_base64(sheet, row, col, &data))
+}
+
+#[tauri::command]
+pub fn update_picture(state: State<'_, AppState>, id: u32, name: String, anchor: Anchor) -> CmdResult<()> {
+    edit(&state, |wb| wb.update_picture(id, name, anchor))
+}
+
+#[tauri::command]
+pub fn delete_picture(state: State<'_, AppState>, id: u32) -> CmdResult<()> {
+    edit(&state, |wb| wb.delete_picture(id))
 }
 
 #[tauri::command]
@@ -772,4 +874,21 @@ pub fn remove_page_break(state: State<'_, AppState>, sheet: u32, row: i32, col: 
 #[tauri::command]
 pub fn reset_page_breaks(state: State<'_, AppState>, sheet: u32) -> CmdResult<()> {
     edit(&state, |wb| wb.reset_page_breaks(sheet))
+}
+
+use cellx_core::audit::{EvalStep, TraceArea};
+
+#[tauri::command]
+pub fn trace_precedents(state: State<'_, AppState>, sheet: u32, row: i32, col: i32) -> CmdResult<Vec<TraceArea>> {
+    read(&state, |wb| Ok(wb.trace_precedents(sheet, row, col)))
+}
+
+#[tauri::command]
+pub fn trace_dependents(state: State<'_, AppState>, sheet: u32, row: i32, col: i32) -> CmdResult<Vec<TraceArea>> {
+    read(&state, |wb| Ok(wb.trace_dependents(sheet, row, col)))
+}
+
+#[tauri::command]
+pub fn formula_steps(state: State<'_, AppState>, sheet: u32, row: i32, col: i32) -> CmdResult<Vec<EvalStep>> {
+    read(&state, |wb| wb.formula_steps(sheet, row, col))
 }

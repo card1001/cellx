@@ -44,10 +44,24 @@ pub struct ChartXml {
     pub to: Marker,
 }
 
+/// A picture for the drawing part of a sheet.
+pub struct PictureXml {
+    pub name: String,
+    /// Extension of its media part: png, jpeg, gif or bmp.
+    pub ext: &'static str,
+    pub data: std::sync::Arc<Vec<u8>>,
+    pub from: Marker,
+    pub to: Marker,
+    /// Size in EMU.
+    pub cx: i64,
+    pub cy: i64,
+}
+
 #[derive(Default)]
 pub struct SheetParts {
     pub memos: Vec<MemoXml>,
     pub charts: Vec<ChartXml>,
+    pub pictures: Vec<PictureXml>,
     pub filter: Option<AutoFilter>,
     pub validations: Vec<Validation>,
     pub outline_rows: Vec<(i32, u8)>,
@@ -60,6 +74,8 @@ pub struct SheetParts {
     pub protection: Option<SheetProtection>,
     pub unlocked: Vec<CellRange>,
     pub page: Option<PageSetup>,
+    /// The sheet tab's color, as IronCalc keeps it.
+    pub tab_color: Option<ironcalc_base::types::Color>,
 }
 
 pub struct TableXml {
@@ -72,6 +88,7 @@ impl SheetParts {
     fn is_empty(&self) -> bool {
         self.memos.is_empty()
             && self.charts.is_empty()
+            && self.pictures.is_empty()
             && self.filter.is_none()
             && self.validations.is_empty()
             && self.outline_rows.is_empty()
@@ -80,6 +97,7 @@ impl SheetParts {
             && self.protection.is_none()
             && self.unlocked.is_empty()
             && self.page.is_none()
+            && self.tab_color.is_none()
     }
 }
 
@@ -251,8 +269,17 @@ fn page_xml(p: &PageSetup) -> String {
         FitMode::Page => r#" fitToWidth="1" fitToHeight="1""#.into(),
     };
     xml.push_str(&format!(r#"<pageSetup paperSize="9" orientation="{}"{fit}/>"#, if p.landscape { "landscape" } else { "portrait" }));
-    if p.page_numbers {
-        xml.push_str("<headerFooter><oddFooter>&amp;C&amp;P / &amp;N</oddFooter></headerFooter>");
+    let header = crate::sheetopts::header_footer_code(&p.header);
+    let footer = crate::sheetopts::header_footer_code(&p.effective_footer());
+    if !header.is_empty() || !footer.is_empty() {
+        xml.push_str("<headerFooter>");
+        if !header.is_empty() {
+            xml.push_str(&format!("<oddHeader>{}</oddHeader>", esc(&header)));
+        }
+        if !footer.is_empty() {
+            xml.push_str(&format!("<oddFooter>{}</oddFooter>", esc(&footer)));
+        }
+        xml.push_str("</headerFooter>");
     }
     if !p.row_breaks.is_empty() {
         let b: String = p.row_breaks.iter().map(|r| format!(r#"<brk id="{}" max="16383" man="1"/>"#, r - 1)).collect();
@@ -486,6 +513,8 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
     let mut drawing_no = 0;
     let mut memo_no = 0;
     let mut table_no = 0;
+    let mut image_no = 0;
+    let mut media_types: Vec<&'static str> = Vec::new();
     for (i, p) in parts.iter().enumerate() {
         if p.is_empty() {
             continue;
@@ -498,10 +527,24 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
         let mut rels = Vec::new();
         let mut tags = String::new();
 
-        if !p.charts.is_empty() {
+        if !p.charts.is_empty() || !p.pictures.is_empty() {
             drawing_no += 1;
             let mut anchors = String::new();
             let mut drels = Vec::new();
+            for (k, pic) in p.pictures.iter().enumerate() {
+                image_no += 1;
+                let rid = format!("rIdPic{}", k + 1);
+                let media = format!("xl/media/cellx_image{image_no}.{}", pic.ext);
+                drels.push(format!(
+                    r#"<Relationship Id="{rid}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/cellx_image{image_no}.{}"/>"#,
+                    pic.ext
+                ));
+                anchors.push_str(&picture_anchor_xml(pic, 1000 + k as u32, &rid));
+                put(&mut map, &mut order, media, pic.data.as_ref().clone());
+                if !media_types.contains(&pic.ext) {
+                    media_types.push(pic.ext);
+                }
+            }
             for (k, ch) in p.charts.iter().enumerate() {
                 chart_no += 1;
                 let rid = format!("rId{}", k + 1);
@@ -565,9 +608,16 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
                 }
             }
         }
-        if p.page.as_ref().is_some_and(|pg| pg.fit != FitMode::None) && !sheet_xml.contains("<sheetPr") {
+        let fit = p.page.as_ref().is_some_and(|pg| pg.fit != FitMode::None);
+        let tab = match &p.tab_color {
+            Some(ironcalc_base::types::Color::Rgb(rgb)) => format!(r#"<tabColor rgb="FF{}"/>"#, rgb.trim_start_matches('#').to_uppercase()),
+            Some(ironcalc_base::types::Color::Theme(t, tint)) => format!(r#"<tabColor theme="{t}" tint="{tint}"/>"#),
+            _ => String::new(),
+        };
+        if (fit || !tab.is_empty()) && !sheet_xml.contains("<sheetPr") {
             if let Some(at) = sheet_xml.find("<dimension").or_else(|| sheet_xml.find("<sheetViews")) {
-                sheet_xml.insert_str(at, r#"<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>"#);
+                let fit_xml = if fit { r#"<pageSetUpPr fitToPage="1"/>"# } else { "" };
+                sheet_xml.insert_str(at, &format!("<sheetPr>{tab}{fit_xml}</sheetPr>"));
             }
         }
         let after_data = |xml: &String| {
@@ -681,6 +731,23 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
             Some(format!(r#"<definedName name="_xlnm.Print_Titles" localSheetId="{i}">{}!${a}:${b}</definedName>"#, esc(&sheet_ref(n))))
         })
         .collect();
+    let area_names: String = parts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| p.page.as_ref().and_then(|pg| pg.print_area).map(|a| (i, a)))
+        .filter_map(|(i, r)| {
+            let n = sheet_names.get(i)?;
+            Some(format!(
+                r#"<definedName name="_xlnm.Print_Area" localSheetId="{i}">{}!${}${}:${}${}</definedName>"#,
+                esc(&sheet_ref(n)),
+                column_name(r.c0),
+                r.r0,
+                column_name(r.c1),
+                r.r1
+            ))
+        })
+        .collect();
+    let title_names = format!("{title_names}{area_names}");
     let filter_names = format!("{filter_names}{title_names}");
     if !filter_names.is_empty() {
         if let Some(wb) = map.get("xl/workbook.xml") {
@@ -696,6 +763,12 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
 
     if let Some(ct) = map.get("[Content_Types].xml") {
         let mut ct = String::from_utf8_lossy(ct).to_string();
+        for ext in &media_types {
+            let mime = if *ext == "jpeg" { "image/jpeg".to_string() } else { format!("image/{ext}") };
+            if !ct.contains(&format!("Extension=\"{ext}\"")) {
+                overrides.insert_str(0, &format!(r#"<Default Extension="{ext}" ContentType="{mime}"/>"#));
+            }
+        }
         if memo_no > 0 && !ct.contains("Extension=\"vml\"") {
             overrides.insert_str(
                 0,
@@ -773,6 +846,23 @@ fn vml_xml(memos: &[MemoXml], n: usize) -> String {
     }
     format!(
         r##"<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel"><o:shapelayout v:ext="edit"><o:idmap v:ext="edit" data="{n}"/></o:shapelayout><v:shapetype id="_x0000_t202" coordsize="21600,21600" o:spt="202" path="m,l,21600r21600,l21600,xe"><v:stroke joinstyle="miter"/><v:path gradientshapeok="t" o:connecttype="rect"/></v:shapetype>{shapes}</xml>"##
+    )
+}
+
+fn picture_anchor_xml(pic: &PictureXml, id: u32, rid: &str) -> String {
+    let m = |tag: &str, k: &Marker| {
+        format!(
+            "<xdr:{tag}><xdr:col>{}</xdr:col><xdr:colOff>{}</xdr:colOff><xdr:row>{}</xdr:row><xdr:rowOff>{}</xdr:rowOff></xdr:{tag}>",
+            k.col, k.col_off, k.row, k.row_off
+        )
+    };
+    format!(
+        r#"<xdr:twoCellAnchor editAs="oneCell">{}{}<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="{id}" name="{}"/><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr><xdr:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="{rid}"/><a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="{}" cy="{}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/></xdr:twoCellAnchor>"#,
+        m("from", &pic.from),
+        m("to", &pic.to),
+        esc(&pic.name),
+        pic.cx,
+        pic.cy
     )
 }
 
@@ -1036,6 +1126,78 @@ pub fn read_charts(xlsx: &[u8]) -> Vec<ImportedChart> {
     out
 }
 
+/// A picture of an xlsx drawing.
+pub struct ImportedPicture {
+    pub sheet: usize,
+    pub name: String,
+    pub data: Vec<u8>,
+    pub from: Marker,
+    pub to: Option<Marker>,
+    /// Size in EMU, when the file gives it.
+    pub ext: Option<(i64, i64)>,
+}
+
+fn read_part_bytes<R: Read + std::io::Seek>(zip: &mut zip::ZipArchive<R>, name: &str) -> Option<Vec<u8>> {
+    let mut f = zip.by_name(name).ok()?;
+    let mut v = Vec::new();
+    f.read_to_end(&mut v).ok()?;
+    Some(v)
+}
+
+pub fn read_pictures(xlsx: &[u8]) -> Vec<ImportedPicture> {
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(xlsx)) else { return Vec::new() };
+    if !zip.file_names().any(|n| n.is_ok_and(|n| n.starts_with("xl/media/"))) {
+        return Vec::new();
+    }
+    let Some(wb_xml) = read_part(&mut zip, "xl/workbook.xml") else { return Vec::new() };
+    let wb_rels = rels_of(&mut zip, "xl/workbook.xml");
+    let Ok(wb_doc) = roxmltree::Document::parse(&wb_xml) else { return Vec::new() };
+    let sheet_parts: Vec<String> = wb_doc
+        .descendants()
+        .filter(|n| n.has_tag_name("sheet"))
+        .filter_map(|n| n.attribute((R_NS, "id")).and_then(|id| wb_rels.get(id)).map(|(_, t)| t.clone()))
+        .collect();
+    let mut out = Vec::new();
+    for (si, sheet_part) in sheet_parts.iter().enumerate() {
+        let rels = rels_of(&mut zip, sheet_part);
+        for (kind, drawing_part) in rels.values() {
+            if kind != "drawing" {
+                continue;
+            }
+            let Some(dxml) = read_part(&mut zip, drawing_part) else { continue };
+            let drels = rels_of(&mut zip, drawing_part);
+            let Ok(ddoc) = roxmltree::Document::parse(&dxml) else { continue };
+            for anchor in ddoc
+                .root_element()
+                .children()
+                .filter(|n| n.has_tag_name("twoCellAnchor") || n.has_tag_name("oneCellAnchor"))
+            {
+                let Some(pic) = anchor.children().find(|n| n.has_tag_name("pic")) else { continue };
+                let Some(rid) = pic.descendants().find(|n| n.has_tag_name("blip")).and_then(|b| b.attribute((R_NS, "embed"))) else {
+                    continue;
+                };
+                let Some((_, media)) = drels.get(rid) else { continue };
+                let Some(data) = read_part_bytes(&mut zip, media) else { continue };
+                let Some(from) = anchor.children().find(|n| n.has_tag_name("from")).map(marker) else { continue };
+                let to = anchor.children().find(|n| n.has_tag_name("to")).map(marker);
+                let size = |e: roxmltree::Node| {
+                    let g = |a: &str| e.attribute(a).and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+                    (g("cx"), g("cy"))
+                };
+                // The anchor's own size (oneCellAnchor), else the picture's.
+                let ext = anchor
+                    .children()
+                    .find(|n| n.has_tag_name("ext"))
+                    .map(size)
+                    .or_else(|| pic.descendants().find(|n| n.has_tag_name("xfrm")).and_then(|x| x.children().find(|n| n.has_tag_name("ext"))).map(size));
+                let name = pic.descendants().find(|n| n.has_tag_name("cNvPr")).and_then(|n| n.attribute("name")).unwrap_or("").to_string();
+                out.push(ImportedPicture { sheet: si, name, data, from, to, ext });
+            }
+        }
+    }
+    out
+}
+
 fn parse_chart(xml: &str) -> Option<ImportedChart> {
     let doc = roxmltree::Document::parse(xml).ok()?;
     let plot = doc.descendants().find(|n| n.has_tag_name("plotArea"))?;
@@ -1205,7 +1367,17 @@ pub fn read_sheet_options(xlsx: &[u8]) -> Vec<SheetOptionsXml> {
         .collect();
     // Print titles: _xlnm.Print_Titles = Sheet1!$1:$2.
     let mut titles: std::collections::HashMap<usize, (i32, i32)> = std::collections::HashMap::new();
+    let mut areas: std::collections::HashMap<usize, CellRange> = std::collections::HashMap::new();
     for dn in wb_doc.descendants().filter(|n| n.has_tag_name("definedName")) {
+        if dn.attribute("name") == Some("_xlnm.Print_Area") {
+            let Some(i) = dn.attribute("localSheetId").and_then(|v| v.parse::<usize>().ok()) else { continue };
+            // Several areas print on separate pages in Excel; CellX keeps the first.
+            let first = dn.text().unwrap_or("").split(',').next().unwrap_or("").replace('$', "");
+            if let Some((_, r0, c0, r1, c1)) = crate::extras::parse_range(first.trim()) {
+                areas.insert(i, CellRange { r0, c0, r1, c1 });
+            }
+            continue;
+        }
         if dn.attribute("name") != Some("_xlnm.Print_Titles") {
             continue;
         }
@@ -1316,7 +1488,18 @@ pub fn read_sheet_options(xlsx: &[u8]) -> Vec<SheetOptionsXml> {
             }
         }
         if let Some(hf) = root.children().find(|n| n.has_tag_name("headerFooter")) {
-            page.page_numbers = hf.descendants().filter_map(|n| n.text()).any(|t| t.contains("&P"));
+            let part = |tag: &str| hf.children().find(|n| n.has_tag_name(tag)).and_then(|n| n.text()).map(crate::sheetopts::parse_header_footer);
+            if let Some(h) = part("oddHeader") {
+                page.header = h;
+            }
+            if let Some(f) = part("oddFooter") {
+                // CellX's own 「페이지 번호」 comes back as that switch.
+                if f[0].is_empty() && f[1] == "&P / &N" && f[2].is_empty() {
+                    page.page_numbers = true;
+                } else {
+                    page.footer = f;
+                }
+            }
         }
         let brks = |tag: &str| -> Vec<i32> {
             root.children()
@@ -1327,6 +1510,7 @@ pub fn read_sheet_options(xlsx: &[u8]) -> Vec<SheetOptionsXml> {
         page.row_breaks = brks("rowBreaks");
         page.col_breaks = brks("colBreaks");
         page.title_rows = titles.get(&si).copied();
+        page.print_area = areas.get(&si).copied();
         if !page.is_default() {
             o.page = Some(page);
         }

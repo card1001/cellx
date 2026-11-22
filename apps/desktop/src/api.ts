@@ -44,6 +44,48 @@ export interface Memo {
 
 export type ChartKind = "Column" | "Bar" | "Line" | "Pie" | "Doughnut" | "Area" | "Scatter";
 
+export interface ChartAnchor {
+  row: number;
+  col: number;
+  dx: number;
+  dy: number;
+  width: number;
+  height: number;
+}
+
+export interface RecoveredFile {
+  id: string;
+  original: string | null;
+  name: string;
+  /** Seconds since 1970. */
+  saved_at: number;
+}
+
+/** A range a trace arrow starts or ends at (1-based, inclusive). */
+export interface TraceArea {
+  sheet: number;
+  row1: number;
+  col1: number;
+  row2: number;
+  col2: number;
+}
+
+/** One step of 수식 계산: `text` marks the next part with \u0002 … \u0003. */
+export interface EvalStep {
+  text: string;
+  value: string;
+}
+
+export interface Picture {
+  id: number;
+  sheet: number;
+  name: string;
+  mime: string;
+  anchor: ChartAnchor;
+  /** Width ÷ height of the image itself. */
+  ratio: number;
+}
+
 export interface Chart {
   id: number;
   sheet: number;
@@ -52,7 +94,7 @@ export interface Chart {
   range: string;
   series_in_rows: boolean;
   legend: boolean;
-  anchor: { row: number; col: number; dx: number; dy: number; width: number; height: number };
+  anchor: ChartAnchor;
 }
 
 export interface ChartData {
@@ -235,6 +277,11 @@ export interface PageSetup {
   row_breaks: number[];
   col_breaks: number[];
   page_numbers: boolean;
+  /** 인쇄 영역 */
+  print_area: Range | null;
+  /** 머리글 and 바닥글: left, center, right, with Excel's codes (&P, &N, &D, &T, &F, &A). */
+  header: [string, string, string];
+  footer: [string, string, string];
 }
 
 /** IronCalc's conditional formatting rule input (tagged by `type`). */
@@ -345,11 +392,19 @@ export interface ColumnFilter {
   criterion: string;
 }
 
+export interface SheetTab {
+  name: string;
+  hidden: boolean;
+  /** #RRGGBB */
+  color: string | null;
+}
+
 export interface BookInfo {
   sheets: string[];
   tables: TableInfo[];
   path: string | null;
   dirty: boolean;
+  tabs: SheetTab[];
   can_undo: boolean;
   can_redo: boolean;
   font: [string, number];
@@ -379,8 +434,11 @@ export const api = {
   deleteSheet: (sheet: number) => invoke<BookInfo>("delete_sheet", { sheet }),
 
   layout: (sheet: number) => invoke<SheetLayout>("layout", { sheet }),
-  viewport: (sheet: number, row0: number, col0: number, row1: number, col1: number) =>
-    invoke<Viewport>("viewport", { sheet, row0, col0, row1, col1 }),
+  viewport: (sheet: number, row0: number, col0: number, row1: number, col1: number, formulas = false) =>
+    invoke<Viewport>("viewport", { sheet, row0, col0, row1, col1, formulas }),
+  tracePrecedents: (sheet: number, row: number, col: number) => invoke<TraceArea[]>("trace_precedents", { sheet, row, col }),
+  traceDependents: (sheet: number, row: number, col: number) => invoke<TraceArea[]>("trace_dependents", { sheet, row, col }),
+  formulaSteps: (sheet: number, row: number, col: number) => invoke<EvalStep[]>("formula_steps", { sheet, row, col }),
   cellDetail: (sheet: number, row: number, col: number) => invoke<CellDetail>("cell_detail", { sheet, row, col }),
   selectionStats: (sheet: number, range: Range) => invoke<SelectionStats>("selection_stats", { sheet, range }),
   navigateEdge: (sheet: number, row: number, col: number, dir: Direction) =>
@@ -406,6 +464,20 @@ export const api = {
   setMemo: (sheet: number, row: number, col: number, text: string | null) =>
     invoke<RecalcStats>("set_memo", { sheet, row, col, text }),
   clearMemos: (sheet: number, range: Range) => invoke<RecalcStats>("clear_memos", { sheet, range }),
+  moveSheet: (from: number, to: number) => invoke<BookInfo>("move_sheet", { from, to }),
+  copySheet: (sheet: number, to: number) => invoke<BookInfo>("copy_sheet", { sheet, to }),
+  setSheetColor: (sheet: number, color: string | null) => invoke<BookInfo>("set_sheet_color", { sheet, color }),
+  setSheetHidden: (sheet: number, hidden: boolean) => invoke<BookInfo>("set_sheet_hidden", { sheet, hidden }),
+  autosave: () => invoke<boolean>("autosave"),
+  recoveryList: () => invoke<RecoveredFile[]>("recovery_list"),
+  recoveryOpen: (id: string) => invoke<BookInfo>("recovery_open", { id }),
+  recoveryDiscard: (id: string) => invoke<void>("recovery_discard", { id }),
+  pictures: (sheet: number) => invoke<Picture[]>("pictures", { sheet }),
+  pictureData: (id: number) => invoke<string>("picture_data", { id }),
+  addPictureFile: (sheet: number, row: number, col: number, path: string) => invoke<Picture>("add_picture_file", { sheet, row, col, path }),
+  addPictureData: (sheet: number, row: number, col: number, data: string) => invoke<Picture>("add_picture_data", { sheet, row, col, data }),
+  updatePicture: (p: Picture) => invoke<void>("update_picture", { id: p.id, name: p.name, anchor: p.anchor }),
+  deletePicture: (id: number) => invoke<void>("delete_picture", { id }),
   charts: (sheet: number) => invoke<Chart[]>("charts", { sheet }),
   addChart: (sheet: number, kind: ChartKind, range: Range) => invoke<Chart>("add_chart", { sheet, kind, range }),
   updateChart: (chart: Chart) => invoke<void>("update_chart", { chart }),

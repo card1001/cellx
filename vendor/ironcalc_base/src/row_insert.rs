@@ -106,6 +106,7 @@ fn displace(node: &Node, ins: &RowShift, old: i32, new: i32) -> Option<Node> {
             absolute_column,
             row,
             column,
+            structured,
         } => {
             let (r, c) = if ins.columns {
                 (*row, ins.coordinate(*sheet_index, *absolute_column, *column, old, new))
@@ -119,6 +120,7 @@ fn displace(node: &Node, ins: &RowShift, old: i32, new: i32) -> Option<Node> {
                 absolute_column: *absolute_column,
                 row: r,
                 column: c,
+                structured: structured.clone(),
             })
         }
         RangeKind {
@@ -132,6 +134,7 @@ fn displace(node: &Node, ins: &RowShift, old: i32, new: i32) -> Option<Node> {
             absolute_column2,
             row2,
             column2,
+            structured,
         } => {
             // Whole columns (A:A) do not move with rows, whole rows (1:1) with columns.
             let (r1, r2, c1, c2) = if ins.columns {
@@ -166,6 +169,7 @@ fn displace(node: &Node, ins: &RowShift, old: i32, new: i32) -> Option<Node> {
                 absolute_column2: *absolute_column2,
                 row2: r2,
                 column2: c2,
+                structured: structured.clone(),
             })
         }
         // Wrong references are written out unchanged by `stringify`; relative

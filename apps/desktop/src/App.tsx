@@ -12,6 +12,8 @@ import {
   type CellDetail,
   type Chart,
   type ChartKind,
+  type Picture,
+  type RecoveredFile,
   type Direction,
   type PasteSpecial,
   type PivotDef,
@@ -23,6 +25,12 @@ import {
 } from "./api";
 import { colorScaleRule, dataBarRule, highlightRule, type HighlightKind, ICON_SETS, iconSetRule, ratingRule } from "./cf";
 import { CHART_KINDS, ChartLayer } from "./components/Chart";
+import { PictureLayer, pictureUrl } from "./components/Picture";
+import { arrowKey, EvaluateDialog, TraceLayer, type TraceArrow } from "./components/Trace";
+import { RecoveryDialog, SaveChangesDialog, type SaveChoice } from "./components/FileDialogs";
+import { HeaderFooterDialog, MoveCopyDialog, UnhideDialog } from "./components/SheetDialogs";
+import { ColorPicker } from "./components/ColorPicker";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   type ColumnChoice,
   DuplicatesDialog,
@@ -87,6 +95,7 @@ type Dialog =
   | { kind: "names"; list: NameView[]; startNew: boolean }
   | { kind: "hyperlink"; text: string; current: { target: string; internal: boolean } | null }
   | { kind: "goalSeek" }
+  | { kind: "evaluate"; sheet: number; row: number; col: number }
   | { kind: "print" }
   | { kind: "subtotal"; range: Range }
   | { kind: "createTable"; range: Range; header: boolean; style: string }
@@ -149,7 +158,17 @@ export default function App() {
   const [protection, setProtection] = useState<ProtectionView | null>(null);
   const [pageSetupState, setPageSetupState] = useState<PageSetup | null>(null);
   const [showPageBreaks, setShowPageBreaks] = useState(false);
+  // 수식 분석: trace arrows, and the sheets showing formulas (Ctrl+`).
+  const [arrows, setArrows] = useState<TraceArrow[]>([]);
+  const traceFrontier = useRef<{ kind: "prec" | "dep"; root: string; cells: { sheet: number; row: number; col: number }[] } | null>(null);
+  const [formulaSheets, setFormulaSheets] = useState<Set<number>>(() => new Set());
   const [msgBox, setMsgBox] = useState<string | null>(null);
+  const [savePrompt, setSavePrompt] = useState<{ name: string; resolve(c: SaveChoice): void } | null>(null);
+  const [recovered, setRecovered] = useState<RecoveredFile[]>([]);
+  const [sheetDialog, setSheetDialog] = useState<{ kind: "move"; sheet: number } | { kind: "unhide" } | { kind: "headerFooter" } | null>(null);
+  const [tabColorAt, setTabColorAt] = useState<{ sheet: number; x: number; y: number } | null>(null);
+  const dragTab = useRef<number | null>(null);
+  const [dragOver, setDragOver] = useState<number | null>(null);
   const protectionRef = useRef<ProtectionView | null>(null);
   protectionRef.current = protection;
   const linkClick = useRef<{ r: number; c: number; t: number } | null>(null);
@@ -162,6 +181,8 @@ export default function App() {
   const [charts, setCharts] = useState<Chart[]>([]);
   const [chartVersion, setChartVersion] = useState(0);
   const [selectedChart, setSelectedChart] = useState<number | null>(null);
+  const [pictures, setPictures] = useState<Picture[]>([]);
+  const [selectedPicture, setSelectedPicture] = useState<number | null>(null);
   const [hoverMemo, setHoverMemo] = useState<Pos | null>(null);
   const [editMemo, setEditMemo] = useState<Pos | null>(null);
   const [showMemos, setShowMemos] = useState(false);
@@ -226,6 +247,7 @@ export default function App() {
       const font = info?.font ?? (["맑은 고딕", 11] as [string, number]);
       if (t.kind === "sheet") {
         const s = new SheetSource(t.index, await api.layout(t.index), font);
+        s.showFormulas = formulaSheetsRef.current.has(t.index);
         sources.current.set(k, s);
         return s;
       }
@@ -252,7 +274,60 @@ export default function App() {
   }, [source]);
 
   const invalidateSheets = async () => {
+    // Excel takes the trace arrows away once the sheet changes.
+    setArrows((a) => (a.length ? [] : a));
+    traceFrontier.current = null;
     await Promise.all([...sources.current.values()].map((s) => (s instanceof SheetSource ? s.invalidate() : null)));
+  };
+
+  const formulaSheetsRef = useRef(formulaSheets);
+  formulaSheetsRef.current = formulaSheets;
+
+  const toggleShowFormulas = () => {
+    const t = tabRef.current;
+    if (t.kind !== "sheet") return;
+    const next = new Set(formulaSheetsRef.current);
+    const on = !next.has(t.index);
+    if (on) next.add(t.index);
+    else next.delete(t.index);
+    setFormulaSheets(next);
+    const s = sources.current.get(tabKey(t));
+    if (s instanceof SheetSource) s.setShowFormulas(on);
+  };
+
+  /** 참조되는/참조하는 셀 추적: each click adds one more level, as in Excel. */
+  const trace = async (kind: "prec" | "dep") => {
+    const t = tabRef.current;
+    if (t.kind !== "sheet") return;
+    const f = selectionRef.current.focus;
+    const root = `${t.index}:${f.r}:${f.c}`;
+    let frontier = traceFrontier.current;
+    if (!frontier || frontier.kind !== kind || frontier.root !== root) frontier = { kind, root, cells: [{ sheet: t.index, row: f.r, col: f.c }] };
+    const found: TraceArrow[] = [];
+    const next: { sheet: number; row: number; col: number }[] = [];
+    for (const cell of frontier.cells.slice(0, 200)) {
+      const list = await (kind === "prec" ? api.tracePrecedents : api.traceDependents)(cell.sheet, cell.row, cell.col).catch(() => []);
+      for (const area of list) {
+        if (kind === "prec") {
+          found.push({ from: area, to: cell });
+          for (let r = area.row1; r <= area.row2 && next.length < 400; r++)
+            for (let c = area.col1; c <= area.col2 && next.length < 400; c++) next.push({ sheet: area.sheet, row: r, col: c });
+        } else {
+          found.push({ from: { sheet: cell.sheet, row1: cell.row, col1: cell.col, row2: cell.row, col2: cell.col }, to: { sheet: area.sheet, row: area.row1, col: area.col1 } });
+          next.push({ sheet: area.sheet, row: area.row1, col: area.col1 });
+        }
+      }
+    }
+    if (!found.length) {
+      if (frontier.cells.length === 1 && frontier.cells[0].row === f.r && frontier.cells[0].col === f.c)
+        say(kind === "prec" ? "현재 셀에 수식이 없거나 참조하는 셀이 없습니다" : "현재 셀을 참조하는 수식이 없습니다", true);
+      return;
+    }
+    traceFrontier.current = { kind, root, cells: next };
+    setArrows((cur) => {
+      const keys = new Set(cur.map(arrowKey));
+      return [...cur, ...found.filter((a) => !keys.has(arrowKey(a)) && (keys.add(arrowKey(a)), true))];
+    });
   };
 
   // ---------------------------------------------------------------- book
@@ -262,7 +337,27 @@ export default function App() {
     if (!isTauri()) return;
     void refreshInfo().catch(fail);
     void api.functionNames().then(setFunctions).catch(() => {});
+    // 문서 복구: files an earlier CellX saved before it stopped.
+    void api.recoveryList().then(setRecovered).catch(() => {});
     focusGrid();
+  }, []);
+
+  // A hidden sheet is never the one on screen.
+  useEffect(() => {
+    if (tab.kind !== "sheet" || !info?.tabs?.[tab.index]?.hidden) return;
+    const next = info.tabs.findIndex((x) => !x.hidden);
+    if (next >= 0) switchTab({ kind: "sheet", index: next });
+  }, [info, tab]);
+
+  // 자동 복구 저장: every 3 minutes while there are unsaved changes.
+  const infoRef = useRef(info);
+  infoRef.current = info;
+  useEffect(() => {
+    if (!isTauri()) return;
+    const id = window.setInterval(() => {
+      if (infoRef.current?.dirty) void api.autosave().catch(() => {});
+    }, 3 * 60 * 1000);
+    return () => window.clearInterval(id);
   }, []);
 
   /** Active cell details: formula bar text and ribbon state. */
@@ -369,6 +464,22 @@ export default function App() {
         setPageSetupState(ps);
       })
       .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [tab, info, chartVersion]);
+
+  // Pictures of the sheet on screen.
+  useEffect(() => {
+    if (tab.kind !== "sheet") {
+      setPictures([]);
+      return;
+    }
+    let live = true;
+    api
+      .pictures(tab.index)
+      .then((p) => live && setPictures(p))
+      .catch(() => live && setPictures([]));
     return () => {
       live = false;
     };
@@ -852,12 +963,53 @@ export default function App() {
     setSelection(START);
   };
 
+  /** 「변경 내용을 저장하시겠습니까?」 before the open workbook goes away. False: stay. */
+  const confirmLeave = async (): Promise<boolean> => {
+    const cur = infoRef.current;
+    if (!cur?.dirty) return true;
+    const name = cur.path?.split(/[\\/]/).pop() ?? "통합 문서1";
+    const choice = await new Promise<SaveChoice>((resolve) => setSavePrompt({ name, resolve }));
+    setSavePrompt(null);
+    if (choice === "cancel") return false;
+    if (choice === "discard") return true;
+    return save();
+  };
+
+  // Closing the window asks too.
+  useEffect(() => {
+    if (!isTauri()) return;
+    const w = getCurrentWindow();
+    let closing = false;
+    const off = w.onCloseRequested(async (event) => {
+      if (closing || !infoRef.current?.dirty) return;
+      event.preventDefault();
+      if (await confirmLeave()) {
+        closing = true;
+        await w.destroy();
+      }
+    });
+    return () => {
+      void off.then((f) => f());
+    };
+  }, []);
+
   const newBook = async () => {
+    if (!(await confirmLeave())) return;
     const i = await run("새 문서", api.newBook);
     if (i) resetBook(i);
   };
 
+  const openRecovered = async (id: string) => {
+    if (!(await confirmLeave())) return;
+    const i = await run("복구 중", () => api.recoveryOpen(id));
+    if (!i) return;
+    resetBook(i);
+    setRecovered((list) => list.filter((f) => f.id !== id));
+    say("복구한 파일입니다. 확인한 뒤 저장하세요.");
+  };
+
   const openFile = async () => {
+    if (!(await confirmLeave())) return;
     const path = await openDialog({
       multiple: false,
       filters: [
@@ -873,34 +1025,35 @@ export default function App() {
     say(`${path} (${Math.round(performance.now() - t)} ms)`);
   };
 
-  const saveAs = async () => {
+  /** Returns whether it saved. */
+  const saveAs = async (): Promise<boolean> => {
     const path = await saveDialog({
-      defaultPath: info?.path ?? "통합 문서1.xlsx",
+      defaultPath: infoRef.current?.path ?? "통합 문서1.xlsx",
       filters: [
         { name: "Excel 통합 문서", extensions: ["xlsx"] },
         { name: "CellX 프로젝트 (데이터 시트 포함)", extensions: ["cellx"] },
       ],
     });
-    if (!path) return;
+    if (!path) return false;
     const i = await run("저장 중", () => api.saveFile(path));
-    if (i) {
-      setInfo(i);
-      say(
-        path.toLowerCase().endsWith(".xlsx") && i.tables.length > 0
-          ? "xlsx로 저장했습니다. 데이터 시트는 .cellx 프로젝트에만 저장됩니다"
-          : `저장했습니다: ${path}`,
-      );
-    }
+    if (!i) return false;
+    setInfo(i);
+    say(
+      path.toLowerCase().endsWith(".xlsx") && i.tables.length > 0
+        ? "xlsx로 저장했습니다. 데이터 시트는 .cellx 프로젝트에만 저장됩니다"
+        : `저장했습니다: ${path}`,
+    );
+    return true;
   };
 
-  const save = async () => {
-    if (!info?.path) return saveAs();
-    const path = info.path;
+  const save = async (): Promise<boolean> => {
+    const path = infoRef.current?.path;
+    if (!path) return saveAs();
     const i = await run("저장 중", () => api.saveFile(path));
-    if (i) {
-      setInfo(i);
-      say(`저장했습니다: ${path}`);
-    }
+    if (!i) return false;
+    setInfo(i);
+    say(`저장했습니다: ${path}`);
+    return true;
   };
 
   const importData = async () => {
@@ -953,6 +1106,34 @@ export default function App() {
       switchTab({ kind: "sheet", index: Math.max(0, index - 1) });
     }
   };
+
+  // ---------------------------------------------------------------- sheet tabs: 이동/복사, 탭 색, 숨기기
+  const sheetOp = async (label: string, fn: () => Promise<BookInfo>, show?: (i: BookInfo) => number) => {
+    if (sessionRef.current) await commit("none");
+    const i = await run(label, fn);
+    if (!i) return;
+    sources.current.clear();
+    setInfo(i);
+    setChartVersion((v) => v + 1);
+    const want = show?.(i);
+    if (want !== undefined) switchTab({ kind: "sheet", index: want });
+  };
+
+  const moveSheet = (from: number, to: number) =>
+    void sheetOp("시트 이동", () => api.moveSheet(from, to), () => to);
+
+  const copySheet = (sheet: number, to: number) =>
+    void sheetOp("시트 복사", () => api.copySheet(sheet, to), () => to);
+
+  const hideSheet = (sheet: number) =>
+    void sheetOp("시트 숨기기", () => api.setSheetHidden(sheet, true), (i) => {
+      const t = tabRef.current;
+      if (t.kind === "sheet" && t.index !== sheet) return t.index;
+      const next = i.tabs.findIndex((x, k) => k > sheet && !x.hidden);
+      return next >= 0 ? next : i.tabs.findIndex((x) => !x.hidden);
+    });
+
+  const unhideSheet = (sheet: number) => void sheetOp("숨기기 취소", () => api.setSheetHidden(sheet, false), () => sheet);
 
   const renameSheet = async (index: number) => {
     const name = await ask("시트 이름 바꾸기", "새 이름", info?.sheets[index] ?? "");
@@ -1152,10 +1333,11 @@ export default function App() {
       say("일반 시트만 인쇄할 수 있습니다", true);
       return null;
     }
-    let rg = selectionOnly ? range() : { r0: 1, c0: 1, r1: Math.max(1, src.lastRow), c1: Math.max(1, src.lastCol) };
-    if (!selectionOnly) {
-      // Charts outside the cells widen the printed area, as in Excel.
-      for (const c of charts) {
+    const area = pageSetupState?.print_area ?? null;
+    let rg = selectionOnly ? range() : area ?? { r0: 1, c0: 1, r1: Math.max(1, src.lastRow), c1: Math.max(1, src.lastCol) };
+    if (!selectionOnly && !area) {
+      // Charts and pictures outside the cells widen the printed area, as in Excel.
+      for (const c of [...charts, ...pictures]) {
         let w = c.anchor.dx + c.anchor.width;
         let col = c.anchor.col;
         while (w > 0 && col < 16384) w -= src.cols.size(col++);
@@ -1171,8 +1353,10 @@ export default function App() {
       api.layout(t.index),
       Promise.all(charts.map((c) => api.chartData(c.id).then((data) => ({ chart: c, data })).catch(() => null))),
     ]);
+    const pics = selectionOnly ? [] : await Promise.all(pictures.map((p) => pictureUrl(p.id).then((url) => ({ picture: p, url })).catch(() => null)));
     return {
       title: sheetName(t.index),
+      file: infoRef.current?.path?.split(/[\\/]/).pop() ?? "통합 문서1",
       r0: rg.r0,
       c0: rg.c0,
       r1,
@@ -1183,6 +1367,7 @@ export default function App() {
       merges: layout.merges.map(([r, c, h, w]) => ({ r, c, h, w })),
       font: src.font,
       charts: selectionOnly ? [] : chartData.filter((x): x is NonNullable<typeof x> => !!x),
+      pictures: pics.filter((x): x is NonNullable<typeof x> => !!x),
     };
   };
 
@@ -1215,6 +1400,7 @@ export default function App() {
     if (!showPageBreaks || !(src instanceof SheetSource) || !pageSetupState) return null;
     const job: PrintJob = {
       title: "",
+      file: "",
       r0: 1,
       c0: 1,
       r1: Math.max(1, src.lastRow),
@@ -1225,6 +1411,7 @@ export default function App() {
       merges: [],
       font: src.font,
       charts: [],
+      pictures: [],
     };
     const pag = paginate(job, pageSetupState);
     return {
@@ -1249,6 +1436,63 @@ export default function App() {
       api.updateTable({ name: t.name, new_name: change.new_name ?? t.name, style: change.style ?? t.style, stripes: change.stripes ?? t.stripes, totals: change.totals ?? t.totals }),
     );
     if (st) await afterChange(st);
+  };
+
+  // ---------------------------------------------------------------- pictures
+  const deletePicture = async (id: number) => {
+    await api.deletePicture(id).catch(fail);
+    setSelectedPicture(null);
+    await afterChange();
+  };
+
+  const updatePicture = async (p: Picture) => {
+    await api.updatePicture(p).catch(fail);
+    await afterChange();
+  };
+
+  /** 삽입 → 그림: a picture from a file, at the active cell. */
+  const insertPicture = async () => {
+    const t = tabRef.current;
+    if (t.kind !== "sheet") return say("그림은 일반 시트에 넣습니다", true);
+    const path = await openDialog({ multiple: false, filters: [{ name: "그림", extensions: ["png", "jpg", "jpeg", "gif", "bmp"] }] });
+    if (typeof path !== "string") return;
+    const f = selectionRef.current.focus;
+    const p = await run("그림 삽입", () => api.addPictureFile(t.index, f.r, f.c, path));
+    if (p) {
+      setSelectedChart(null);
+      setSelectedPicture(p.id);
+      await afterChange();
+    }
+  };
+
+  /** A pasted image (a screenshot, an image copied from a browser). */
+  const pastePicture = async (file: File) => {
+    const t = tabRef.current;
+    if (t.kind !== "sheet") return;
+    const data = await new Promise<string>((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result));
+      r.onerror = () => reject(r.error);
+      r.readAsDataURL(file);
+    });
+    const f = selectionRef.current.focus;
+    const p = await run("그림 붙여넣기", () => api.addPictureData(t.index, f.r, f.c, data));
+    if (p) {
+      setSelectedChart(null);
+      setSelectedPicture(p.id);
+      await afterChange();
+    }
+  };
+
+  /** 원래 크기로: the image's own size, at most the size it was inserted at. */
+  const resetPictureSize = async (p: Picture) => {
+    const url = await pictureUrl(p.id);
+    const img = new Image();
+    img.src = url;
+    await img.decode().catch(() => {});
+    const w = img.naturalWidth || p.anchor.width;
+    const h = img.naturalHeight || p.anchor.height;
+    await updatePicture({ ...p, anchor: { ...p.anchor, width: w, height: h } });
   };
 
   // ---------------------------------------------------------------- charts, memos, pivots
@@ -1328,6 +1572,29 @@ export default function App() {
     const mod = e.ctrlKey || e.metaKey;
     const f = selectionRef.current.focus;
     const t = tabRef.current;
+    if (selectedPicture !== null) {
+      // A selected picture takes Delete, Esc and the arrow keys (a nudge), like in Excel.
+      const p = pictures.find((x) => x.id === selectedPicture);
+      if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        await deletePicture(selectedPicture);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setSelectedPicture(null);
+        return;
+      }
+      const nudge: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+      if (p && nudge[e.key]) {
+        e.preventDefault();
+        const [x, y] = nudge[e.key];
+        const a = { ...p.anchor, dx: Math.max(0, p.anchor.dx + x * (mod ? 1 : 4)), dy: Math.max(0, p.anchor.dy + y * (mod ? 1 : 4)) };
+        await updatePicture({ ...p, anchor: a });
+        return;
+      }
+      if (!mod) return;
+    }
     if (selectedChart !== null) {
       // A selected chart takes Delete and Esc, like a selected shape in Excel.
       if (e.key === "Delete" || e.key === "Backspace") {
@@ -1486,6 +1753,11 @@ export default function App() {
       if (k === "F3") {
         handled();
         actions.nameManager();
+        return;
+      }
+      if (code === "Backquote") {
+        handled();
+        toggleShowFormulas();
         return;
       }
       if (lower === "z") {
@@ -1658,6 +1930,7 @@ export default function App() {
   const onCellDown = (h: Hit, e: React.MouseEvent) => {
     setMenu(null);
     setSelectedChart(null);
+    setSelectedPicture(null);
     const s = sessionRef.current;
     const src = sourceRef.current;
     if (s && pointable(s)) {
@@ -1715,6 +1988,7 @@ export default function App() {
 
   const onContextMenu = async (h: Hit, x: number, y: number) => {
     setSelectedChart(null);
+    setSelectedPicture(null);
     if (sessionRef.current) void commit("none");
     const rg = range();
     const inside = h.r >= rg.r0 && h.r <= rg.r1 && h.c >= rg.c0 && h.c <= rg.c1;
@@ -1928,6 +2202,7 @@ export default function App() {
     },
     manageCf: () => tabRef.current.kind === "sheet" && setDialog({ kind: "cfManager" }),
     insertChart: (k) => void insertChart(k),
+    insertPicture: () => void insertPicture(),
     insertPivot: () => void openPivotDialog(),
     refreshAll: async () => {
       const st = await run("새로 고침", api.refreshPivots);
@@ -2011,6 +2286,21 @@ export default function App() {
       const current = await api.linkAt(sheet, f.r, f.c).catch(() => null);
       setDialog({ kind: "hyperlink", text: sourceRef.current?.cell(f.r, f.c)?.text ?? "", current });
     },
+    tracePrecedents: () => void trace("prec"),
+    traceDependents: () => void trace("dep"),
+    removeArrows: () => {
+      setArrows([]);
+      traceFrontier.current = null;
+    },
+    toggleShowFormulas: () => toggleShowFormulas(),
+    evaluateFormula: async () => {
+      const t = tabRef.current;
+      if (t.kind !== "sheet") return;
+      const f = selectionRef.current.focus;
+      const d = await api.cellDetail(t.index, f.r, f.c).catch(() => null);
+      if (!d?.input.startsWith("=")) return say("수식이 있는 셀을 선택하세요", true);
+      setDialog({ kind: "evaluate", sheet: t.index, row: f.r, col: f.c });
+    },
     nameManager: async () => setDialog({ kind: "names", list: await api.names().catch(() => []), startNew: false }),
     defineName: async () => setDialog({ kind: "names", list: await api.names().catch(() => []), startNew: true }),
     print: () => void openPrint(),
@@ -2067,6 +2357,12 @@ export default function App() {
     fitWidth: (fit) => pageSetupState && void changePageSetup({ ...pageSetupState, fit }),
     printGrid: (v) => pageSetupState && void changePageSetup({ ...pageSetupState, gridlines: v }),
     printHeadings: (v) => pageSetupState && void changePageSetup({ ...pageSetupState, headings: v }),
+    printArea: (set) => {
+      if (!pageSetupState) return;
+      void changePageSetup({ ...pageSetupState, print_area: set ? range() : null });
+      say(set ? `인쇄 영역: ${rangeLabel(selection.anchor, selection.focus)}` : "인쇄 영역을 해제했습니다");
+    },
+    headerFooter: () => setSheetDialog({ kind: "headerFooter" }),
     printTitles: async () => {
       if (!pageSetupState) return;
       const cur = pageSetupState.title_rows;
@@ -2179,18 +2475,27 @@ export default function App() {
         protectedSheet={!!protection?.protected}
         pageSetup={pageSetupState}
         showPageBreaks={showPageBreaks}
+        showFormulas={sheetIndex >= 0 && formulaSheets.has(sheetIndex)}
+        hasArrows={arrows.length > 0}
       />
 
       <div className="formula-bar">
         <input
           ref={nameBox}
           className="name-box"
-          defaultValue={rangeLabel(selection.anchor, selection.focus)}
-          key={`${tabKey(tab)}:${rangeLabel(selection.anchor, selection.focus)}`}
+          defaultValue={pictures.find((p) => p.id === selectedPicture)?.name ?? rangeLabel(selection.anchor, selection.focus)}
+          key={`${tabKey(tab)}:${rangeLabel(selection.anchor, selection.focus)}:${pictures.find((p) => p.id === selectedPicture)?.name ?? ""}`}
           onKeyDown={(e) => {
             if (e.key === "Escape") return focusGrid();
             if (e.key !== "Enter") return;
             const v = (e.target as HTMLInputElement).value.trim();
+            // With a picture selected, the name box renames it, as in Excel.
+            const pic = pictures.find((p) => p.id === selectedPicture);
+            if (pic) {
+              if (v && v !== pic.name) void updatePicture({ ...pic, name: v });
+              focusGrid();
+              return;
+            }
             void (async () => {
               if (await goTo(v)) return;
               // A new name in the name box names the selection, as in Excel.
@@ -2300,7 +2605,11 @@ export default function App() {
                     onPaste={(e) => {
                       if (sessionRef.current) return;
                       e.preventDefault();
-                      void doPaste(e.clipboardData.getData("text/plain"));
+                      const text = e.clipboardData.getData("text/plain");
+                      // An image alone on the clipboard (a screenshot) becomes a picture, as in Excel.
+                      const image = Array.from(e.clipboardData.files).find((f) => f.type.startsWith("image/"));
+                      if (image && !text) void pastePicture(image);
+                      else void doPaste(text);
                     }}
                   />
                   {session?.origin === "cell" && editingHere && acList}
@@ -2395,6 +2704,34 @@ export default function App() {
                 };
                 return (
                   <>
+                    {source instanceof SheetSource && <TraceLayer arrows={arrows} sheet={source.sheet} geo={geo} />}
+                    <PictureLayer
+                      pictures={pictures}
+                      geo={geo}
+                      selected={selectedPicture}
+                      onSelect={(id) => {
+                        if (sessionRef.current) void commit("none");
+                        setSelectedChart(null);
+                        setSelectedPicture(id);
+                        focusGrid();
+                      }}
+                      onChange={(p) => void updatePicture(p)}
+                      onContextMenu={(p, x, y) =>
+                        setMenu({
+                          x,
+                          y,
+                          items: [
+                            { label: "원래 크기로", onClick: () => void resetPictureSize(p) },
+                            {
+                              label: "가로세로 비율 맞추기",
+                              onClick: () => void updatePicture({ ...p, anchor: { ...p.anchor, height: Math.round(p.anchor.width / (p.ratio || 1)) } }),
+                            },
+                            { separator: true },
+                            { label: "삭제", shortcut: "Delete", onClick: () => void deletePicture(p.id) },
+                          ],
+                        })
+                      }
+                    />
                     <ChartLayer
                       charts={charts}
                       geo={geo}
@@ -2402,6 +2739,7 @@ export default function App() {
                       selected={selectedChart}
                       onSelect={(id) => {
                         if (sessionRef.current) void commit("none");
+                        setSelectedPicture(null);
                         setSelectedChart(id);
                         focusGrid();
                       }}
@@ -2494,10 +2832,42 @@ export default function App() {
 
       <footer className="sheetbar">
         <div className="tabs">
-          {info?.sheets.map((name, i) => (
+          {info?.sheets.map((name, i) => {
+            const meta = info.tabs?.[i];
+            if (meta?.hidden) return null;
+            const on = tab.kind === "sheet" && tab.index === i;
+            const visible = info.tabs?.filter((x) => !x.hidden).length ?? info.sheets.length;
+            const anyHidden = info.tabs?.some((x) => x.hidden) ?? false;
+            return (
             <button
               key={`s${i}`}
-              className={`tab ${tab.kind === "sheet" && tab.index === i ? "on" : ""}`}
+              className={`tab ${on ? "on" : ""} ${dragOver === i ? "dragover" : ""}`}
+              style={meta?.color ? (on ? { boxShadow: `inset 0 -3px 0 ${meta.color}` } : { background: meta.color, color: "#fff" }) : undefined}
+              draggable
+              onDragStart={(e) => {
+                dragTab.current = i;
+                e.dataTransfer.effectAllowed = "copyMove";
+              }}
+              onDragOver={(e) => {
+                if (dragTab.current === null) return;
+                e.preventDefault();
+                setDragOver(i);
+              }}
+              onDragLeave={() => setDragOver((d) => (d === i ? null : d))}
+              onDrop={(e) => {
+                e.preventDefault();
+                const from = dragTab.current;
+                dragTab.current = null;
+                setDragOver(null);
+                if (from === null) return;
+                // Ctrl+drag copies the sheet, as in Excel.
+                if (e.ctrlKey) copySheet(from, i);
+                else if (from !== i) moveSheet(from, i);
+              }}
+              onDragEnd={() => {
+                dragTab.current = null;
+                setDragOver(null);
+              }}
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => {
                 const s = sessionRef.current;
@@ -2506,13 +2876,20 @@ export default function App() {
               onDoubleClick={() => renameSheet(i)}
               onContextMenu={(e) => {
                 e.preventDefault();
+                const at = { x: e.clientX, y: e.clientY - 240 };
                 setMenu({
-                  x: e.clientX,
-                  y: e.clientY - 110,
+                  x: at.x,
+                  y: at.y,
                   items: [
                     { label: "삽입", onClick: insertSheet },
-                    { label: "삭제", disabled: (info?.sheets.length ?? 1) <= 1, onClick: () => deleteSheet(i) },
+                    { label: "삭제", disabled: visible <= 1, onClick: () => deleteSheet(i) },
                     { label: "이름 바꾸기", onClick: () => renameSheet(i) },
+                    { label: "이동/복사...", onClick: () => setSheetDialog({ kind: "move", sheet: i }) },
+                    { separator: true },
+                    { label: "탭 색...", onClick: () => setTabColorAt({ sheet: i, x: at.x, y: at.y }) },
+                    { separator: true },
+                    { label: "숨기기", disabled: visible <= 1, onClick: () => hideSheet(i) },
+                    { label: "숨기기 취소...", disabled: !anyHidden, onClick: () => setSheetDialog({ kind: "unhide" }) },
                   ],
                 });
               }}
@@ -2520,7 +2897,8 @@ export default function App() {
               {info?.protected?.[i] && <span className="lock">🔒</span>}
               {name}
             </button>
-          ))}
+            );
+          })}
           <button className="tab add" onMouseDown={(e) => e.preventDefault()} onClick={insertSheet} title="새 시트 (Shift+F11)">
             ＋
           </button>
@@ -2794,6 +3172,18 @@ export default function App() {
           }}
         />
       )}
+      {dialog?.kind === "evaluate" && (
+        <EvaluateDialog
+          sheet={dialog.sheet}
+          sheetName={sheetName(dialog.sheet)}
+          row={dialog.row}
+          col={dialog.col}
+          onClose={() => {
+            setDialog(null);
+            focusGrid();
+          }}
+        />
+      )}
       {dialog?.kind === "goalSeek" && (
         <GoalSeekDialog
           setCell={addr(selection.focus)}
@@ -2841,6 +3231,65 @@ export default function App() {
         />
       )}
       {printJob && pageSetupState && <PrintView job={printJob} setup={pageSetupState} />}
+      {savePrompt && <SaveChangesDialog name={savePrompt.name} onChoose={savePrompt.resolve} />}
+      {sheetDialog?.kind === "move" && info && (
+        <MoveCopyDialog
+          tabs={info.tabs}
+          sheet={sheetDialog.sheet}
+          onClose={() => setSheetDialog(null)}
+          onOk={(to, copy) => {
+            setSheetDialog(null);
+            if (copy) copySheet(sheetDialog.sheet, to);
+            else moveSheet(sheetDialog.sheet, to);
+          }}
+        />
+      )}
+      {sheetDialog?.kind === "unhide" && info && (
+        <UnhideDialog
+          tabs={info.tabs}
+          onClose={() => setSheetDialog(null)}
+          onOk={(sheet) => {
+            setSheetDialog(null);
+            unhideSheet(sheet);
+          }}
+        />
+      )}
+      {sheetDialog?.kind === "headerFooter" && pageSetupState && (
+        <HeaderFooterDialog
+          setup={pageSetupState}
+          onClose={() => setSheetDialog(null)}
+          onOk={(ps) => {
+            setSheetDialog(null);
+            void changePageSetup(ps);
+          }}
+        />
+      )}
+      {tabColorAt && (
+        <>
+          <div className="menu-backdrop" style={{ position: "fixed", inset: 0, zIndex: 49 }} onMouseDown={() => setTabColorAt(null)} />
+          <div className="sheet-color-pop" style={{ left: tabColorAt.x, top: Math.max(8, tabColorAt.y) }}>
+            <ColorPicker
+              noneLabel="색 없음"
+              onPick={(c) => {
+                const sheet = tabColorAt.sheet;
+                setTabColorAt(null);
+                void sheetOp("탭 색", () => api.setSheetColor(sheet, c));
+              }}
+            />
+          </div>
+        </>
+      )}
+      {recovered.length > 0 && !savePrompt && (
+        <RecoveryDialog
+          files={recovered}
+          onOpen={(id) => void openRecovered(id)}
+          onDiscard={(id) => {
+            void api.recoveryDiscard(id).catch(fail);
+            setRecovered((list) => list.filter((f) => f.id !== id));
+          }}
+          onClose={() => setRecovered([])}
+        />
+      )}
       {msgBox && (
         <MessageBox
           message={msgBox}

@@ -123,6 +123,8 @@ pub enum Guard {
     DeleteColumns,
     Sort,
     AutoFilter,
+    /// Pictures and other objects ("편집 개체"), locked on a protected sheet as in Excel.
+    Objects,
 }
 
 const PROTECTED: &str = "변경하려는 셀이 보호된 시트에 있습니다. 변경하려면 검토 탭에서 시트 보호를 해제하세요.";
@@ -164,6 +166,15 @@ pub struct PageSetup {
     pub row_breaks: Vec<i32>,
     pub col_breaks: Vec<i32>,
     pub page_numbers: bool,
+    /// 인쇄 영역: only this part of the sheet is printed.
+    #[serde(default)]
+    pub print_area: Option<CellRange>,
+    /// 머리글 and 바닥글: left, center and right parts, with Excel's codes
+    /// (&P page, &N pages, &D date, &T time, &F file, &A sheet, && an ampersand).
+    #[serde(default)]
+    pub header: [String; 3],
+    #[serde(default)]
+    pub footer: [String; 3],
 }
 
 impl PageSetup {
@@ -178,12 +189,117 @@ impl PageSetup {
             row_breaks: Vec::new(),
             col_breaks: Vec::new(),
             page_numbers: false,
+            print_area: None,
+            header: Default::default(),
+            footer: Default::default(),
         }
     }
 
     pub fn is_default(&self) -> bool {
         *self == PageSetup::new(self.sheet)
     }
+
+    /// The footer as printed: the 「페이지 번호」 switch stands for a centered
+    /// "&P / &N" when no footer is set.
+    pub fn effective_footer(&self) -> [String; 3] {
+        if self.page_numbers && self.footer.iter().all(String::is_empty) {
+            [String::new(), "&P / &N".into(), String::new()]
+        } else {
+            self.footer.clone()
+        }
+    }
+}
+
+/// A header or footer as xlsx writes it: `&L…&C…&R…`.
+pub fn header_footer_code(parts: &[String; 3]) -> String {
+    let mut out = String::new();
+    for (tag, part) in ["&L", "&C", "&R"].iter().zip(parts) {
+        if !part.is_empty() {
+            out.push_str(tag);
+            out.push_str(part);
+        }
+    }
+    out
+}
+
+/// Splits an xlsx header or footer into its left, center and right parts.
+/// Formatting codes (font, size, bold…) are dropped; the field codes stay.
+pub fn parse_header_footer(code: &str) -> [String; 3] {
+    let mut parts: [String; 3] = Default::default();
+    let mut section = 1;
+    let chars: Vec<char> = code.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c != '&' || i + 1 == chars.len() {
+            parts[section].push(c);
+            i += 1;
+            continue;
+        }
+        let next = chars[i + 1];
+        match next {
+            'L' => section = 0,
+            'C' => section = 1,
+            'R' => section = 2,
+            'P' | 'N' | 'D' | 'T' | 'F' | 'A' | '&' => {
+                parts[section].push('&');
+                parts[section].push(next);
+            }
+            '"' => {
+                // &"Font,Style": skip to the closing quote.
+                let mut j = i + 2;
+                while j < chars.len() && chars[j] != '"' {
+                    j += 1;
+                }
+                i = j + 1;
+                continue;
+            }
+            d if d.is_ascii_digit() => {
+                // &12: a font size.
+                let mut j = i + 1;
+                while j < chars.len() && chars[j].is_ascii_digit() {
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+            // &B, &I, &U, &S, &E, &X, &Y, &K…: formatting.
+            'K' => {
+                i += 8.min(chars.len() - i);
+                continue;
+            }
+            _ => {}
+        }
+        i += 2;
+    }
+    parts
+}
+
+/// What a header or footer part shows on page `page` of `pages`.
+pub fn render_header_footer(part: &str, page: usize, pages: usize, file: &str, sheet: &str, date: &str, time: &str) -> String {
+    let mut out = String::new();
+    let mut it = part.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '&' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('P') => out.push_str(&page.to_string()),
+            Some('N') => out.push_str(&pages.to_string()),
+            Some('D') => out.push_str(date),
+            Some('T') => out.push_str(time),
+            Some('F') => out.push_str(file),
+            Some('A') => out.push_str(sheet),
+            Some('&') => out.push('&'),
+            Some(o) => {
+                out.push('&');
+                out.push(o);
+            }
+            None => out.push('&'),
+        }
+    }
+    out
 }
 
 fn shift_index(v: i32, at: i32, count: i32) -> Option<i32> {
@@ -358,28 +474,16 @@ impl Workbook {
             }
         }
         t2.reference = range_a1(r);
-        if new_name != u.name {
+        let renamed = new_name != u.name;
+        if renamed {
             t2.name = new_name.to_string();
             t2.display_name = new_name.to_string();
-            // Formulas that use the old name follow, as in Excel.
-            let cells: Vec<(i32, i32)> = (0..self.sheet_names().len() as u32)
-                .flat_map(|s| self.model().workbook.worksheet(s).map(|w| w.sheet_data.cells().map(|(r, c, _)| (r, c)).collect::<Vec<_>>()).unwrap_or_default().into_iter().map(move |(r, c)| (s, r, c)))
-                .filter_map(|(s, r, c)| (s == sheet).then_some((r, c)))
-                .collect();
-            for (rr, cc) in cells {
-                let inp = self.input(sheet, rr, cc)?;
-                if inp.starts_with('=') && inp.contains(&format!("{}[", u.name)) {
-                    let out = inp.replace(&format!("{}[", u.name), &format!("{new_name}["));
-                    self.model_mut().workbook.tables.insert(t2.name.clone(), t2.clone());
-                    self.model_mut().refresh_parser_tables();
-                    self.write_input(sheet, rr, cc, &out, true)?;
-                }
-            }
         }
         let wb = &mut self.model_mut().workbook;
         wb.tables.remove(&u.name);
         wb.tables.insert(t2.name.clone(), t2);
-        self.model_mut().refresh_parser_tables();
+        // Formulas that use the table follow its new name and size, as in Excel.
+        self.model_mut().restructure(renamed.then_some((u.name.as_str(), new_name)), None);
         if let Some(f) = self.filters.iter_mut().find(|f| f.sheet == sheet && f.range.r0 == r.r0 && f.range.c0 == r.c0) {
             // Filters cover the data, not the total row.
             f.range = CellRange { r1: if u.totals { r.r1 - 1 } else { r.r1 }, ..r };
@@ -412,7 +516,8 @@ impl Workbook {
             }
         }
         self.model_mut().workbook.tables.remove(name);
-        self.model_mut().refresh_parser_tables();
+        // Its structured references become the ranges they stand for, as in Excel.
+        self.model_mut().restructure(None, Some(name));
         self.filters.retain(|f| !(f.sheet == sheet && f.range.r0 == r.r0 && f.range.c0 == r.c0));
         self.um.set_rows_hidden(sheet, r.r0, r.r1, false)?;
         self.commit(start)
@@ -470,8 +575,34 @@ impl Workbook {
             }
         }
         if changed {
-            self.model_mut().refresh_parser_tables();
+            self.model_mut().restructure(None, None);
         }
+    }
+
+    /// Excel's 표 자동 확장: typing in the row right under a table (without a
+    /// total row) makes that row part of it. Returns whether a table grew.
+    pub(crate) fn grow_table_for(&mut self, sheet: u32, row: i32, col: i32, input: &str) -> bool {
+        if input.is_empty() || !self.input(sheet, row, col).unwrap_or_default().is_empty() {
+            return false;
+        }
+        let Some(name) = self.sheet_names().get(sheet as usize).cloned() else { return false };
+        let grown = self.model().workbook.tables.values().find_map(|t| {
+            if t.sheet_name != name || t.totals_row_count != 0 {
+                return None;
+            }
+            let (_, r0, c0, r1, c1) = parse_range(&t.reference)?;
+            let r = CellRange { r0, c0, r1, c1 };
+            (row == r.r1 + 1 && (r.c0..=r.c1).contains(&col)).then(|| (t.name.clone(), CellRange { r1: row, ..r }, r))
+        });
+        let Some((table, range, old)) = grown else { return false };
+        if let Some(t) = self.model_mut().workbook.tables.get_mut(&table) {
+            t.reference = range_a1(range);
+        }
+        if let Some(f) = self.filters.iter_mut().find(|f| f.sheet == sheet && f.range.r0 == old.r0 && f.range.c0 == old.c0) {
+            f.range.r1 = f.range.r1.max(row);
+        }
+        self.model_mut().restructure(None, None);
+        true
     }
 
     // ------------------------------------------------------------ protection
@@ -563,6 +694,7 @@ impl Workbook {
             Guard::DeleteColumns => o.delete_columns,
             Guard::Sort => o.sort,
             Guard::AutoFilter => o.auto_filter,
+            Guard::Objects => false,
         };
         if allowed {
             Ok(())
@@ -583,6 +715,20 @@ impl Workbook {
             *b = nb.max(na);
         }
         for p in self.page_setups.iter_mut().filter(|p| p.sheet == sheet) {
+            if let Some(a) = p.print_area {
+                let (lo, hi) = if axis == Axis::Row { (a.r0, a.r1) } else { (a.c0, a.c1) };
+                // The area grows with rows inserted inside it and shrinks with rows deleted.
+                let nlo = shift_index(lo, at, count).unwrap_or(at);
+                let nhi = shift_index(hi, at, count).unwrap_or(at + count.min(0)).max(nlo);
+                let gone = count < 0 && lo >= at && hi < at - count;
+                p.print_area = if gone {
+                    None
+                } else if axis == Axis::Row {
+                    Some(CellRange { r0: nlo, r1: nhi, ..a })
+                } else {
+                    Some(CellRange { c0: nlo, c1: nhi, ..a })
+                };
+            }
             let list = if axis == Axis::Row { &mut p.row_breaks } else { &mut p.col_breaks };
             *list = list.iter().filter_map(|b| shift_index(*b, at, count)).collect();
             if axis == Axis::Row {
@@ -728,6 +874,64 @@ mod tests {
         }
         wb.set_inputs(0, &cells).unwrap();
         wb
+    }
+
+    #[test]
+    fn structured_refs_stay_as_written_and_follow_the_table() {
+        let mut wb = book();
+        wb.set_input(0, 1, 3, "두배").unwrap();
+        wb.create_table(0, CellRange { r0: 1, c0: 1, r1: 4, c1: 3 }, true, "TableStyleMedium2").unwrap();
+        let other = wb.add_sheet().unwrap();
+        wb.set_input(other, 1, 1, "=SUM(표1[금액])").unwrap();
+        wb.set_input(0, 2, 3, "=[@금액]*2").unwrap();
+        wb.set_input(0, 1, 5, "=COUNTA(표1[[#Headers],[지역]:[금액]])").unwrap();
+        assert_eq!(wb.input(other, 1, 1).unwrap(), "=SUM(표1[금액])");
+        assert_eq!(wb.input(0, 2, 3).unwrap(), "=표1[@금액]*2");
+        assert_eq!(wb.value(other, 1, 1).unwrap(), Scalar::Number(220.0));
+        assert_eq!(wb.value(0, 2, 3).unwrap(), Scalar::Number(200.0));
+        assert_eq!(wb.value(0, 1, 5).unwrap(), Scalar::Number(2.0));
+        // [@금액] copied down keeps meaning "this row".
+        wb.fill_range_with(0, CellRange { r0: 3, c0: 3, r1: 4, c1: 3 }, "=[@금액]*2").unwrap();
+        assert_eq!(wb.value(0, 4, 3).unwrap(), Scalar::Number(140.0));
+        // Typing under the table makes the table bigger, and the formulas follow.
+        wb.set_input(0, 5, 2, "30").unwrap();
+        assert_eq!(wb.table_at(0, 5, 1).unwrap().range, CellRange { r0: 1, c0: 1, r1: 5, c1: 3 });
+        assert_eq!(wb.value(other, 1, 1).unwrap(), Scalar::Number(250.0));
+        // Rows inserted inside the table grow it too.
+        wb.insert_rows(0, 3, 1).unwrap();
+        wb.set_input(0, 3, 2, "5").unwrap();
+        assert_eq!(wb.value(other, 1, 1).unwrap(), Scalar::Number(255.0));
+        assert_eq!(wb.input(other, 1, 1).unwrap(), "=SUM(표1[금액])");
+        // Renaming the table renames it in formulas on every sheet; undo brings it back.
+        wb.update_table(&TableUpdate { name: "표1".into(), new_name: "매출".into(), style: "TableStyleMedium2".into(), stripes: true, totals: false })
+            .unwrap();
+        assert_eq!(wb.input(other, 1, 1).unwrap(), "=SUM(매출[금액])");
+        assert_eq!(wb.value(other, 1, 1).unwrap(), Scalar::Number(255.0));
+        wb.undo().unwrap();
+        assert_eq!(wb.input(other, 1, 1).unwrap(), "=SUM(표1[금액])");
+        assert_eq!(wb.value(other, 1, 1).unwrap(), Scalar::Number(255.0));
+        // xlsx keeps them, in the file's own spelling.
+        let dir = crate::project::new_work_dir().unwrap();
+        let path = dir.join("s.xlsx");
+        wb.save_xlsx(&path).unwrap();
+        let sheet1 = {
+            let f = std::fs::File::open(&path).unwrap();
+            let mut z = zip::ZipArchive::new(f).unwrap();
+            let mut x = String::new();
+            std::io::Read::read_to_string(&mut z.by_name("xl/worksheets/sheet1.xml").unwrap(), &mut x).unwrap();
+            x
+        };
+        assert!(sheet1.contains("표1[[#This Row],[금액]]*2"), "{sheet1}");
+        let mut back = Workbook::open_xlsx(&path).unwrap();
+        assert_eq!(back.input(other, 1, 1).unwrap(), "=SUM(표1[금액])");
+        assert_eq!(back.input(0, 2, 3).unwrap(), "=표1[@금액]*2");
+        assert_eq!(back.value(other, 1, 1).unwrap(), Scalar::Number(255.0));
+        back.set_input(0, 7, 2, "45").unwrap();
+        assert_eq!(back.value(other, 1, 1).unwrap(), Scalar::Number(300.0));
+        // 범위로 변환: the references become the ranges they stood for.
+        back.convert_table_to_range("표1").unwrap();
+        assert_eq!(back.input(other, 1, 1).unwrap(), "=SUM(Sheet1!$B$2:$B$7)");
+        assert_eq!(back.value(other, 1, 1).unwrap(), Scalar::Number(300.0));
     }
 
     #[test]

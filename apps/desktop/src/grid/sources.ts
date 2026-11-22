@@ -78,6 +78,8 @@ export class SheetSource extends Emitter implements GridSource {
   frozenRows = 0;
   frozenCols = 0;
   showGrid = true;
+  /** 수식 표시 (Ctrl+`): formula cells show their formula. */
+  showFormulas = false;
   lastRow = 0;
   lastCol = 0;
   private cells = new Map<number, CellData>();
@@ -197,7 +199,7 @@ export class SheetSource extends Emitter implements GridSource {
     const r1 = r0 + BLOCK_R - 1;
     const c1 = c0 + BLOCK_C - 1;
     try {
-      const vp = await api.viewport(this.sheet, r0, c0, r1, c1);
+      const vp = await api.viewport(this.sheet, r0, c0, r1, c1, this.showFormulas);
       if (gen !== this.generation) return;
       for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) this.cells.delete(this.key(r, c));
       for (const cell of vp.cells) this.cells.set(this.key(cell.row, cell.col), cell);
@@ -206,6 +208,16 @@ export class SheetSource extends Emitter implements GridSource {
     } finally {
       this.inflight.delete(k);
     }
+  }
+
+  setShowFormulas(on: boolean) {
+    if (this.showFormulas === on) return;
+    this.showFormulas = on;
+    this.generation++;
+    this.loaded.clear();
+    this.inflight.clear();
+    const [r0, c0, r1, c1] = this.last;
+    this.request(r0, c0, r1, c1);
   }
 
   /** Reloads layout and the cells on screen after an edit. */

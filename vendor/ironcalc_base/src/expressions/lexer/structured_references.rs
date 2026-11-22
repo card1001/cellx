@@ -115,8 +115,71 @@ impl<'a> Lexer<'a> {
     //     MyTable[[#This Row], [Jan]:[Dec]] => MyTable[@[Jan]:[Dec]]
     //   But this is only a UI thing that we will ignore for now.
     pub(crate) fn consume_structured_reference(&mut self, table_name: &str) -> Result<TokenType> {
+        let was = std::mem::replace(&mut self.in_structured, true);
+        let start = self.position;
+        let result = self.consume_structured_reference_inner(table_name);
+        self.in_structured = was;
+        if result.is_err() {
+            self.position = start;
+        }
+        result
+    }
+
+    /// CellX: `@` for `[#This Row]`, as Excel shows it: `T[@]`, `T[@Col]`,
+    /// `T[@[My Col]]`, `T[@[Jan]:[Dec]]`.
+    fn consume_this_row(&mut self, table_name: &str) -> Result<TokenType> {
+        self.position += 1; // '@'
+        let structured = |reference| TokenType::StructuredReference {
+            table_name: table_name.to_string(),
+            specifier: Some(TableSpecifier::ThisRow),
+            table_reference: reference,
+        };
+        match self.peek_char() {
+            Some(']') => {
+                self.position += 1;
+                Ok(structured(None))
+            }
+            Some('[') => {
+                let left = self.consume_column_reference()?;
+                let reference = if self.peek_char() == Some(':') {
+                    self.position += 1;
+                    TableReference::RangeReference((left, self.consume_column_reference()?))
+                } else {
+                    TableReference::ColumnReference(left)
+                };
+                if self.peek_char() != Some(']') {
+                    return Err(LexerError { position: self.position, message: "Invalid structured reference".to_string() });
+                }
+                self.position += 1;
+                Ok(structured(Some(reference)))
+            }
+            _ => {
+                let mut name = String::new();
+                while let Some(c) = self.peek_char() {
+                    self.position += 1;
+                    match c {
+                        ']' => return Ok(structured(Some(TableReference::ColumnReference(name)))),
+                        '\'' => match self.peek_char() {
+                            Some(n) => {
+                                self.position += 1;
+                                name.push(n);
+                            }
+                            None => break,
+                        },
+                        _ => name.push(c),
+                    }
+                }
+                Err(LexerError { position: self.position, message: "Invalid structured reference".to_string() })
+            }
+        }
+    }
+
+    fn consume_structured_reference_inner(&mut self, table_name: &str) -> Result<TokenType> {
         self.expect(TokenType::LeftBracket)?;
         let peek_char = self.peek_char();
+        if peek_char == Some('@') {
+            return self.consume_this_row(table_name);
+        }
         if peek_char == Some(']') {
             // This is just a reference to the full table
             self.expect(TokenType::RightBracket)?;

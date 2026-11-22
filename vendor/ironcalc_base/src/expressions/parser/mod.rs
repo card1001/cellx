@@ -81,7 +81,7 @@ pub(crate) fn parse_range(formula: &str) -> Result<(i32, i32, i32, i32), String>
 
 fn get_table_column_by_name(table_column_name: &str, table: &Table) -> Option<i32> {
     for (index, table_column) in table.columns.iter().enumerate() {
-        if table_column.name == table_column_name {
+        if table_column.name == table_column_name || table_column.name.to_lowercase() == table_column_name.to_lowercase() {
             return Some(index as i32);
         }
     }
@@ -140,6 +140,75 @@ pub struct CompletionContext {
     pub replace_from: usize,
 }
 
+/// CellX: a structured reference as written, so that a formula keeps showing
+/// `표1[금액]` and follows the table when it grows, is renamed or moves.
+#[derive(PartialEq, Clone, Debug)]
+pub struct StructuredRef {
+    pub table: String,
+    pub specifier: Option<token::TableSpecifier>,
+    pub reference: Option<TableReference>,
+}
+
+fn escape_column(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if matches!(ch, '[' | ']' | '#' | '\'' | '@') {
+            out.push('\'');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+impl StructuredRef {
+    /// The text Excel shows: `표1[금액]`, `표1[@금액]`, `표1[[#Totals],[금액]]`.
+    /// Inside the table itself the name is left out (`[@금액]`) when `implicit`.
+    pub fn text(&self, implicit: bool) -> String {
+        let name = if implicit { "" } else { self.table.as_str() };
+        let simple = |c: &str| !c.is_empty() && !c.chars().any(|ch| matches!(ch, ' ' | ',' | ':' | '[' | ']' | '#' | '\'' | '@' | '"' | '{' | '}' | '$' | '^' | '&' | '*' | '+' | '=' | '-' | '>' | '<' | '/' | '(' | ')'));
+        let column = |c: &str| format!("[{}]", escape_column(c));
+        let reference = |r: &TableReference| match r {
+            TableReference::ColumnReference(c) => column(c),
+            TableReference::RangeReference((a, b)) => format!("{}:{}", column(a), column(b)),
+        };
+        use token::TableSpecifier::*;
+        let spec = |s: &token::TableSpecifier| match s {
+            All => "#All",
+            Data => "#Data",
+            Headers => "#Headers",
+            ThisRow => "#This Row",
+            Totals => "#Totals",
+        };
+        match (&self.specifier, &self.reference) {
+            (None, None) => format!("{name}[]"),
+            (None, Some(TableReference::ColumnReference(c))) if simple(c) => format!("{name}[{c}]"),
+            (None, Some(r)) => format!("{name}[{}]", reference(r)),
+            (Some(ThisRow), None) => format!("{name}[@]"),
+            (Some(ThisRow), Some(TableReference::ColumnReference(c))) if simple(c) => format!("{name}[@{c}]"),
+            (Some(ThisRow), Some(r)) => format!("{name}[@{}]", reference(r)),
+            (Some(s), None) => format!("{name}[{}]", spec(s)),
+            (Some(s), Some(r)) => format!("{name}[[{}],{}]", spec(s), reference(r)),
+        }
+    }
+
+    /// The form xlsx files store (`#This Row` spelled out, the name always given).
+    pub fn file_text(&self) -> String {
+        use token::TableSpecifier::*;
+        match (&self.specifier, &self.reference) {
+            (Some(ThisRow), None) => format!("{}[#This Row]", self.table),
+            (Some(ThisRow), Some(r)) => {
+                let column = |c: &str| format!("[{}]", escape_column(c));
+                let r = match r {
+                    TableReference::ColumnReference(c) => column(c),
+                    TableReference::RangeReference((a, b)) => format!("{}:{}", column(a), column(b)),
+                };
+                format!("{}[[#This Row],{r}]", self.table)
+            }
+            _ => self.text(false),
+        }
+    }
+}
+
 #[derive(PartialEq, Clone, Debug)]
 pub enum Node {
     BooleanKind(bool),
@@ -152,6 +221,8 @@ pub enum Node {
         absolute_column: bool,
         row: i32,
         column: i32,
+        /// CellX: written as a structured reference (`표1[금액]`).
+        structured: Option<Box<StructuredRef>>,
     },
     RangeKind {
         sheet_name: Option<String>,
@@ -164,6 +235,8 @@ pub enum Node {
         absolute_column2: bool,
         row2: i32,
         column2: i32,
+        /// CellX: written as a structured reference (`표1[금액]`).
+        structured: Option<Box<StructuredRef>>,
     },
     WrongReferenceKind {
         sheet_name: Option<String>,
@@ -345,6 +418,21 @@ impl<'a> Parser<'a> {
     pub fn parse(&mut self, formula: &str, context: &CellReferenceRC) -> Node {
         self.lexer.set_formula(formula);
         self.context = context.clone();
+        // CellX: inside a table, `[@금액]` means this table's column.
+        let implicit = if self.lexer.is_a1_mode() && formula.contains('[') {
+            self.tables
+                .values()
+                .find(|t| {
+                    t.sheet_name == context.sheet
+                        && parse_range(&t.reference).is_ok_and(|(c1, r1, c2, r2)| {
+                            (r1..=r2).contains(&context.row) && (c1..=c2).contains(&context.column)
+                        })
+                })
+                .map(|t| t.name.clone())
+        } else {
+            None
+        };
+        self.lexer.set_implicit_table(implicit);
         // At the top level a formula may start with an expression or a range.
         self.expecting_here = vec![ExpectedTokens::Range, ExpectedTokens::Other];
         self.trailing_name = None;
@@ -805,6 +893,7 @@ impl<'a> Parser<'a> {
                         column,
                         absolute_row,
                         absolute_column,
+                        structured: None,
                     },
                     None => Node::WrongReferenceKind {
                         sheet_name: sheet,
@@ -869,6 +958,7 @@ impl<'a> Parser<'a> {
                         absolute_column2,
                         absolute_row1,
                         absolute_row2,
+                        structured: None,
                     },
                     None => Node::WrongRangeKind {
                         sheet_name: sheet,
@@ -1140,189 +1230,123 @@ impl<'a> Parser<'a> {
                 table_name,
                 specifier,
                 table_reference,
-            } => {
-                // We will try to convert to a normal reference
-                // table_name[column_name] => cell1:cell2
-                // table_name[[#This Row], [column_name]:[column_name]] => cell1:cell2
-                let context = &self.context;
-                let context_sheet_index = match self.get_sheet_index_by_name(&context.sheet) {
-                    Some(i) => i,
+            } => self.structured_reference(StructuredRef {
+                table: table_name,
+                specifier,
+                reference: table_reference,
+            }),
+        }
+    }
+
+    /// CellX: resolves a structured reference against the table as it is now,
+    /// keeping how it was written on the node. `[#This Row]` becomes a reference
+    /// relative to the formula's row, so the formula can be shared down a column.
+    fn structured_reference(&self, mut sr: StructuredRef) -> Node {
+        let error = |message: String| Node::ParseErrorKind {
+            formula: self.lexer.get_formula(),
+            expecting: vec![ExpectedTokens::Other],
+            position: 0,
+            message,
+        };
+        let context = &self.context;
+        let Some(context_sheet_index) = self.get_sheet_index_by_name(&context.sheet) else {
+            return error(format!("sheet not found: {}", context.sheet));
+        };
+        let table = match self.tables.get(&sr.table) {
+            Some(t) => t,
+            None => {
+                let lower = sr.table.to_lowercase();
+                match self.tables.iter().find(|(k, _)| k.to_lowercase() == lower) {
+                    Some((_, t)) => t,
                     None => {
-                        return Node::ParseErrorKind {
-                            formula: self.lexer.get_formula(),
-                            expecting: vec![ExpectedTokens::Other],
-                            position: 0,
-                            message: format!("sheet not found: {}", context.sheet),
-                        };
-                    }
-                };
-                // table-name => table
-                let table = match self.tables.get(&table_name) {
-                    Some(t) => t,
-                    None => {
-                        let message = format!(
-                            "Table not found: '{table_name}' at '{}!{}{}'",
+                        return error(format!(
+                            "Table not found: '{}' at '{}!{}{}'",
+                            sr.table,
                             context.sheet,
-                            number_to_column(context.column)
-                                .unwrap_or(format!("{}", context.column)),
+                            number_to_column(context.column).unwrap_or(format!("{}", context.column)),
                             context.row
-                        );
-                        return Node::ParseErrorKind {
-                            formula: self.lexer.get_formula(),
-                            expecting: vec![ExpectedTokens::Other],
-                            position: 0,
-                            message,
-                        };
-                    }
-                };
-                let table_sheet_index = match self.get_sheet_index_by_name(&table.sheet_name) {
-                    Some(i) => i,
-                    None => {
-                        return Node::ParseErrorKind {
-                            formula: self.lexer.get_formula(),
-                            expecting: vec![ExpectedTokens::Other],
-                            position: 0,
-                            message: format!("table sheet not found: {}", table.sheet_name),
-                        };
-                    }
-                };
-
-                let sheet_name = if table_sheet_index == context_sheet_index {
-                    None
-                } else {
-                    Some(table.sheet_name.clone())
-                };
-
-                // context must be with tables.reference
-                #[allow(clippy::expect_used)]
-                let (column_start, mut row_start, column_end, mut row_end) =
-                    parse_range(&table.reference).expect("Failed parsing range");
-
-                let totals_row_count = table.totals_row_count as i32;
-                let header_row_count = table.header_row_count as i32;
-                row_end -= totals_row_count;
-
-                match specifier {
-                    Some(token::TableSpecifier::ThisRow) => {
-                        row_start = context.row;
-                        row_end = context.row;
-                    }
-                    Some(token::TableSpecifier::Totals) => {
-                        if totals_row_count != 0 {
-                            row_start = row_end + 1;
-                            row_end = row_start;
-                        } else {
-                            // Table1[#Totals] is #REF! if Table1 does not have totals
-                            return Node::ErrorKind(token::Error::REF);
-                        }
-                    }
-                    Some(token::TableSpecifier::Headers) => {
-                        row_end = row_start;
-                    }
-                    Some(token::TableSpecifier::Data) => {
-                        row_start += header_row_count;
-                    }
-                    Some(token::TableSpecifier::All) => {
-                        if totals_row_count != 0 {
-                            row_end += 1;
-                        }
-                    }
-                    None => {
-                        // skip the headers
-                        row_start += header_row_count;
-                    }
-                }
-                match table_reference {
-                    None => Node::RangeKind {
-                        sheet_name,
-                        sheet_index: table_sheet_index,
-                        absolute_row1: true,
-                        absolute_column1: true,
-                        row1: row_start,
-                        column1: column_start,
-                        absolute_row2: true,
-                        absolute_column2: true,
-                        row2: row_end,
-                        column2: column_end,
-                    },
-                    Some(TableReference::ColumnReference(s)) => {
-                        let column_index = match get_table_column_by_name(&s, table) {
-                            Some(s) => s + column_start,
-                            None => {
-                                return Node::ParseErrorKind {
-                                    formula: self.lexer.get_formula(),
-                                    expecting: vec![ExpectedTokens::Other],
-                                    position: self.lexer.get_position() as usize,
-                                    message: format!("Expecting column: {s} in table {table_name}"),
-                                };
-                            }
-                        };
-                        if row_start == row_end {
-                            return Node::ReferenceKind {
-                                sheet_name,
-                                sheet_index: table_sheet_index,
-                                absolute_row: true,
-                                absolute_column: true,
-                                row: row_start,
-                                column: column_index,
-                            };
-                        }
-                        Node::RangeKind {
-                            sheet_name,
-                            sheet_index: table_sheet_index,
-                            absolute_row1: true,
-                            absolute_column1: true,
-                            row1: row_start,
-                            column1: column_index,
-                            absolute_row2: true,
-                            absolute_column2: true,
-                            row2: row_end,
-                            column2: column_index,
-                        }
-                    }
-                    Some(TableReference::RangeReference((left, right))) => {
-                        let left_column_index = match get_table_column_by_name(&left, table) {
-                            Some(f) => f + column_start,
-                            None => {
-                                return Node::ParseErrorKind {
-                                    formula: self.lexer.get_formula(),
-                                    expecting: vec![ExpectedTokens::Other],
-                                    position: self.lexer.get_position() as usize,
-                                    message: format!(
-                                        "Expecting column: {left} in table {table_name}"
-                                    ),
-                                };
-                            }
-                        };
-
-                        let right_column_index = match get_table_column_by_name(&right, table) {
-                            Some(f) => f + column_start,
-                            None => {
-                                return Node::ParseErrorKind {
-                                    formula: self.lexer.get_formula(),
-                                    expecting: vec![ExpectedTokens::Other],
-                                    position: self.lexer.get_position() as usize,
-                                    message: format!(
-                                        "Expecting column: {right} in table {table_name}"
-                                    ),
-                                };
-                            }
-                        };
-                        Node::RangeKind {
-                            sheet_name,
-                            sheet_index: table_sheet_index,
-                            absolute_row1: true,
-                            absolute_column1: true,
-                            row1: row_start,
-                            column1: left_column_index,
-                            absolute_row2: true,
-                            absolute_column2: true,
-                            row2: row_end,
-                            column2: right_column_index,
-                        }
+                        ))
                     }
                 }
             }
+        };
+        sr.table = table.name.clone();
+        let Some(table_sheet_index) = self.get_sheet_index_by_name(&table.sheet_name) else {
+            return error(format!("table sheet not found: {}", table.sheet_name));
+        };
+        let sheet_name = (table_sheet_index != context_sheet_index).then(|| table.sheet_name.clone());
+        let Ok((column_start, mut row_start, column_end, mut row_end)) = parse_range(&table.reference) else {
+            return error(format!("invalid table range: {}", table.reference));
+        };
+        let totals_row_count = table.totals_row_count as i32;
+        let header_row_count = table.header_row_count as i32;
+        row_end -= totals_row_count;
+        let mut this_row = false;
+        match sr.specifier {
+            Some(token::TableSpecifier::ThisRow) => this_row = true,
+            Some(token::TableSpecifier::Totals) => {
+                if totals_row_count == 0 {
+                    // Table1[#Totals] is #REF! if Table1 does not have totals
+                    return Node::ErrorKind(token::Error::REF);
+                }
+                row_start = row_end + 1;
+                row_end = row_start;
+            }
+            Some(token::TableSpecifier::Headers) => row_end = row_start,
+            Some(token::TableSpecifier::Data) | None => row_start += header_row_count,
+            Some(token::TableSpecifier::All) => {
+                if totals_row_count != 0 {
+                    row_end += 1;
+                }
+            }
+        }
+        let column = |name: &str| get_table_column_by_name(name, table).map(|i| i + column_start);
+        let (c1, c2) = match &mut sr.reference {
+            None => (column_start, column_end),
+            Some(TableReference::ColumnReference(name)) => match column(name) {
+                Some(c) => {
+                    *name = table.columns[(c - column_start) as usize].name.clone();
+                    (c, c)
+                }
+                None => return error(format!("Expecting column: {name} in table {}", sr.table)),
+            },
+            Some(TableReference::RangeReference((left, right))) => match (column(left), column(right)) {
+                (Some(a), Some(b)) => {
+                    *left = table.columns[(a - column_start) as usize].name.clone();
+                    *right = table.columns[(b - column_start) as usize].name.clone();
+                    (a.min(b), a.max(b))
+                }
+                (None, _) => return error(format!("Expecting column: {left} in table {}", sr.table)),
+                (_, None) => return error(format!("Expecting column: {right} in table {}", sr.table)),
+            },
+        };
+        // In A1 mode relative coordinates are offsets from the formula's cell;
+        // in R1C1 mode they already are.
+        let (abs_row, row1, row2) = if this_row { (false, 0, 0) } else { (true, row_start, row_end) };
+        let structured = Some(Box::new(sr));
+        if row1 == row2 && c1 == c2 {
+            return Node::ReferenceKind {
+                sheet_name,
+                sheet_index: table_sheet_index,
+                absolute_row: abs_row,
+                absolute_column: true,
+                row: row1,
+                column: c1,
+                structured,
+            };
+        }
+        Node::RangeKind {
+            sheet_name,
+            sheet_index: table_sheet_index,
+            absolute_row1: abs_row,
+            absolute_column1: true,
+            row1,
+            column1: c1,
+            absolute_row2: abs_row,
+            absolute_column2: true,
+            row2,
+            column2: c2,
+            structured,
         }
     }
 

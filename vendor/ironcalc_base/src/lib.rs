@@ -47,6 +47,8 @@ pub use crate::constants::{column_width_to_px, px_to_column_width, COLUMN_WIDTH_
 pub use crate::constants::ROW_HEIGHT_FACTOR;
 
 mod actions;
+pub mod audit;
+mod structured;
 mod arithmetic;
 mod cast;
 mod conditional_formatting;

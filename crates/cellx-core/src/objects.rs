@@ -177,6 +177,12 @@ impl Workbook {
     }
 
     pub(crate) fn objects_after_sheet_delete(&mut self, sheet: u32) {
+        self.pictures.retain(|p| p.sheet != sheet);
+        for p in &mut self.pictures {
+            if p.sheet > sheet {
+                p.sheet -= 1;
+            }
+        }
         self.charts.retain(|c| c.sheet != sheet);
         self.pivots.retain(|p| p.sheet != sheet);
         self.filters.retain(|f| f.sheet != sheet);
@@ -214,6 +220,12 @@ impl Workbook {
                 .trim_start_matches('=')
                 .to_string()
         };
+        for p in &mut self.pictures {
+            if p.sheet == sheet {
+                let v = if axis == Axis::Row { &mut p.anchor.row } else { &mut p.anchor.col };
+                *v = shift_index(*v, at, count).unwrap_or(at).max(1);
+            }
+        }
         for c in &mut self.charts {
             c.range = shift_range(&c.range, c.sheet);
             if c.sheet == sheet {
@@ -403,15 +415,15 @@ impl Workbook {
         ))
     }
 
-    fn col_px(&self, sheet: u32, col: i32) -> f64 {
+    pub(crate) fn col_px(&self, sheet: u32, col: i32) -> f64 {
         self.model().get_column_width(sheet, col).unwrap_or(72.0)
     }
 
-    fn row_px(&self, sheet: u32, row: i32) -> f64 {
+    pub(crate) fn row_px(&self, sheet: u32, row: i32) -> f64 {
         self.model().get_row_height(sheet, row).unwrap_or(22.0)
     }
 
-    fn to_marker(&self, sheet: u32, a: &Anchor) -> (Marker, Marker) {
+    pub(crate) fn to_marker(&self, sheet: u32, a: &Anchor) -> (Marker, Marker) {
         let from = Marker {
             col: a.col - 1,
             col_off: (a.dx * EMU_PER_PX) as i64,
@@ -463,6 +475,13 @@ impl Workbook {
             p.protection = self.protections.iter().find(|x| x.sheet == sheet).cloned();
             p.unlocked = self.unlocked.iter().filter(|(s, _)| *s == sheet).map(|(_, r)| *r).collect();
             p.page = self.page_setups.iter().find(|x| x.sheet == sheet).cloned();
+            p.tab_color = self
+                .model()
+                .workbook
+                .worksheet(sheet)
+                .ok()
+                .map(|w| w.color.clone())
+                .filter(|c| *c != ironcalc_base::types::Color::None);
             let filter = self.filters.iter().find(|f| f.sheet == sheet).cloned();
             let names = self.sheet_names();
             let mut tables: Vec<ironcalc_base::types::Table> =
@@ -486,6 +505,11 @@ impl Workbook {
                 p.validations.push(v.clone());
             }
         }
+        for (sheet, pic) in self.picture_parts() {
+            if let Some(p) = parts.get_mut(sheet as usize) {
+                p.pictures.push(pic);
+            }
+        }
         for c in &self.charts {
             let Ok(data) = self.resolve_chart(c) else { continue };
             let Some(p) = parts.get_mut(c.sheet as usize) else { continue };
@@ -505,11 +529,16 @@ impl Workbook {
     /// Objects IronCalc does not read from xlsx: charts, AutoFilter, data validation.
     pub(crate) fn import_extras(&mut self, xlsx: &[u8]) {
         self.import_charts(xlsx);
+        self.import_pictures(xlsx);
         // CellX writes these names itself on save.
         self.model_mut()
             .workbook
             .defined_names
-            .retain(|d| !d.name.eq_ignore_ascii_case("_xlnm._FilterDatabase") && !d.name.eq_ignore_ascii_case("_xlnm.Print_Titles"));
+            .retain(|d| {
+                !d.name.eq_ignore_ascii_case("_xlnm._FilterDatabase")
+                    && !d.name.eq_ignore_ascii_case("_xlnm.Print_Titles")
+                    && !d.name.eq_ignore_ascii_case("_xlnm.Print_Area")
+            });
         for o in ooxml::read_sheet_options(xlsx) {
             let sheet = o.sheet as u32;
             for (r, l) in o.outline_rows {

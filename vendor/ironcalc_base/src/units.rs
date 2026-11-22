@@ -114,6 +114,7 @@ impl<'a> Model<'a> {
                 absolute_column,
                 row,
                 column,
+                structured: _,
             } => {
                 let mut row1 = *row;
                 let mut column1 = *column;
@@ -140,6 +141,7 @@ impl<'a> Model<'a> {
                 absolute_column2: _,
                 row2: _,
                 column2: _,
+                structured: _,
             } => {
                 // We return the unit of the first element
                 let mut row1 = *row1;

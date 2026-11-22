@@ -304,7 +304,11 @@ input.tiny { width: 28px !important; min-width: 0 !important; height: 20px; marg
 .print-nav { justify-content: center; }
 .print-page { position: relative; overflow: hidden; background: #fff; }
 .print-chart { position: absolute; }
-.print-footer { position: absolute; left: 0; right: 0; bottom: 4px; text-align: center; font: 11px "맑은 고딕", sans-serif; color: #333; }
+.print-hf { position: absolute; left: 0; right: 0; display: grid; grid-template-columns: 1fr 1fr 1fr; padding: 0 4px; font: 11px "맑은 고딕", sans-serif; color: #333; white-space: pre-wrap; }
+.print-hf span:nth-child(2) { text-align: center; }
+.print-hf span:nth-child(3) { text-align: right; }
+.print-header { top: 4px; }
+.print-footer { bottom: 4px; }
 .print-page .print-table { border-collapse: collapse; table-layout: fixed; }
 .print-page .print-table td { padding: 0 3px; overflow: hidden; }
 .print-page .print-table th { background: #f3f3f3; border: 1px solid #c8c8c8; font: 11px "맑은 고딕", sans-serif; color: #444; }
@@ -316,3 +320,40 @@ input.tiny { width: 28px !important; min-width: 0 !important; height: 20px; marg
 /* 파일 탭 정보 */
 .about { display: flex; flex-direction: column; justify-content: center; gap: 2px; padding: 0 12px; font-size: 12px; color: #555; }
 .about b { font-size: 14px; color: #222; }
+
+/* Pictures over the sheet */
+.picture-box { position: absolute; pointer-events: auto; cursor: move; }
+.picture-box img { width: 100%; height: 100%; display: block; user-select: none; }
+.picture-box.selected { outline: 1px solid #a1a1aa; }
+.print-picture { position: absolute; }
+.print-picture img { width: 100%; height: 100%; display: block; }
+
+/* 문서 복구 */
+.recovery-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; max-height: 300px; overflow: auto; }
+.recovery-item { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 10px; border: 1px solid #e4e4e7; border-radius: 4px; }
+.recovery-actions { display: flex; gap: 6px; flex-shrink: 0; }
+
+/* 이동/복사, 머리글/바닥글 */
+.list-box { width: 100%; margin: 4px 0 8px; border: 1px solid #d4d4d8; height: 160px; overflow: auto; background: #fff; }
+.list-item { padding: 3px 8px; cursor: default; user-select: none; }
+.list-item.on { background: #4f46e5; color: #fff; }
+.hf-group { border: 1px solid #e4e4e7; border-radius: 4px; margin: 0 0 10px; padding: 6px 10px 10px; }
+.hf-group legend { padding: 0 4px; font-weight: 600; }
+.hf-row { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-bottom: 6px; }
+.hf-code { font-size: 12px; padding: 2px 6px; }
+.hf-parts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.hf-parts label { display: flex; flex-direction: column; gap: 2px; }
+.hf-parts textarea { font: inherit; resize: none; }
+.sheet-color-pop { position: fixed; z-index: 50; background: #fff; border: 1px solid #d4d4d8; box-shadow: 0 4px 14px rgba(0,0,0,.15); }
+.sheetbar .tab.dragover { box-shadow: inset 2px 0 0 #4f46e5; }
+
+/* 수식 분석 */
+.trace-layer { position: absolute; left: 0; top: 0; pointer-events: none; z-index: 4; overflow: visible; }
+.eval-dialog { width: 560px; }
+.eval-head { display: grid; grid-template-columns: 140px 1fr; font-size: 12px; margin-bottom: 4px; }
+.eval-row { display: grid; grid-template-columns: 140px 1fr; gap: 0; align-items: start; }
+.eval-ref { font-size: 12px; padding-top: 6px; word-break: break-all; }
+.eval-box { min-height: 90px; max-height: 220px; overflow: auto; border: 1px solid #c8c8c8; padding: 6px 8px; font-family: Consolas, "D2Coding", monospace; font-size: 13px; white-space: pre-wrap; word-break: break-all; background: #fff; }
+.eval-next { text-decoration: underline; text-decoration-thickness: 2px; }
+.eval-hint { min-height: 34px; margin: 6px 0; }
+.eval-last { font-style: italic; }
