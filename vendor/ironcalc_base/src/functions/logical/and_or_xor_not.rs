@@ -26,7 +26,8 @@ impl<'a> Model<'a> {
             args,
             cell,
             |acc, value| acc.unwrap_or(true) && value,
-            Some(false),
+            // CellX: Excel evaluates every argument, so a later error wins.
+            None,
         )
     }
 
@@ -35,7 +36,7 @@ impl<'a> Model<'a> {
             args,
             cell,
             |acc, value| acc.unwrap_or(false) || value,
-            Some(true),
+            None,
         )
     }
 

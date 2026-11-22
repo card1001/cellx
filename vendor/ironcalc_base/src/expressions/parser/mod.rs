@@ -1097,6 +1097,14 @@ impl<'a> Parser<'a> {
                     }
                 };
 
+                // CellX: `Sheet!Name` is the name scoped to that sheet.
+                if let Some((sheet_name, local)) = name.split_once('!') {
+                    if let Some(index) = self.get_sheet_index_by_name(sheet_name) {
+                        if let Some((scope, formula)) = self.get_defined_name(local, index) {
+                            return Node::DefinedNameKind((name, scope, formula));
+                        }
+                    }
+                }
                 // Could be a defined name or a table
                 if let Some((scope, formula)) = self.get_defined_name(&name, context_sheet_index) {
                     return Node::DefinedNameKind((name, scope, formula));

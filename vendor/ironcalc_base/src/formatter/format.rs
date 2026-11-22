@@ -1,4 +1,3 @@
-use chrono::Datelike;
 
 use crate::{
     locale::Locale,
@@ -6,7 +5,7 @@ use crate::{
 };
 
 use super::{
-    dates::{date_to_serial_number, from_excel_date},
+    dates::date_to_serial_number,
     parser::{ParsePart, Parser, TextToken},
 };
 
@@ -169,12 +168,38 @@ pub fn format_number(value_original: f64, format: &str, locale: &Locale) -> Form
         }
         ParsePart::Date(p) => {
             let tokens = &p.tokens;
-            let mut text = "".to_string();
-            let time_fract = value.fract();
-            let hours = (time_fract * 24.0).floor();
-            let minutes = ((time_fract * 24.0 - hours) * 60.0).floor();
-            let seconds = ((((time_fract * 24.0 - hours) * 60.0) - minutes) * 60.0).round();
-            let date = from_excel_date(value as i64).ok();
+            // CellX: the 1904 date system shows negative dates as "-" and the
+            // date of the absolute value.
+            let negative_1904 = value < 0.0 && crate::formatter::dates::date_system_offset() != 0;
+            let value = if negative_1904 { -value } else { value };
+            let mut text = if negative_1904 { "-".to_string() } else { "".to_string() };
+            // CellX: Excel rounds to the shown precision (whole seconds, or the
+            // "ss.0" digits) before taking the value apart, so 18:57:59.6 is 18:58.
+            let fraction_digits = tokens
+                .iter()
+                .map(|t| match t {
+                    TextToken::SecondFraction(n) => (*n).min(3),
+                    _ => 0,
+                })
+                .max()
+                .unwrap_or(0);
+            let unit = 10i64.pow(fraction_digits);
+            let units = (value * 86400.0 * unit as f64).round() as i64;
+            let whole_seconds = units.div_euclid(unit);
+            let second_fraction = units.rem_euclid(unit);
+            let serial = whole_seconds.div_euclid(86400);
+            if value >= 0.0 && serial > crate::constants::MAXIMUM_DATE_SERIAL_NUMBER as i64 {
+                return Formatted {
+                    text: "#VALUE!".to_owned(),
+                    color: None,
+                    error: Some(format!("Invalid date value: '{value}'")),
+                };
+            }
+            let second_of_day = whole_seconds.rem_euclid(86400);
+            let hours = (second_of_day / 3600) as f64;
+            let minutes = ((second_of_day / 60) % 60) as f64;
+            let seconds = (second_of_day % 60) as f64;
+            let date = crate::formatter::dates::excel_date_parts(serial).ok();
             for token in tokens {
                 match token {
                     TextToken::Literal(c) => {
@@ -341,7 +366,7 @@ pub fn format_number(value_original: f64, format: &str, locale: &Locale) -> Form
                                 }
                             }
                         };
-                        text = format!("{}{}", text, date.format("%y"));
+                        text = format!("{}{}", text, format!("{:02}", date.year().rem_euclid(100)));
                     }
                     TextToken::Year => {
                         let date = match date {
@@ -399,28 +424,37 @@ pub fn format_number(value_original: f64, format: &str, locale: &Locale) -> Form
                         text = format!("{text}{minute:02}");
                     }
                     TextToken::ElapsedHour => {
-                        let hour = (value * 24.0).floor() as i32;
+                        let hour = whole_seconds.div_euclid(3600);
                         text = format!("{text}{hour}");
                     }
                     TextToken::ElapsedHourPadded => {
-                        let hour = (value * 24.0).floor() as i32;
+                        let hour = whole_seconds.div_euclid(3600);
                         text = format!("{text}{hour:02}");
                     }
                     TextToken::ElapsedMinute => {
-                        let minute = (value * 24.0 * 60.0).floor() as i32;
+                        let minute = whole_seconds.div_euclid(60);
                         text = format!("{text}{minute}");
                     }
                     TextToken::ElapsedMinutePadded => {
-                        let minute = (value * 24.0 * 60.0).floor() as i32;
+                        let minute = whole_seconds.div_euclid(60);
                         text = format!("{text}{minute:02}");
                     }
                     TextToken::ElapsedSecond => {
-                        let second = (value * 24.0 * 60.0 * 60.0).floor() as i32;
+                        let second = whole_seconds;
                         text = format!("{text}{second}");
                     }
                     TextToken::ElapsedSecondPadded => {
-                        let second = (value * 24.0 * 60.0 * 60.0).floor() as i32;
+                        let second = whole_seconds;
                         text = format!("{text}{second:02}");
+                    }
+                    TextToken::SecondFraction(n) => {
+                        let shown = (*n).min(3);
+                        let digits = format!("{:0width$}", second_fraction, width = fraction_digits as usize);
+                        let mut part: String = digits.chars().take(shown as usize).collect();
+                        while (part.len() as u32) < *n {
+                            part.push('0');
+                        }
+                        text = format!("{text}{}{part}", locale.numbers.symbols.decimal);
                     }
                 }
             }
@@ -505,6 +539,7 @@ pub fn format_number(value_original: f64, format: &str, locale: &Locale) -> Form
                     TextToken::Raw => {
                         text = format!("{text}{value}");
                     }
+                    TextToken::SecondFraction(_) => {}
                     TextToken::Period => {
                         // if !fract_part.is_empty() &&  {
                         //     text = format!("{text}{decimal_separator}");

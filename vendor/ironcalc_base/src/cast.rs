@@ -45,7 +45,7 @@ pub(crate) fn calc_result_to_array_node(result: CalcResult) -> ArrayNode {
 /// [`Model::cast_to_string`]. Errors propagate.
 pub(crate) fn array_node_to_string(node: &ArrayNode) -> Result<String, Error> {
     match node {
-        ArrayNode::Number(f) => Ok(format!("{f}")),
+        ArrayNode::Number(f) => Ok(crate::number_format::excel_number_to_text(*f)),
         ArrayNode::String(s) => Ok(s.clone()),
         ArrayNode::Boolean(b) => Ok(if *b {
             "TRUE".to_string()
@@ -359,7 +359,7 @@ impl<'a> Model<'a> {
         // See function Exact
         let result = self.dereference(result, cell);
         match result {
-            CalcResult::Number(f) => Ok(format!("{f}")),
+            CalcResult::Number(f) => Ok(crate::number_format::excel_number_to_text(f)),
             CalcResult::String(s) => Ok(s),
             CalcResult::Boolean(f) => {
                 if f {
@@ -454,5 +454,74 @@ impl<'a> Model<'a> {
                 message: "Expected reference".to_string(),
             })
         }
+    }
+}
+
+impl Model<'_> {
+    /// CellX: runs a one-argument scalar function element by element when its
+    /// argument is a range or an array (`CHAR(A1:A3)`, `NOT({0,1})`), as Excel
+    /// does. `empty` is the result for an empty cell, when it differs from the
+    /// function's result for an omitted argument.
+    pub(crate) fn lift_unary(
+        &mut self,
+        args: &[Node],
+        cell: CellReferenceIndex,
+        empty: Option<CalcResult>,
+        f: fn(&mut Self, &[Node], CellReferenceIndex) -> CalcResult,
+    ) -> CalcResult {
+        if args.len() != 1 {
+            return f(self, args, cell);
+        }
+        let literal = |value: &ArrayNode| -> Option<Node> {
+            Some(match value {
+                ArrayNode::Number(n) => Node::NumberKind(*n),
+                ArrayNode::Boolean(b) => Node::BooleanKind(*b),
+                ArrayNode::String(s) => Node::StringKind(s.clone()),
+                ArrayNode::Error(e) => Node::ErrorKind(e.clone()),
+                ArrayNode::Empty => return None,
+            })
+        };
+        let array = match self.evaluate_node_in_context(&args[0], cell) {
+            CalcResult::Range { left, right } => self.evaluate_range(left, right),
+            CalcResult::Array(a) => a,
+            CalcResult::Number(n) => return f(self, &[Node::NumberKind(n)], cell),
+            CalcResult::Boolean(b) => return f(self, &[Node::BooleanKind(b)], cell),
+            CalcResult::String(s) => return f(self, &[Node::StringKind(s)], cell),
+            CalcResult::Error { error, .. } => return f(self, &[Node::ErrorKind(error)], cell),
+            CalcResult::EmptyCell => {
+                return match &empty {
+                    Some(r) => r.clone(),
+                    None => f(self, args, cell),
+                }
+            }
+            _ => return f(self, args, cell),
+        };
+        let single = array.len() == 1 && array[0].len() == 1;
+        let mut out = Vec::with_capacity(array.len());
+        for row in &array {
+            let mut data_row = Vec::with_capacity(row.len());
+            for value in row {
+                let result = match literal(value) {
+                    Some(node) => f(self, &[node], cell),
+                    None => match &empty {
+                        Some(r) => r.clone(),
+                        None => f(self, &[Node::EmptyArgKind], cell),
+                    },
+                };
+                if single {
+                    return result;
+                }
+                data_row.push(match result {
+                    CalcResult::Number(n) => ArrayNode::Number(n),
+                    CalcResult::Boolean(b) => ArrayNode::Boolean(b),
+                    CalcResult::String(s) => ArrayNode::String(s),
+                    CalcResult::Error { error, .. } => ArrayNode::Error(error),
+                    CalcResult::EmptyCell | CalcResult::EmptyArg => ArrayNode::Empty,
+                    _ => ArrayNode::Error(Error::VALUE),
+                });
+            }
+            out.push(data_row);
+        }
+        CalcResult::Array(out)
     }
 }

@@ -179,7 +179,7 @@ fn check_file(path: &Path, functions: &mut BTreeMap<String, FunctionStat>) -> Fi
         }
         if !ok {
             mismatches += 1;
-            if examples.len() < 5 {
+            if examples.len() < std::env::var("CELLX_EXAMPLES").ok().and_then(|v| v.parse().ok()).unwrap_or(5) {
                 let col = ironcalc_base::expressions::utils::number_to_column(cell.column).unwrap_or_default();
                 examples.push(format!(
                     "{}!{}{}  {}  Excel={}  CellX={}",

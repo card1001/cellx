@@ -46,7 +46,7 @@ pub(crate) const EXCEL_PRECISION: usize = 15;
 pub(crate) const EXCEL_DATE_BASE: i32 = 693_594;
 
 /// We do not support dates before 1899-12-31.
-pub(crate) const MINIMUM_DATE_SERIAL_NUMBER: i32 = 1;
+pub(crate) const MINIMUM_DATE_SERIAL_NUMBER: i32 = 0;
 
 /// Excel can handle dates until the year 9999-12-31
 /// 2958465 is the number of days from 1900-01-01 to 9999-12-31

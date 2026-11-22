@@ -29,11 +29,21 @@ pub(crate) fn compute_rate(
         return Err((Error::VALUE, "Rate initial guess must be > -1".to_string()));
     }
     for _ in 1..=max_iterations {
-        let t = (1.0 + rate).powf(nper - 1.0);
-        let tt = t * (1.0 + rate);
-        let f = pv * tt + pmt * (1.0 + rate * annuity_type) * (tt - 1.0) / rate + fv;
-        let f_prime = pv * nper * t - pmt * (tt - 1.0) / (rate * rate)
-            + pmt * (1.0 + rate * annuity_type) * t * nper / rate;
+        let (f, f_prime) = if rate.abs() < 1e-10 {
+            // CellX: the limit at rate 0 (a zero guess is allowed in Excel).
+            (
+                pv + pmt * nper + fv,
+                pv * nper + pmt * (nper * (nper - 1.0) / 2.0 + annuity_type * nper),
+            )
+        } else {
+            let t = (1.0 + rate).powf(nper - 1.0);
+            let tt = t * (1.0 + rate);
+            (
+                pv * tt + pmt * (1.0 + rate * annuity_type) * (tt - 1.0) / rate + fv,
+                pv * nper * t - pmt * (tt - 1.0) / (rate * rate)
+                    + pmt * (1.0 + rate * annuity_type) * t * nper / rate,
+            )
+        };
         let new_rate = rate - f / f_prime;
         if new_rate <= -1.0 {
             return Err((Error::NUM, "Failed to converge".to_string()));
@@ -102,11 +112,36 @@ pub(crate) fn compute_irr(values: &[f64], guess: f64) -> Result<f64, (Error, Str
             rtb = x_mid;
         }
         if f_mid.abs() < eps || dx.abs() < eps {
-            return Ok(x_mid);
+            return Ok(polish_irr(x_mid, values));
         }
     }
 
     Err((Error::NUM, "Failed to converge".to_string()))
+}
+
+/// CellX: a few Newton steps from a rate close to the root, kept while they
+/// bring the NPV closer to zero, so that NPV(IRR(...)) is as small as in Excel.
+fn polish_irr(rate: f64, values: &[f64]) -> f64 {
+    let npv = |r: f64| compute_npv(r, values).map(f64::abs).unwrap_or(f64::INFINITY);
+    let mut best = rate;
+    let mut best_f = npv(best);
+    for _ in 0..6 {
+        let (Ok(f), Ok(f_prime)) = (compute_npv(best, values), compute_npv_prime(best, values))
+        else {
+            break;
+        };
+        if f_prime == 0.0 || !f_prime.is_finite() {
+            break;
+        }
+        let next = best - f / f_prime;
+        let next_f = npv(next);
+        if !(next_f < best_f) || next <= -1.0 {
+            break;
+        }
+        best = next;
+        best_f = next_f;
+    }
+    best
 }
 
 fn compute_npv_prime(rate: f64, values: &[f64]) -> Result<f64, (Error, String)> {
@@ -135,7 +170,7 @@ fn compute_irr_newton_raphson(values: &[f64], guess: f64) -> Result<f64, (Error,
             if new_irr <= -1.0 {
                 return Err((Error::NUM, "converged to invalid rate".to_string()));
             }
-            return Ok(new_irr);
+            return Ok(polish_irr(new_irr, values));
         }
         irr = new_irr;
     }

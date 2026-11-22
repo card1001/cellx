@@ -2326,7 +2326,7 @@ impl<'a> Model<'a> {
             Function::Ifs => self.fn_ifs(args, cell),
             Function::Lambda => self.fn_lambda(args, cell),
             Function::Let => self.fn_let(args, cell),
-            Function::Not => self.fn_not(args, cell),
+            Function::Not => self.lift_unary(args, cell, None, Self::fn_not),
             Function::Or => self.fn_or(args, cell),
             Function::Switch => self.fn_switch(args, cell),
             Function::True => self.fn_true(args, cell),
@@ -2388,15 +2388,34 @@ impl<'a> Model<'a> {
             Function::Row => self.fn_row(args, cell),
             Function::Rows => self.fn_rows(args, cell),
             Function::Filter => self.fn_filter(args, cell),
-            Function::Sort => self.fn_sort(args, cell),
-            Function::Sortby => self.fn_sortby(args, cell),
+            Function::Sort => {
+                let args = empty_args_to_defaults(args, |i| match i {
+                    1 | 2 => Some(Node::NumberKind(1.0)),
+                    3 => Some(Node::BooleanKind(false)),
+                    _ => None,
+                });
+                self.fn_sort(&args, cell)
+            }
+            Function::Sortby => {
+                let args = empty_args_to_defaults(args, |i| {
+                    (i >= 2 && i % 2 == 0).then_some(Node::NumberKind(1.0))
+                });
+                self.fn_sortby(&args, cell)
+            }
             Function::Unique => self.fn_unique(args, cell),
             Function::Vlookup => self.fn_vlookup(args, cell),
             Function::Vstack => self.fn_vstack(args, cell),
             Function::Wrapcols => self.fn_wrapcols(args, cell),
             Function::Wraprows => self.fn_wraprows(args, cell),
             Function::Xlookup => self.fn_xlookup(args, cell),
-            Function::Xmatch => self.fn_xmatch(args, cell),
+            Function::Xmatch => {
+                let args = empty_args_to_defaults(args, |i| match i {
+                    2 => Some(Node::NumberKind(0.0)),
+                    3 => Some(Node::NumberKind(1.0)),
+                    _ => None,
+                });
+                self.fn_xmatch(&args, cell)
+            }
             Function::Trimrange => self.fn_trimrange(args, cell),
             Function::Take => self.fn_take(args, cell),
             Function::Drop => self.fn_drop(args, cell),
@@ -2423,13 +2442,13 @@ impl<'a> Model<'a> {
             Function::Trim => self.fn_trim(args, cell),
             Function::Unicode => self.fn_unicode(args, cell),
             Function::Unichar => self.fn_unichar(args, cell),
-            Function::Char => self.fn_char(args, cell),
+            Function::Char => self.lift_unary(args, cell, None, Self::fn_char),
             Function::Clean => self.fn_clean(args, cell),
-            Function::Code => self.fn_code(args, cell),
+            Function::Code => self.lift_unary(args, cell, None, Self::fn_code),
             Function::Asc => self.fn_asc(args, cell),
             Function::Arraytotext => self.fn_arraytotext(args, cell),
             Function::Dollar => self.fn_dollar(args, cell),
-            Function::Encodeurl => self.fn_encodeurl(args, cell),
+            Function::Encodeurl => self.lift_unary(args, cell, None, Self::fn_encodeurl),
             Function::EcmaCeiling => self.fn_ecma_ceiling(args, cell),
             Function::Findb => self.fn_findb(args, cell),
             Function::Fixed => self.fn_fixed(args, cell),
@@ -2443,19 +2462,19 @@ impl<'a> Model<'a> {
             Function::Rightb => self.fn_rightb(args, cell),
             Function::Searchb => self.fn_searchb(args, cell),
             Function::Upper => self.fn_upper(args, cell),
-            Function::Isnumber => self.fn_isnumber(args, cell),
-            Function::Isnontext => self.fn_isnontext(args, cell),
-            Function::Istext => self.fn_istext(args, cell),
-            Function::Islogical => self.fn_islogical(args, cell),
-            Function::Isblank => self.fn_isblank(args, cell),
-            Function::Iserr => self.fn_iserr(args, cell),
-            Function::Iserror => self.fn_iserror(args, cell),
-            Function::Isna => self.fn_isna(args, cell),
+            Function::Isnumber => self.lift_unary(args, cell, Some(CalcResult::Boolean(false)), Self::fn_isnumber),
+            Function::Isnontext => self.lift_unary(args, cell, Some(CalcResult::Boolean(true)), Self::fn_isnontext),
+            Function::Istext => self.lift_unary(args, cell, Some(CalcResult::Boolean(false)), Self::fn_istext),
+            Function::Islogical => self.lift_unary(args, cell, Some(CalcResult::Boolean(false)), Self::fn_islogical),
+            Function::Isblank => self.lift_unary(args, cell, Some(CalcResult::Boolean(true)), Self::fn_isblank),
+            Function::Iserr => self.lift_unary(args, cell, Some(CalcResult::Boolean(false)), Self::fn_iserr),
+            Function::Iserror => self.lift_unary(args, cell, Some(CalcResult::Boolean(false)), Self::fn_iserror),
+            Function::Isna => self.lift_unary(args, cell, Some(CalcResult::Boolean(false)), Self::fn_isna),
             Function::Na => CalcResult::new_error(Error::NA, cell, "".to_string()),
             Function::Isref => self.fn_isref(args, cell),
-            Function::Isodd => self.fn_isodd(args, cell),
+            Function::Isodd => self.lift_unary(args, cell, Some(CalcResult::Boolean(false)), Self::fn_isodd),
             Function::Isomitted => self.fn_isomitted(args, cell),
-            Function::Iseven => self.fn_iseven(args, cell),
+            Function::Iseven => self.lift_unary(args, cell, Some(CalcResult::Boolean(true)), Self::fn_iseven),
             Function::ErrorType => self.fn_errortype(args, cell),
             Function::Formulatext => self.fn_formulatext(args, cell),
             Function::Isformula => self.fn_isformula(args, cell),
@@ -2879,4 +2898,15 @@ mod tests {
         //     assert!(iter_list.contains(&function.to_uppercase()));
         // }
     }
+}
+
+/// CellX: an omitted optional argument (`SORT(A1:A4,,-1)`) takes its default.
+fn empty_args_to_defaults(args: &[Node], default: impl Fn(usize) -> Option<Node>) -> Vec<Node> {
+    args.iter()
+        .enumerate()
+        .map(|(i, a)| match (a, default(i)) {
+            (Node::EmptyArgKind, Some(d)) => d,
+            _ => a.clone(),
+        })
+        .collect()
 }

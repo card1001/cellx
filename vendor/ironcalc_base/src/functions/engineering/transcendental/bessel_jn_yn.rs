@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // https://github.com/JuliaLang/openlibm/blob/master/src/e_jn.c
 
 /*

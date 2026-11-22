@@ -488,12 +488,8 @@ fn test_time_function_extreme_values() {
         ("D3", "=SECOND(0.999999999999)"),
     ]);
 
-    // Large fractional inputs should be floored and normalized
-    let result_a1 = model._get_text("A1").parse::<f64>().unwrap();
-    assert!(
-        (0.0..1.0).contains(&result_a1),
-        "Result should be valid time fraction"
-    );
+    // CellX: TIME arguments above 32767 are #NUM! in Excel
+    assert_eq!(model._get_text("A1"), *"#NUM!");
 
     // Component extraction should work with very large values
     let hour_b1 = model._get_text("B1").parse::<i32>().unwrap();
@@ -584,28 +580,10 @@ fn test_performance_stress_with_extreme_values() {
         ("D4", "=SECOND(D1)"),
     ]);
 
-    // All results should be valid (not errors) even with extreme inputs
-    for cell in ["A1", "A2", "A3", "B1", "B2", "B3", "D1", "D2", "D3", "D4"] {
-        let result = model._get_text(cell);
-        assert!(
-            result != *"#ERROR!" && result != *"#NUM!" && result != *"#VALUE!",
-            "Cell {cell} should not error with extreme values: {result}",
-        );
+    // CellX: Excel limits each TIME argument to 32767 and the value of HOUR,
+    // MINUTE and SECOND to the date range, so these are all #NUM!.
+    for cell in ["A1", "A2", "A3", "B1", "B2", "B3", "C1", "D1", "D2", "D3", "D4"] {
+        assert_eq!(model._get_text(cell), *"#NUM!", "{cell}");
     }
-
-    // Results should be mathematically valid
-    let hour_b1 = model._get_text("B1").parse::<i32>().unwrap();
-    let minute_b2 = model._get_text("B2").parse::<i32>().unwrap();
-    let second_b3 = model._get_text("B3").parse::<i32>().unwrap();
-
-    assert!((0..=23).contains(&hour_b1));
-    assert!((0..=59).contains(&minute_b2));
-    assert!((0..=59).contains(&second_b3));
-
-    // TIME function results should be valid time fractions
-    let time_d1 = model._get_text("D1").parse::<f64>().unwrap();
-    assert!(
-        (0.0..1.0).contains(&time_d1),
-        "TIME result should be valid fraction"
-    );
+    assert_eq!(model._get_text("C2"), *"0");
 }

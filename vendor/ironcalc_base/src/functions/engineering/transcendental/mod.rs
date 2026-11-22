@@ -9,6 +9,8 @@ mod bessel_util;
 mod test_bessel;
 
 pub(crate) use bessel_i::bessel_i;
+#[allow(unused_imports)]
 pub(crate) use bessel_jn_yn::jn as bessel_j;
+#[allow(unused_imports)]
 pub(crate) use bessel_jn_yn::yn as bessel_y;
 pub(crate) use bessel_k::bessel_k;

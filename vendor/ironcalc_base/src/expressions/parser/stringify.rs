@@ -1180,17 +1180,31 @@ fn stringify(
                     )
                 );
             }
-            format!(
-                "@{}",
-                stringify(
-                    child,
-                    context,
-                    displace_data,
-                    export_to_excel,
-                    locale,
-                    language
-                )
-            )
+            let inner = stringify(
+                child,
+                context,
+                displace_data,
+                export_to_excel,
+                locale,
+                language,
+            );
+            // CellX: `@` binds tighter than any operator, so an operation under
+            // it keeps its parentheses: `@({1,2}>{2,1})`, not `@{1,2}>{2,1}`.
+            let compound = matches!(
+                **child,
+                OpRangeKind { .. }
+                    | OpConcatenateKind { .. }
+                    | OpSumKind { .. }
+                    | OpProductKind { .. }
+                    | OpPowerKind { .. }
+                    | CompareKind { .. }
+                    | UnaryKind { .. }
+            );
+            if compound {
+                format!("@({inner})")
+            } else {
+                format!("@{inner}")
+            }
         }
     }
 }

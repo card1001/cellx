@@ -15,6 +15,8 @@ pub enum TextToken {
     Raw,
     Digit(Digit),
     Period,
+    /// CellX: fractional seconds after a seconds token ("ss.00" → 2).
+    SecondFraction(u32),
     // Dates
     Day,
     DayPadded,
@@ -159,7 +161,7 @@ impl Parser {
         let mut is_time = false;
 
         while token != Token::EOF && token != Token::Separator {
-            let next_token = self.lexer.next_token();
+            let mut next_token = self.lexer.next_token();
             let token_is_digit = token.is_digit();
             is_number = is_number || token_is_digit;
             let next_token_is_digit = next_token.is_digit();
@@ -194,6 +196,25 @@ impl Parser {
                 Token::Percent => {
                     tokens.push(TextToken::Literal('%'));
                     percent += 1;
+                }
+                Token::Period
+                    if next_token == Token::Zero
+                        && matches!(
+                            tokens.last(),
+                            Some(
+                                TextToken::Second
+                                    | TextToken::SecondPadded
+                                    | TextToken::ElapsedSecond
+                                    | TextToken::ElapsedSecondPadded
+                            )
+                        ) =>
+                {
+                    let mut n = 0;
+                    while next_token == Token::Zero {
+                        n += 1;
+                        next_token = self.lexer.next_token();
+                    }
+                    tokens.push(TextToken::SecondFraction(n));
                 }
                 Token::Period => {
                     if is_number && !found_decimal_dot {
@@ -319,15 +340,26 @@ impl Parser {
                     is_time = true;
                     tokens.push(TextToken::HourPadded);
                 }
-                Token::Second => {
+                Token::Second | Token::SecondPadded => {
                     is_date = true;
                     is_time = true;
-                    tokens.push(TextToken::Second);
-                }
-                Token::SecondPadded => {
-                    is_date = true;
-                    is_time = true;
-                    tokens.push(TextToken::SecondPadded);
+                    // CellX: "m"/"mm" just before seconds are minutes ("mm:ss").
+                    if let Some(prev) = tokens
+                        .iter_mut()
+                        .rev()
+                        .find(|t| !matches!(t, TextToken::Literal(_)))
+                    {
+                        match prev {
+                            TextToken::Month => *prev = TextToken::Minute,
+                            TextToken::MonthPadded => *prev = TextToken::MinutePadded,
+                            _ => {}
+                        }
+                    }
+                    tokens.push(if token == Token::Second {
+                        TextToken::Second
+                    } else {
+                        TextToken::SecondPadded
+                    });
                 }
                 Token::AMPM => {
                     is_date = true;

@@ -304,18 +304,23 @@ fn search(search_for: &str, text: &str, start: usize) -> Option<i32> {
 
 impl<'a> Model<'a> {
     pub(crate) fn fn_concat(&mut self, args: &[Node], cell: CellReferenceIndex) -> CalcResult {
+        use crate::expressions::parser::ArrayNode;
         let mut result = "".to_string();
         for arg in args {
-            match self.evaluate_node_in_context(arg, cell) {
-                CalcResult::String(value) => result = format!("{result}{value}"),
-                CalcResult::Number(value) => result = format!("{result}{value}"),
-                CalcResult::EmptyCell | CalcResult::EmptyArg => {}
+            // CellX: ranges and arrays (from any function) are joined in row order.
+            let values = match self.evaluate_node_in_context(arg, cell) {
+                CalcResult::String(value) => {
+                    result.push_str(&value);
+                    continue;
+                }
+                CalcResult::Number(value) => {
+                    result.push_str(&crate::number_format::excel_number_to_text(value));
+                    continue;
+                }
+                CalcResult::EmptyCell | CalcResult::EmptyArg => continue,
                 CalcResult::Boolean(value) => {
-                    if value {
-                        result = format!("{result}TRUE");
-                    } else {
-                        result = format!("{result}FALSE");
-                    }
+                    result.push_str(if value { "TRUE" } else { "FALSE" });
+                    continue;
                 }
                 error @ CalcResult::Error { .. } => return error,
                 CalcResult::Range { left, right } => {
@@ -326,46 +331,29 @@ impl<'a> Model<'a> {
                             "Ranges are in different sheets".to_string(),
                         );
                     }
-                    for row in left.row..(right.row + 1) {
-                        for column in left.column..(right.column + 1) {
-                            match self.evaluate_cell(CellReferenceIndex {
-                                sheet: left.sheet,
-                                row,
-                                column,
-                            }) {
-                                CalcResult::String(value) => {
-                                    result = format!("{result}{value}");
-                                }
-                                CalcResult::Number(value) => result = format!("{result}{value}"),
-                                CalcResult::Boolean(value) => {
-                                    if value {
-                                        result = format!("{result}TRUE");
-                                    } else {
-                                        result = format!("{result}FALSE");
-                                    }
-                                }
-                                error @ CalcResult::Error { .. } => return error,
-                                CalcResult::EmptyCell | CalcResult::EmptyArg => {}
-                                CalcResult::Range { .. } => {}
-                                CalcResult::Array(_) | CalcResult::Lambda(_) => {
-                                    return CalcResult::Error {
-                                        error: Error::NIMPL,
-                                        origin: cell,
-                                        message: "Arrays not supported yet".to_string(),
-                                    }
-                                }
-                            }
+                    self.evaluate_range(left, right)
+                }
+                CalcResult::Array(array) => array,
+                CalcResult::Lambda(_) => {
+                    return CalcResult::new_error(Error::CALC, cell, "Lambda".to_string())
+                }
+            };
+            for row in values {
+                for value in row {
+                    match value {
+                        ArrayNode::String(v) => result.push_str(&v),
+                        ArrayNode::Number(v) => result.push_str(&crate::number_format::excel_number_to_text(v)),
+                        ArrayNode::Boolean(v) => result.push_str(if v { "TRUE" } else { "FALSE" }),
+                        ArrayNode::Empty => {}
+                        ArrayNode::Error(e) => {
+                            return CalcResult::new_error(e, cell, String::new());
                         }
                     }
                 }
-                CalcResult::Array(_) | CalcResult::Lambda(_) => {
-                    return CalcResult::Error {
-                        error: Error::NIMPL,
-                        origin: cell,
-                        message: "Arrays not supported yet".to_string(),
-                    }
-                }
-            };
+            }
+        }
+        if result.chars().count() > 32767 {
+            return CalcResult::new_error(Error::VALUE, cell, "Text too long".to_string());
         }
         CalcResult::String(result)
     }
@@ -836,6 +824,10 @@ impl<'a> Model<'a> {
                 message: "instance_num must be <> 0".to_string(),
             };
         }
+        // CellX: an empty delimiter matches at the start (end, counting back).
+        if delimiter.is_empty() {
+            return CalcResult::String(if instance_num > 0 { text } else { String::new() });
+        }
         if delimiter.len() > text.len() {
             // so this is fun(!)
             // if the function was provided with two arguments is a #VALUE!
@@ -941,6 +933,10 @@ impl<'a> Model<'a> {
                 message: "instance_num must be <> 0".to_string(),
             };
         }
+        // CellX: an empty delimiter matches at the start (end, counting back).
+        if delimiter.is_empty() {
+            return CalcResult::String(if instance_num > 0 { String::new() } else { text });
+        }
         if delimiter.len() > text.len() {
             // so this is fun(!)
             // if the function was provided with two arguments is a #VALUE!
@@ -1010,7 +1006,7 @@ impl<'a> Model<'a> {
         let mut values = Vec::new();
         for arg in &args[2..] {
             match self.evaluate_node_in_context(arg, cell) {
-                CalcResult::Number(value) => values.push(format!("{value}")),
+                CalcResult::Number(value) => values.push(crate::number_format::excel_number_to_text(value)),
                 CalcResult::Range { left, right } => {
                     if left.sheet != right.sheet {
                         return CalcResult::new_error(
@@ -1038,7 +1034,7 @@ impl<'a> Model<'a> {
                                 column,
                             }) {
                                 CalcResult::Number(value) => {
-                                    values.push(format!("{value}"));
+                                    values.push(crate::number_format::excel_number_to_text(value));
                                 }
                                 CalcResult::String(value) => values.push(value),
                                 CalcResult::Boolean(value) => {
@@ -1081,12 +1077,35 @@ impl<'a> Model<'a> {
                     }
                 }
                 CalcResult::EmptyArg => {}
-                CalcResult::Array(_) | CalcResult::Lambda(_) => {
-                    return CalcResult::Error {
-                        error: Error::NIMPL,
-                        origin: cell,
-                        message: "Arrays not supported yet".to_string(),
+                // CellX: arrays from functions join element by element.
+                CalcResult::Array(array) => {
+                    use crate::expressions::parser::ArrayNode;
+                    for row in array {
+                        for value in row {
+                            match value {
+                                ArrayNode::Number(v) => values.push(crate::number_format::excel_number_to_text(v)),
+                                ArrayNode::String(v) => {
+                                    if !(ignore_empty && v.is_empty()) {
+                                        values.push(v)
+                                    }
+                                }
+                                ArrayNode::Boolean(v) => {
+                                    values.push(if v { "TRUE" } else { "FALSE" }.to_string())
+                                }
+                                ArrayNode::Empty => {
+                                    if !ignore_empty {
+                                        values.push("".to_string())
+                                    }
+                                }
+                                ArrayNode::Error(e) => {
+                                    return CalcResult::new_error(e, cell, String::new())
+                                }
+                            }
+                        }
                     }
+                }
+                CalcResult::Lambda(_) => {
+                    return CalcResult::new_error(Error::CALC, cell, "Lambda".to_string())
                 }
             };
         }

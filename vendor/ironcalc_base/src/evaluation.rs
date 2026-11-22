@@ -529,6 +529,7 @@ impl<'a> Model<'a> {
     /// `#CIRC!` and keeps no spill cells: its stale cells are dropped when it
     /// is marked, so there is nothing of it to read or to contradict.
     pub fn evaluate(&mut self) {
+        crate::formatter::dates::set_date1904(self.workbook.settings.date1904);
         self.evaluation.last_partial = None;
         self.evaluation.last_threads = 1;
         if self.evaluate_in_parallel() {
@@ -948,6 +949,7 @@ impl<'a> Model<'a> {
     /// not been evaluated in this pass. Reads are performed on behalf of the
     /// cell on top of the stack.
     pub(crate) fn evaluate_cell(&mut self, cell_reference: CellReferenceIndex) -> CalcResult {
+        crate::formatter::dates::set_date1904(self.workbook.settings.date1904);
         if self.evaluation.restart.is_some() || self.evaluation.unwinding {
             // The pass is being abandoned, or the recursion is unwinding;
             // nothing computed now is kept. This comes before anything is put

@@ -33,7 +33,7 @@ impl<'a> Model<'a> {
         };
         if wrap_count < 1 {
             return CalcResult::new_error(
-                Error::VALUE,
+                Error::NUM,
                 cell,
                 "wrap_count must be >= 1".to_string(),
             );
@@ -85,7 +85,7 @@ impl<'a> Model<'a> {
         };
         if wrap_count < 1 {
             return CalcResult::new_error(
-                Error::VALUE,
+                Error::NUM,
                 cell,
                 "wrap_count must be >= 1".to_string(),
             );

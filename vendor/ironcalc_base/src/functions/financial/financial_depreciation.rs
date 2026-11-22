@@ -451,7 +451,7 @@ impl<'a> Model<'a> {
         };
         if cost < 0.0
             || salvage < 0.0
-            || salvage >= cost
+            || salvage > cost
             || period < 0.0
             || rate <= 0.0
             || date_purchased_serial >= first_period_serial
@@ -527,7 +527,7 @@ impl<'a> Model<'a> {
         };
         if cost < 0.0
             || salvage < 0.0
-            || salvage >= cost
+            || salvage > cost
             || period < 0.0
             || rate <= 0.0
             || date_purchased_serial >= first_period_serial

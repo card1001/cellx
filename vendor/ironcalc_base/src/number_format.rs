@@ -271,3 +271,37 @@ mod tests {
         assert!(out.text.contains("175,000.00"), "got {:?}", out.text);
     }
 }
+
+/// CellX: a number as Excel turns it into text (`""&x`, CONCAT, TEXTJOIN):
+/// 15 significant digits, scientific notation from 1E+15 up and below 1E-9.
+pub fn excel_number_to_text(value: f64) -> String {
+    if !value.is_finite() {
+        return to_precision_str(value, 15);
+    }
+    if value == 0.0 {
+        return "0".to_string();
+    }
+    let rounded = to_excel_precision(value, 15);
+    let exponent = rounded.abs().log10().floor() as i32;
+    if (-9..15).contains(&exponent) {
+        let decimals = (14 - exponent).max(0) as usize;
+        let mut text = format!("{rounded:.decimals$}");
+        if text.contains('.') {
+            text = text.trim_end_matches('0').trim_end_matches('.').to_string();
+        }
+        if text == "-0" {
+            return "0".to_string();
+        }
+        return text;
+    }
+    let text = format!("{rounded:.14e}");
+    let (mantissa, exp) = text.split_once('e').unwrap_or((&text, "0"));
+    let mantissa = if mantissa.contains('.') {
+        mantissa.trim_end_matches('0').trim_end_matches('.')
+    } else {
+        mantissa
+    };
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let sign = if exp < 0 { '-' } else { '+' };
+    format!("{mantissa}E{sign}{:02}", exp.abs())
+}

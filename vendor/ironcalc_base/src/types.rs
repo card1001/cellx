@@ -106,6 +106,8 @@ pub struct Metadata {
 pub struct WorkbookSettings {
     pub tz: String,
     pub locale: String,
+    /// CellX: the workbook uses the 1904 date system (`<workbookPr date1904="1"/>`).
+    pub date1904: bool,
 }
 
 /// An internal representation of an IronCalc Workbook

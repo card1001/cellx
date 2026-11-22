@@ -103,7 +103,7 @@ fn fn_amorlinc_first_period() {
 #[test]
 fn fn_amorlinc_errors() {
     let mut model = new_empty_model();
-    // salvage >= cost
+    // salvage == cost: no depreciation, as in Excel
     model._set(
         "A1",
         "=AMORLINC(2400, DATE(2008,8,19), DATE(2008,12,31), 2400, 1, 0.15, 1)",
@@ -120,7 +120,7 @@ fn fn_amorlinc_errors() {
     );
     model.evaluate();
 
-    assert_eq!(model._get_text("A1"), *"#NUM!");
+    assert_eq!(model._get_text("A1"), *"0");
     assert_eq!(model._get_text("A2"), *"#NUM!");
     assert_eq!(model._get_text("A3"), *"#NUM!");
 }

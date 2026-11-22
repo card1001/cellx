@@ -233,6 +233,10 @@ fn compute_accrint(
     // Regular coupon period [reg_pcd, first_interest]; its length is the
     // denominator used for the settlement slice.
     let reg_pcd = acc_change_month(first_interest, -num_months, end_month_bond)?;
+    // CellX: Excel rejects a coupon schedule that starts before 1900-01-01.
+    if reg_pcd < NaiveDate::from_ymd_opt(1900, 1, 1).unwrap_or(reg_pcd) {
+        return Err("Coupon date out of range".to_string());
+    }
     // Coupon date immediately before settlement. When settlement is past
     // first_interest (only meaningful for the default calc_method) walk the
     // schedule forward to find it; otherwise it is the regular coupon start.

@@ -492,7 +492,7 @@ impl<'a> Model<'a> {
     // RATE(nper, pmt, pv, [fv], [type], [guess])
     pub(crate) fn fn_rate(&mut self, args: &[Node], cell: CellReferenceIndex) -> CalcResult {
         let arg_count = args.len();
-        if !(3..=5).contains(&arg_count) {
+        if !(3..=6).contains(&arg_count) {
             return CalcResult::new_args_number_error(cell);
         }
         let nper = match self.get_number(&args[0], cell) {
@@ -526,7 +526,7 @@ impl<'a> Model<'a> {
             0
         };
 
-        let guess = if arg_count > 5 {
+        let guess = if arg_count > 5 && !matches!(args[5], Node::EmptyArgKind) {
             match self.get_number(&args[5], cell) {
                 Ok(f) => f,
                 Err(s) => return s,

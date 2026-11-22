@@ -29,6 +29,7 @@ fn simple() {
         absolute_column2: false,
         row2: 7,
         column2: -1,
+        structured: None,
     };
     assert_eq!(
         t,
@@ -62,6 +63,7 @@ fn simple_add() {
         absolute_column2: false,
         row2: 7,
         column2: -1,
+        structured: None,
     };
     assert_eq!(
         t,

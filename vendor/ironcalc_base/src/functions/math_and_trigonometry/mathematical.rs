@@ -111,7 +111,11 @@ impl<'a> Model<'a> {
         }
 
         // number to convert
+        // CellX: Excel takes numbers in 0..2^53; a negative fraction is #NUM! too.
         let mut value = match self.get_number(&args[0], cell) {
+            Ok(f) if f < 0.0 || f >= 9007199254740992.0 || !f.is_finite() => {
+                return CalcResult::new_error(Error::NUM, cell, "Number out of range".to_string())
+            }
             Ok(f) => f.trunc() as i64,
             Err(s) => return s,
         };
@@ -124,11 +128,11 @@ impl<'a> Model<'a> {
         let min_length = if arg_count == 3 {
             match self.get_number(&args[2], cell) {
                 Ok(f) => {
-                    if f < 0.0 {
+                    if !(0.0..256.0).contains(&f) {
                         return CalcResult::Error {
                             error: Error::NUM,
                             origin: cell,
-                            message: "Minimum length must be non-negative".to_string(),
+                            message: "Minimum length must be between 0 and 255".to_string(),
                         };
                     }
                     f.trunc() as usize
@@ -158,7 +162,10 @@ impl<'a> Model<'a> {
 
         let mut buf = String::new();
         if value == 0 {
-            buf.push('0');
+            // CellX: with a min_length given, Excel writes zero as no digits.
+            if arg_count < 3 || matches!(args[2], Node::EmptyArgKind) {
+                buf.push('0');
+            }
         } else {
             while value > 0 {
                 let digit = (value % radix) as u8;
@@ -206,14 +213,29 @@ impl<'a> Model<'a> {
                 message: "Radix must be between 2 and 36".to_string(),
             };
         }
-        match i64::from_str_radix(&text, radix as u32) {
-            Ok(n) => CalcResult::Number(n as f64),
-            Err(_) => CalcResult::Error {
-                error: Error::VALUE,
-                origin: cell,
-                message: format!("'{}' is not a valid number in base {}", text, radix),
-            },
+        // CellX: Excel's rules — at most 255 characters (#VALUE!), leading spaces
+        // ignored, an empty text is 0, any other non-digit is #NUM!, and the
+        // value must stay below 2^53.
+        if text.chars().count() > 255 {
+            return CalcResult::new_error(Error::VALUE, cell, "Text too long".to_string());
         }
+        let mut value = 0.0f64;
+        for c in text.trim_start_matches(' ').chars() {
+            match c.to_digit(radix as u32) {
+                Some(d) => value = value * radix as f64 + d as f64,
+                None => {
+                    return CalcResult::new_error(
+                        Error::NUM,
+                        cell,
+                        format!("'{}' is not a valid number in base {}", text, radix),
+                    )
+                }
+            }
+        }
+        if value > 9007199254740992.0 {
+            return CalcResult::new_error(Error::NUM, cell, "Number out of range".to_string());
+        }
+        CalcResult::Number(value)
     }
 
     /// SUM(number1, [number2], ...)

@@ -366,7 +366,22 @@ impl<'a> Lexer<'a> {
                             if peek_char == Some('!') {
                                 // reference
                                 self.position += 1;
-                                return self.consume_range(Some(name));
+                                let after_bang = self.position;
+                                let token = self.consume_range(Some(name.clone()));
+                                if !matches!(token, TokenType::Illegal(_)) {
+                                    return token;
+                                }
+                                // CellX: a sheet-scoped defined name, `Data!Scope_Test`.
+                                self.position = after_bang;
+                                let ident = self.consume_identifier();
+                                if !ident.is_empty()
+                                    && self.peek_char() != Some('(')
+                                    && utils::parse_reference_a1(&ident.to_uppercase()).is_none()
+                                    && utils::is_valid_a1_identifier(&ident)
+                                {
+                                    return TokenType::Ident(format!("{name}!{ident}"));
+                                }
+                                return token;
                             } else if peek_char == Some('$') {
                                 self.position = position - 1;
                                 return self.consume_range(None);
@@ -823,6 +838,11 @@ impl<'a> Lexer<'a> {
     }
 
     fn consume_range(&mut self, sheet: Option<String>) -> TokenType {
+        // CellX: `Sheet2!#REF!`, a reference into a deleted area, is #REF!.
+        if self.peek_char() == Some('#') {
+            self.position += 1;
+            return self.consume_error();
+        }
         let m = if self.mode == LexerMode::A1 {
             self.consume_range_a1()
         } else {

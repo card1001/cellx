@@ -2,7 +2,6 @@ use chrono::{Datelike, Months, NaiveDate};
 
 use crate::{
     calc_result::CalcResult,
-    constants::EXCEL_DATE_BASE,
     expressions::{parser::Node, token::Error, types::CellReferenceIndex},
     formatter::dates::from_excel_date,
     model::Model,
@@ -13,7 +12,7 @@ use crate::{
 // ============================================================
 
 fn naivedate_to_serial(d: NaiveDate) -> i64 {
-    (d.num_days_from_ce() - EXCEL_DATE_BASE) as i64
+    crate::formatter::dates::convert_to_serial_number(d) as i64
 }
 
 fn last_day_of_feb(year: i32) -> u32 {
@@ -130,11 +129,15 @@ fn find_pcd_ncd(settlement: i64, maturity: i64, frequency: u32) -> Result<(i64, 
     let mat = from_excel_date(maturity)?;
     let return_last = is_last_day_of_month(mat);
 
+    // CellX: Excel counts every coupon date back from maturity itself, so a
+    // day clamped in February (8/30 → 2/28) does not carry into later dates.
     let mut front = mat;
     let mut trailing = mat;
+    let mut k = 0;
     while naivedate_to_serial(front) > settlement {
         trailing = front;
-        front = change_month(front, -months_per, return_last)?;
+        k += 1;
+        front = change_month(mat, -months_per * k, return_last)?;
     }
     Ok((naivedate_to_serial(front), naivedate_to_serial(trailing)))
 }
@@ -181,6 +184,18 @@ fn coupon_days_e(
         3 => Ok(365.0 / frequency as f64),
         _ => Err("Invalid basis".to_string()),
     }
+}
+
+// CellX: COUPDAYS with basis 1 measures the period as DATE(y, m + 12/frequency, d)
+// from the previous coupon date, letting a day past the month end run into the
+// next month (8/30 + 6 months is 3/1 or 3/2). PRICE and the others do not.
+fn coupdays_actual(settlement: i64, maturity: i64, frequency: u32) -> Result<f64, String> {
+    let prev = from_excel_date(prev_coupon_date(settlement, maturity, frequency)?)?;
+    let months = prev.year() * 12 + prev.month0() as i32 + (12 / frequency) as i32;
+    let first = NaiveDate::from_ymd_opt(months.div_euclid(12), months.rem_euclid(12) as u32 + 1, 1)
+        .ok_or("Date error".to_string())?;
+    let next = first + chrono::Duration::days(prev.day() as i64 - 1);
+    Ok(actual_days(prev, next))
 }
 
 // Accrued days from the previous coupon to settlement (A).
@@ -1319,7 +1334,12 @@ impl<'a> Model<'a> {
             Ok(v) => v,
             Err(e) => return e,
         };
-        match coupon_days_e(settlement, maturity, frequency, basis) {
+        let days = if basis == 1 {
+            coupdays_actual(settlement, maturity, frequency)
+        } else {
+            coupon_days_e(settlement, maturity, frequency, basis)
+        };
+        match days {
             Ok(v) => CalcResult::Number(v),
             Err(e) => map_date_err(e, cell),
         }

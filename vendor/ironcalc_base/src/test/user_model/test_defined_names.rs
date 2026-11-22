@@ -105,7 +105,7 @@ fn delete_sheet() {
 
     assert_eq!(
         model.get_formatted_cell_value(0, 2, 1),
-        Ok("#NAME?".to_string())
+        Ok("#REF!".to_string())
     );
 
     assert_eq!(

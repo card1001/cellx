@@ -1,3 +1,4 @@
+use crate::expressions::token::Error;
 use crate::{
     calc_result::CalcResult,
     expressions::{parser::Node, types::CellReferenceIndex},
@@ -25,6 +26,10 @@ impl<'a> Model<'a> {
                 }
                 _ => result.push_str(&format!("%{byte:02X}")),
             }
+        }
+        // CellX: Excel refuses a result of 32767 characters or more.
+        if result.len() >= 32767 {
+            return CalcResult::new_error(Error::VALUE, cell, "Result too long".to_string());
         }
         CalcResult::String(result)
     }

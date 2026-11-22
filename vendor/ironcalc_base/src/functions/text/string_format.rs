@@ -152,11 +152,19 @@ impl<'a> Model<'a> {
             ",".to_string()
         };
 
-        if decimal_sep.is_empty() || decimal_sep == group_sep {
+        // CellX: Excel uses the first character of each separator, drops all
+        // whitespace, reads an empty text (or a lone "%") as 0, and rejects a
+        // group separator after the decimal separator.
+        let decimal_sep: String = decimal_sep.chars().take(1).collect();
+        let group_sep: String = group_sep.chars().take(1).collect();
+        if decimal_sep.is_empty() || group_sep.is_empty() || decimal_sep == group_sep {
             return CalcResult::new_error(Error::VALUE, cell, "Invalid separators".to_string());
         }
-
-        let trimmed = text.trim();
+        let squeezed: String = text
+            .chars()
+            .filter(|c| !matches!(c, ' ' | '\t' | '\n' | '\r'))
+            .collect();
+        let trimmed = squeezed.as_str();
 
         // Handle percentage suffix
         let (trimmed, pct_count) = {
@@ -166,11 +174,22 @@ impl<'a> Model<'a> {
                 t = &t[..t.len() - 1];
                 count += 1;
             }
-            (t.trim_end(), count)
+            (t, count)
         };
 
         if trimmed.is_empty() {
-            return CalcResult::new_error(Error::VALUE, cell, "Empty string".to_string());
+            return CalcResult::Number(0.0);
+        }
+        if !group_sep.is_empty() {
+            if let Some(d) = trimmed.find(&decimal_sep) {
+                if trimmed[d..].contains(&group_sep) {
+                    return CalcResult::new_error(
+                        Error::VALUE,
+                        cell,
+                        "Group separator after the decimal separator".to_string(),
+                    );
+                }
+            }
         }
 
         // Remove group separators, replace decimal separator with '.'

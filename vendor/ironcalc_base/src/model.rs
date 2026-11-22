@@ -105,6 +105,8 @@ pub(crate) enum ParsedDefinedName {
     RangeReference(Range),
     /// `=LAMBDA(params..., body)`
     LambdaDefinition(Vec<NamedVariable>, Node),
+    /// CellX: any other formula (`=SUM(Data!$E$2:$E$21)`, `=3.14159`)
+    Formula(Box<Node>),
     /// `=SomethingElse`
     InvalidDefinedNameFormula,
 }
@@ -367,6 +369,17 @@ impl<'a> Model<'a> {
                     },
                 }
             }
+            Node::ImplicitIntersection { automatic: _, child }
+                if lifted_call_under_intersection(child).is_some() =>
+            {
+                match self.intersected_lifted_call(child, cell) {
+                    Some(result) => result,
+                    None => match self.evaluate_node_with_reference(child, cell) {
+                        CalcResult::Array(array) => top_left_of_array(&array, cell),
+                        other => other,
+                    },
+                }
+            }
             Node::ImplicitIntersection {
                 automatic: _,
                 child,
@@ -404,6 +417,9 @@ impl<'a> Model<'a> {
                                 left: range.left,
                                 right: range.right,
                             };
+                        }
+                        ParsedDefinedName::Formula(node) => {
+                            return self.evaluate_node_with_reference(&node, cell);
                         }
                         ParsedDefinedName::LambdaDefinition(..)
                         | ParsedDefinedName::InvalidDefinedNameFormula => {}
@@ -820,6 +836,7 @@ impl<'a> Model<'a> {
                             self.lambdas.insert(lambda_id, (param_names, body));
                             CalcResult::Lambda(lambda_id)
                         }
+                        ParsedDefinedName::Formula(node) => self.evaluate_node_in_context(&node, cell),
                         ParsedDefinedName::InvalidDefinedNameFormula => CalcResult::new_error(
                             Error::NAME,
                             cell,
@@ -919,13 +936,15 @@ impl<'a> Model<'a> {
                     format!("Error with Spill Range Operator in cell {cell:?}"),
                 ),
             },
-            ImplicitIntersection {
-                automatic: _,
-                child,
-            } => match self.evaluate_node_with_reference(child, cell) {
-                CalcResult::Array(array) => top_left_of_array(&array, cell),
-                result => self.implicit_intersection_to_value(result, cell),
-            },
+            ImplicitIntersection { automatic: _, child } => {
+                if let Some(result) = self.intersected_lifted_call(child, cell) {
+                    return result;
+                }
+                match self.evaluate_node_with_reference(child, cell) {
+                    CalcResult::Array(array) => top_left_of_array(&array, cell),
+                    result => self.implicit_intersection_to_value(result, cell),
+                }
+            }
             LambdaDefKind { parameters, body } => {
                 let id = self.get_next_lambda_id();
                 self.lambdas.insert(id, (parameters.clone(), *body.clone()));
@@ -1067,34 +1086,16 @@ impl<'a> Model<'a> {
                     // do not have that array/dynamic context, so neither behavior is
                     // available here; picking [0][0] could silently produce wrong results.
                     // Emit #VALUE! instead so the divergence is visible.
-                    let coerced = if array_width == 1 && array_height == 1 {
-                        match self.get_value_from_array(array, 1, 1) {
-                            Some(node) => array_node_to_formula_value(node),
-                            None => FormulaValue::new_error(
-                                Error::VALUE,
-                                "".to_string(),
-                                "Unexpected array result".to_string(),
-                            ),
-                        }
-                    } else {
-                        // Currently unreachable from normal user formulas: static
-                        // analysis wraps array-returning subexpressions in scalar
-                        // contexts in implicit intersection (`@`), which collapses
-                        // them to a single value before they reach the cell. If we
-                        // ever get here, static analysis or implicit-intersection
-                        // insertion has regressed.
-                        debug_assert!(
-                            false,
-                            "Larger-than-1x1 array reached scalar-context cell \
-                             (sheet={sheet}, row={row}, column={column}, \
-                             {array_width}x{array_height}); implicit intersection \
-                             was expected to collapse it.",
-                        );
-                        FormulaValue::new_error(
+                    // CellX: a formula without the dynamic-array flag shows the top
+                    // left value of an array result, as Excel does for such formulas.
+                    let _ = (array_width, array_height);
+                    let coerced = match self.get_value_from_array(array, 1, 1) {
+                        Some(node) => array_node_to_formula_value(node),
+                        None => FormulaValue::new_error(
                             Error::VALUE,
                             "".to_string(),
-                            "Array result in scalar context".to_string(),
-                        )
+                            "Unexpected array result".to_string(),
+                        ),
                     };
                     *self.workbook.worksheets[sheet as usize]
                         .cell_mut(row, column)
@@ -2936,6 +2937,8 @@ impl<'a> Model<'a> {
         name: &str,
         scope: Option<u32>,
     ) -> Result<Option<ParsedDefinedName>, String> {
+        // CellX: `Sheet!Name` looks the name up in its scope.
+        let name = name.rsplit_once('!').map_or(name, |(_, n)| n);
         let name_upper = name.to_uppercase();
 
         for (key, df) in &self.parsed_defined_names {
@@ -3049,7 +3052,10 @@ impl<'a> Model<'a> {
                 let format = self.get_style_for_cell(sheet_index, row, column)?.num_fmt;
                 let formatted_value =
                     cell.formatted_value(&self.workbook.shared_strings, self.language, |value| {
-                        format_number(value, &format, self.locale).text
+                        {
+                            crate::formatter::dates::set_date1904(self.workbook.settings.date1904);
+                            format_number(value, &format, self.locale).text
+                        }
                     });
                 Ok(formatted_value)
             }
@@ -3112,6 +3118,7 @@ impl<'a> Model<'a> {
                     if is_likely_date_number_format(&style.num_fmt) {
                         let value = cell.value(&self.workbook.shared_strings, self.language);
                         if let CellValue::Number(n) = value {
+                            crate::formatter::dates::set_date1904(self.workbook.settings.date1904);
                             let formatted = format_number(n, &style.num_fmt, self.locale);
                             if formatted.error.is_none() {
                                 return Ok(formatted.text);
@@ -4070,4 +4077,74 @@ mod tests {
         assert_eq!(update_result, Ok(()));
         assert_eq!(model._get_formula("A1"), *"=-A2*2");
     }
+}
+
+impl Model<'_> {
+    /// CellX: `@F(range)` for a one-argument function that runs element by
+    /// element (`NOT`, `CHAR`, `ISNUMBER`, ...): when the range meets the
+    /// formula's row or column, Excel applies F to that cell (this is how a
+    /// formula from before dynamic arrays reads `NOT(D28#)`); otherwise the
+    /// `@` takes the top left value of F's array, as usual.
+    fn intersected_lifted_call(&mut self, child: &Node, cell: CellReferenceIndex) -> Option<CalcResult> {
+        let Node::FunctionKind { kind, args } = lifted_call_under_intersection(child)? else {
+            return None;
+        };
+        let CalcResult::Range { left, right } = self.evaluate_node_with_reference(&args[0], cell)
+        else {
+            return None;
+        };
+        let r = implicit_intersection(&cell, &Range { left, right })?;
+        let reference = Node::ReferenceKind {
+            sheet_name: None,
+            sheet_index: r.sheet,
+            absolute_row: true,
+            absolute_column: true,
+            row: r.row,
+            column: r.column,
+            structured: None,
+        };
+        Some(self.evaluate_node_in_context(
+            &Node::FunctionKind {
+                kind,
+                args: vec![reference],
+            },
+            cell,
+        ))
+    }
+}
+
+/// CellX: `@F(range)` for a one-argument function that runs element by element
+/// over a range (`NOT`, `CHAR`, `ISNUMBER`, ...) is `F(@range)` in Excel: the
+/// range meets the formula's row or column, it is not taken whole.
+fn lifted_call_under_intersection(child: &Node) -> Option<Node> {
+    use crate::functions::Function as F;
+    if let Node::FunctionKind { kind, args } = child {
+        let lifted = matches!(
+            kind,
+            F::Not
+                | F::Char
+                | F::Code
+                | F::Isnumber
+                | F::Isnontext
+                | F::Istext
+                | F::Islogical
+                | F::Isblank
+                | F::Iserr
+                | F::Iserror
+                | F::Isna
+                | F::Isodd
+                | F::Iseven
+                | F::Encodeurl
+        );
+        if lifted && args.len() == 1 {
+            return Some(Node::FunctionKind {
+                kind: kind.clone(),
+                args: vec![Node::ImplicitIntersection {
+                    automatic: true,
+                    child: Box::new(args[0].clone()),
+                }],
+            });
+        }
+    }
+    None
 }

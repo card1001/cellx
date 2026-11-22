@@ -45,7 +45,8 @@ fn fn_arguments() {
 
     assert_eq!(model._get_text("E1"), *"#ERROR!");
     assert_eq!(model._get_text("E2"), *"#ERROR!");
-    assert_eq!(model._get_text("E3"), *"#ERROR!");
+    // CellX: RATE takes a sixth argument (guess), as in Excel.
+    assert_eq!(model._get_text("E3"), *"#NUM!");
 }
 
 #[test]

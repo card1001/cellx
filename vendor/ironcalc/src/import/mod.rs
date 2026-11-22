@@ -97,6 +97,17 @@ fn load_xlsx_from_reader<R: Read + std::io::Seek>(
     let mut archive = zip::ZipArchive::new(reader)?;
 
     let mut shared_strings = SharedStringTable::new(read_shared_strings(&mut archive)?);
+    // CellX: the 1904 date system flag.
+    let date1904 = {
+        let mut xml = String::new();
+        if let Ok(mut f) = archive.by_name("xl/workbook.xml") {
+            let _ = f.read_to_string(&mut xml);
+        }
+        xml.find("<workbookPr").is_some_and(|i| {
+            let tag = &xml[i..xml[i..].find('>').map_or(xml.len(), |j| i + j)];
+            tag.contains("date1904=\"1\"") || tag.contains("date1904=\"true\"")
+        })
+    };
     let mut workbook = load_workbook(&mut archive)?;
     let rels = load_relationships(&mut archive)?;
     let theme_path = resolve_theme_path(&rels);
@@ -146,6 +157,7 @@ fn load_xlsx_from_reader<R: Read + std::io::Seek>(
         settings: WorkbookSettings {
             tz: tz.to_string(),
             locale: locale.to_string(),
+            date1904,
         },
         metadata,
         tables,

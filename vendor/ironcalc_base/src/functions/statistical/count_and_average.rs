@@ -751,11 +751,12 @@ impl<'a> Model<'a> {
         }
 
         let n = values.len();
-        if n < 2 {
+        // CellX: Excel needs at least 3 data points here too.
+        if n < 3 {
             return CalcResult::Error {
                 error: Error::DIV,
                 origin: cell,
-                message: "SKEW.P requires at least 2 data points".to_string(),
+                message: "SKEW.P requires at least 3 data points".to_string(),
             };
         }
 
