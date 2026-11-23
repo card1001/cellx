@@ -869,6 +869,16 @@ impl<'a> Parser<'a> {
                 absolute_column,
                 absolute_row,
             } => {
+                // CellX: `Sheet2!#REF!`
+                if row == i32::MIN && column == i32::MIN {
+                    return Node::WrongReferenceKind {
+                        sheet_name: sheet,
+                        absolute_row: true,
+                        absolute_column: true,
+                        row: i32::MIN,
+                        column: i32::MIN,
+                    };
+                }
                 let context = &self.context;
                 let sheet_index = match &sheet {
                     Some(name) => self.get_sheet_index_by_name(name),
@@ -1098,8 +1108,12 @@ impl<'a> Parser<'a> {
                 };
 
                 // CellX: `Sheet!Name` is the name scoped to that sheet.
-                if let Some((sheet_name, local)) = name.split_once('!') {
-                    if let Some(index) = self.get_sheet_index_by_name(sheet_name) {
+                if let Some((sheet_name, local)) = name.rsplit_once('!') {
+                    let sheet_name = match sheet_name.strip_prefix('\'').and_then(|q| q.strip_suffix('\'')) {
+                        Some(q) => q.replace("''", "'"),
+                        None => sheet_name.to_string(),
+                    };
+                    if let Some(index) = self.get_sheet_index_by_name(&sheet_name) {
                         if let Some((scope, formula)) = self.get_defined_name(local, index) {
                             return Node::DefinedNameKind((name, scope, formula));
                         }

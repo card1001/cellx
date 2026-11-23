@@ -233,6 +233,12 @@ impl<'a> Lexer<'a> {
                     '{' => TokenType::LeftBrace,
                     '}' => TokenType::RightBrace,
                     '[' => {
+                        // CellX: a reference to another workbook, `[1]Sheet1!A1`.
+                        // It cannot be followed, so it is kept as a reference to
+                        // a sheet that does not exist (#REF!).
+                        if let Some(token) = self.consume_external_reference() {
+                            return token;
+                        }
                         if let (Some(table), false) = (self.implicit_table.clone(), self.in_structured) {
                             let pos = self.position;
                             self.position -= 1;
@@ -372,6 +378,7 @@ impl<'a> Lexer<'a> {
                                     return token;
                                 }
                                 // CellX: a sheet-scoped defined name, `Data!Scope_Test`.
+                                let failed_at = self.position;
                                 self.position = after_bang;
                                 let ident = self.consume_identifier();
                                 if !ident.is_empty()
@@ -381,6 +388,7 @@ impl<'a> Lexer<'a> {
                                 {
                                     return TokenType::Ident(format!("{name}!{ident}"));
                                 }
+                                self.position = failed_at;
                                 return token;
                             } else if peek_char == Some('$') {
                                 self.position = position - 1;
@@ -822,6 +830,43 @@ impl<'a> Lexer<'a> {
         self.consume_range(None)
     }
 
+    /// `[n]Sheet!A1` or `[n]'My Sheet'!A1`, with the position just after `[`.
+    fn consume_external_reference(&mut self) -> Option<TokenType> {
+        let start = self.position;
+        let mut i = start;
+        while i < self.len && self.chars[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == start || i >= self.len || self.chars[i] != ']' {
+            return None;
+        }
+        let book: String = self.chars[start..i].iter().collect();
+        self.position = i + 1;
+        let sheet = if self.peek_char() == Some('\'') {
+            self.position += 1;
+            match self.consume_single_quote_string() {
+                Ok(v) => v,
+                Err(_) => {
+                    self.position = start;
+                    return None;
+                }
+            }
+        } else {
+            let name = self.consume_identifier();
+            if name.is_empty() {
+                self.position = start;
+                return None;
+            }
+            name
+        };
+        if self.peek_char() != Some('!') {
+            self.position = start;
+            return None;
+        }
+        self.position += 1;
+        Some(self.consume_range(Some(format!("[{book}]{sheet}"))))
+    }
+
     fn consume_quoted_sheet_reference(&mut self) -> TokenType {
         // This is a reference:
         // 'First Sheet'!A34
@@ -834,14 +879,43 @@ impl<'a> Lexer<'a> {
         if self.next_token() != TokenType::Bang {
             return TokenType::Illegal(self.set_error("Expected '!'", self.position));
         }
-        self.consume_range(Some(sheet_name))
+        let after_bang = self.position;
+        let token = self.consume_range(Some(sheet_name.clone()));
+        if !matches!(token, TokenType::Illegal(_)) {
+            return token;
+        }
+        // CellX: a sheet-scoped defined name, `'Q1 Sales'!Name`.
+        let failed_at = self.position;
+        self.position = after_bang;
+        let ident = self.consume_identifier();
+        if !ident.is_empty()
+            && self.peek_char() != Some('(')
+            && utils::parse_reference_a1(&ident.to_uppercase()).is_none()
+            && utils::is_valid_a1_identifier(&ident)
+        {
+            return TokenType::Ident(format!("'{}'!{ident}", sheet_name.replace('\'', "''")));
+        }
+        self.position = failed_at;
+        token
     }
 
     fn consume_range(&mut self, sheet: Option<String>) -> TokenType {
         // CellX: `Sheet2!#REF!`, a reference into a deleted area, is #REF!.
         if self.peek_char() == Some('#') {
             self.position += 1;
-            return self.consume_error();
+            let token = self.consume_error();
+            // Kept as a reference (row and column i32::MIN, which no real
+            // reference has) so that the sheet name survives.
+            if let (TokenType::Error(Error::REF), Some(sheet)) = (&token, sheet) {
+                return TokenType::Reference {
+                    sheet: Some(sheet),
+                    row: i32::MIN,
+                    column: i32::MIN,
+                    absolute_row: true,
+                    absolute_column: true,
+                };
+            }
+            return token;
         }
         let m = if self.mode == LexerMode::A1 {
             self.consume_range_a1()

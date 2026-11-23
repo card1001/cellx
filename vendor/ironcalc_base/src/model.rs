@@ -419,7 +419,7 @@ impl<'a> Model<'a> {
                             };
                         }
                         ParsedDefinedName::Formula(node) => {
-                            return self.evaluate_node_with_reference(&node, cell);
+                            return self.evaluate_name_formula(&node, cell, true);
                         }
                         ParsedDefinedName::LambdaDefinition(..)
                         | ParsedDefinedName::InvalidDefinedNameFormula => {}
@@ -836,7 +836,9 @@ impl<'a> Model<'a> {
                             self.lambdas.insert(lambda_id, (param_names, body));
                             CalcResult::Lambda(lambda_id)
                         }
-                        ParsedDefinedName::Formula(node) => self.evaluate_node_in_context(&node, cell),
+                        ParsedDefinedName::Formula(node) => {
+                            self.evaluate_name_formula(&node, cell, false)
+                        }
                         ParsedDefinedName::InvalidDefinedNameFormula => CalcResult::new_error(
                             Error::NAME,
                             cell,
@@ -3659,7 +3661,7 @@ impl<'a> Model<'a> {
             }
         }
 
-        // Make sure the formula is valid — accept cell/range references OR a LAMBDA definition.
+        // Make sure the formula is valid: a reference or any formula that parses.
         let is_reference =
             common::ParsedReference::parse_reference_formula(None, formula, self.locale, |name| {
                 self.get_sheet_index_by_name(name)
@@ -3688,7 +3690,12 @@ impl<'a> Model<'a> {
             if let Node::ParseErrorKind { .. } = node {
                 node = self.parse_internal_formula(formula_body, &dummy_ref);
             }
-            if !matches!(node, Node::LambdaDefKind { .. }) {
+            // CellX: like Excel, a name can stand for any formula or constant.
+            // A bare reference must name its sheet (`Sheet1!$A$1`).
+            if matches!(
+                node,
+                Node::ParseErrorKind { .. } | Node::ReferenceKind { .. } | Node::RangeKind { .. }
+            ) {
                 return Err("Formula: Invalid defined name formula".to_string());
             }
         }
@@ -4079,7 +4086,28 @@ mod tests {
     }
 }
 
+thread_local! {
+    static NAME_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 impl Model<'_> {
+    /// CellX: evaluates the formula of a defined name. A name that refers to
+    /// itself, directly or through other names, is a circular reference.
+    fn evaluate_name_formula(&mut self, node: &Node, cell: CellReferenceIndex, reference: bool) -> CalcResult {
+        let depth = NAME_DEPTH.with(|d| d.get());
+        if depth >= 64 {
+            return CalcResult::new_error(Error::CIRC, cell, "Defined name refers to itself".to_string());
+        }
+        NAME_DEPTH.with(|d| d.set(depth + 1));
+        let result = if reference {
+            self.evaluate_node_with_reference(node, cell)
+        } else {
+            self.evaluate_node_in_context(node, cell)
+        };
+        NAME_DEPTH.with(|d| d.set(depth));
+        result
+    }
+
     /// CellX: `@F(range)` for a one-argument function that runs element by
     /// element (`NOT`, `CHAR`, `ISNUMBER`, ...): when the range meets the
     /// formula's row or column, Excel applies F to that cell (this is how a

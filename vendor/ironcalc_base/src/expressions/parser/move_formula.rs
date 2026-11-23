@@ -297,6 +297,13 @@ fn to_string_moved(
             );
             format!("{s1}:{s2}")
         }
+        // CellX: `Sheet2!#REF!`
+        WrongReferenceKind {
+            sheet_name: Some(name),
+            row: i32::MIN,
+            column: i32::MIN,
+            ..
+        } => format!("{}!#REF!", crate::expressions::utils::quote_name(name)),
         WrongReferenceKind {
             sheet_name,
             absolute_row,

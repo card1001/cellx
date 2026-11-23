@@ -15,17 +15,22 @@ jobs:
     name: 엔진 테스트 + 호환성 측정
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: 엔진 단위 테스트
         run: cargo test -p cellx-core -p cellx-cli
+      - name: IronCalc(내장 사본) 단위 테스트
+        run: |
+          cp -r vendor/ironcalc_base /tmp/ironcalc_base
+          printf '\n[workspace]\n' >> /tmp/ironcalc_base/Cargo.toml
+          cd /tmp/ironcalc_base && cargo test --release --lib
       - name: IronCalc 테스트 파일 받기 (Excel이 만든 xlsx)
         run: git clone --depth 1 https://github.com/ironcalc/IronCalc /tmp/ironcalc
       - name: 호환성 측정
         run: |
           cargo run --release -p cellx-cli -- compat /tmp/ironcalc/xlsx/tests --json compat.json
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: compat-report
           path: compat.json
@@ -37,11 +42,11 @@ jobs:
       run:
         working-directory: apps/desktop
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
         with:
           version: 10
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -64,15 +69,15 @@ jobs:
             args: "--target universal-apple-darwin"
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - uses: Swatinem/rust-cache@v2
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -83,7 +88,7 @@ jobs:
       - name: 앱 빌드
         working-directory: apps/desktop
         run: pnpm tauri build ${{ matrix.args }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: cellx-${{ matrix.platform }}
           path: |

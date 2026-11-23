@@ -525,6 +525,13 @@ fn stringify(
             }
         }
         StringKind(value) => format!("\"{value}\""),
+        // CellX: `Sheet2!#REF!` (a reference into a deleted area)
+        WrongReferenceKind {
+            sheet_name: Some(name),
+            column: i32::MIN,
+            row: i32::MIN,
+            ..
+        } => format!("{}!#REF!", quote_name(name)),
         WrongReferenceKind {
             sheet_name,
             column,
@@ -1314,7 +1321,14 @@ pub(crate) fn rename_sheet_in_node(node: &mut Node, sheet_index: u32, new_name: 
         Node::ErrorKind(_) => {}
         Node::ParseErrorKind { .. } => {}
         Node::ArrayKind(_) => {}
-        Node::DefinedNameKind(_) => {}
+        // CellX: a sheet-qualified name, `Data!Name`, follows its sheet.
+        Node::DefinedNameKind((n, s, _)) => {
+            if *s == Some(sheet_index) {
+                if let Some((_, local)) = n.rsplit_once('!') {
+                    *n = format!("{}!{}", quote_name(new_name), local);
+                }
+            }
+        }
         Node::TableNameKind(_) => {}
         Node::NamedVariableKind { .. } => {}
         Node::EmptyArgKind => {}
@@ -1342,8 +1356,16 @@ pub(crate) fn rename_defined_name_in_node(
     match node {
         // Rename
         Node::DefinedNameKind((n, s, _)) => {
-            if name.to_lowercase() == n.to_lowercase() && *s == scope {
-                *n = new_name.to_string();
+            // CellX: `Data!Name` keeps its sheet prefix.
+            let (prefix, local) = match n.rsplit_once('!') {
+                Some((p, l)) => (Some(p.to_string()), l.to_string()),
+                None => (None, n.clone()),
+            };
+            if name.to_lowercase() == local.to_lowercase() && *s == scope {
+                *n = match prefix {
+                    Some(p) => format!("{p}!{new_name}"),
+                    None => new_name.to_string(),
+                };
             }
         }
         // Go next level

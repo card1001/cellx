@@ -164,7 +164,7 @@ cargo run --release -p cellx-cli -- eval 파일.xlsx "Sheet1!B3"
 | 항목 | 결과 |
 | --- | --- |
 | 수식 셀 | 77,705개 |
-| Excel 저장값과 일치 | **99.79%** (불일치 166개) |
+| Excel 저장값과 일치 | **99.79%** (불일치 164개) |
 | 엔진이 중단된 파일 | 0개 |
 | 남은 불일치 | LibreOffice가 만든 기대값(79), NOW·TODAY·RANDARRAY 같은 휘발성 함수(약 40), XIRR·IRR·TAN·BESSELJ 일부의 Excel 내부 반복·근사 차이(약 30), 지역 설정에 따른 VALUE 날짜 해석(2) 등 |
 

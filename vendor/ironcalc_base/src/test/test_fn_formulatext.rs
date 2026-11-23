@@ -30,8 +30,11 @@ fn implicit_intersection() {
     model._set("A2", "=FORMULATEXT(D1:E1)");
     model.evaluate();
 
-    assert_eq!(model._get_text("A1"), *"#N/IMPL!");
-    assert_eq!(model._get_text("A2"), *"#N/IMPL!");
+    // CellX: a range gives an array, as in Excel. A1 cannot spill into A2.
+    assert_eq!(model._get_text("A1"), *"#SPILL!");
+    // D1 and E1 have no formula.
+    assert_eq!(model._get_text("A2"), *"#N/A");
+    assert_eq!(model._get_text("B2"), *"#N/A");
 }
 
 #[test]

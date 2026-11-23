@@ -170,7 +170,8 @@ fn row_heigh_increases_automatically() {
     model
         .set_user_input(0, 1, 1, "My home in Canada had horses\nAnd monkeys!")
         .unwrap();
-    assert_eq!(model.get_row_height(0, 1), Ok(38.0));
+    // CellX: default row height 22px (16.5pt), so two lines are 35.5px.
+    assert_eq!(model.get_row_height(0, 1), Ok(35.5));
 }
 
 #[test]

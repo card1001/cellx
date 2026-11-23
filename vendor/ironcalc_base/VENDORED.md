@@ -33,3 +33,6 @@ CellX에서 바꾼 부분:
 25. Excel 호환성(함수): TIME 인수 32767 제한, HOUR·MINUTE·SECOND 범위, TEXT 시간 반올림·`ss.0` 소수 초·`mm:ss`의 분, 생략 인수(#N/A·기본값), 주말 코드, DATE 일·월 한계, COUPPCD/COUPNCD(만기일에서 바로 계산)·COUPDAYS(basis 1), ACCRINT·AMORLINC 경계, RATE guess(0 포함), IRR 정밀도, BASE·DECIMAL, NUMBERVALUE, AND·OR 오류 전파, SUBTOTAL 6·110·111, BINOM.INV, SKEW.P, WRAPCOLS·WRAPROWS, TEXTAFTER·TEXTBEFORE 빈 구분자, ENCODEURL 길이, CONVERT 섭씨, BESSELJ·BESSELY(Numerical Recipes 근사, Excel과 같은 값), 숫자→텍스트 변환 15자리·지수 표기(`excel_number_to_text`).
 26. 배열: 단일 인수 함수(CHAR, CODE, NOT, IS 계열, ENCODEURL)를 범위·배열에 원소별로 적용(`Model::lift_unary`), `@F(범위)`는 행·열이 만나면 그 셀에 적용. CONCAT·TEXTJOIN이 함수가 돌려준 배열을 받음. 동적 배열 표시가 없는 수식의 배열 결과는 왼쪽 위 값. `@` 아래 연산식에 괄호 유지.
 27. 이름 정의: 상수·수식 이름(`ParsedDefinedName::Formula`), 시트 범위 이름 `Data!이름`, 삭제된 참조 `Sheet2!#REF!`.
+28. 이름 정의 보강: 상수·수식 이름을 새로 만들 수 있음(시트 없는 맨 참조만 거부), 이름이 자기 자신을 참조하면 #CIRC!, `'Q1 Sales'!이름`처럼 따옴표 시트의 이름, 시트 이름을 바꾸면 `시트!이름`도 따라 바뀜. `Sheet2!#REF!`는 시트 이름을 유지(`WrongReferenceKind`, 행·열 `i32::MIN`).
+29. 다른 통합 문서 참조 `[1]Sheet1!A1`는 존재하지 않는 시트 참조로 읽어 #REF!(수식 텍스트는 유지). FORMULATEXT에 범위를 주면 셀마다 수식 텍스트 배열.
+30. 테스트: CellX 기본값(글꼴 11pt, 행 높이, 열 너비 변환)과 구조적 참조 표기에 맞춰 기존 테스트 기대값 갱신, `test_cellx_excel_compat` 추가. CI에서 이 사본의 단위 테스트를 실행.

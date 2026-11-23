@@ -1134,12 +1134,22 @@ impl<'a> Model<'a> {
                 };
             }
             if left.row != right.row || left.column != right.column {
-                // FIXME: Implicit intersection or dynamic arrays
-                return CalcResult::Error {
-                    error: Error::NIMPL,
-                    origin: cell,
-                    message: "argument must be a reference to a single cell".to_string(),
-                };
+                // CellX: a range gives the formula of each cell (#N/A without one).
+                use crate::expressions::parser::ArrayNode;
+                let mut rows = Vec::new();
+                for row in left.row..=right.row {
+                    let mut data_row = Vec::new();
+                    for column in left.column..=right.column {
+                        data_row.push(
+                            match self.get_english_cell_formula(left.sheet, row, column) {
+                                Ok(Some(f)) => ArrayNode::String(f),
+                                _ => ArrayNode::Error(Error::NA),
+                            },
+                        );
+                    }
+                    rows.push(data_row);
+                }
+                return CalcResult::Array(rows);
             }
             if let Ok(Some(f)) = self.get_english_cell_formula(left.sheet, left.row, left.column) {
                 CalcResult::String(f)

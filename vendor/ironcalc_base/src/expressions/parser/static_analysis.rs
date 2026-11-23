@@ -2003,7 +2003,7 @@ fn static_analysis_on_function(kind: &Function, args: &[Node]) -> StaticResult {
         Function::Rand => not_implemented(args),
         Function::Randbetween => scalar_arguments(args),
         Function::Eomonth => scalar_arguments(args),
-        Function::Formulatext => not_implemented(args),
+        Function::Formulatext => scalar_arguments(args),
         Function::Geomean => not_implemented(args),
         Function::Networkdays => not_implemented(args),
         Function::NetworkdaysIntl => not_implemented(args),
