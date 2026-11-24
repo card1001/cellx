@@ -31,7 +31,8 @@ fn arguments() {
     assert_eq!(model._get_text("A7"), *"#ERROR!");
 
     assert_eq!(model._get_text("A8"), *"1");
-    assert_eq!(model._get_text("A9"), *"#N/IMPL!");
+    // CellX: as in Excel, SHEETS of a value that is not a reference is #REF!
+    assert_eq!(model._get_text("A9"), *"#REF!");
 }
 
 #[test]

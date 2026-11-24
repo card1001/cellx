@@ -305,12 +305,31 @@ impl<'a> Model<'a> {
                 }
                 error @ CalcResult::Error { .. } => return error,
                 CalcResult::EmptyCell | CalcResult::EmptyArg => {}
-                CalcResult::Array(_) | CalcResult::Lambda(_) => {
-                    return CalcResult::Error {
-                        error: Error::NIMPL,
-                        origin: cell,
-                        message: "Arrays not supported yet".to_string(),
+                // CellX: an array counts its text as 0 and its booleans as 0/1.
+                CalcResult::Array(array) => {
+                    use crate::expressions::parser::ArrayNode;
+                    for value in array.iter().flatten() {
+                        match value {
+                            ArrayNode::Number(v) => {
+                                count += 1.0;
+                                sum += v;
+                            }
+                            ArrayNode::Boolean(b) => {
+                                count += 1.0;
+                                if *b {
+                                    sum += 1.0;
+                                }
+                            }
+                            ArrayNode::String(_) => count += 1.0,
+                            ArrayNode::Empty => {}
+                            ArrayNode::Error(e) => {
+                                return CalcResult::new_error(e.clone(), cell, String::new())
+                            }
+                        }
                     }
+                }
+                CalcResult::Lambda(_) => {
+                    return CalcResult::new_error(Error::CALC, cell, "Lambda".to_string())
                 }
             };
         }
@@ -900,9 +919,11 @@ impl<'a> Model<'a> {
                     };
                 }
             }
+            // CellX: an error is the result; anything else has no numbers (#NUM!).
+            e @ CalcResult::Error { .. } => return e,
             _ => {
                 return CalcResult::Error {
-                    error: Error::NIMPL,
+                    error: Error::NUM,
                     origin: cell,
                     message: "Unsupported argument type".to_string(),
                 }
@@ -1000,9 +1021,11 @@ impl<'a> Model<'a> {
                     };
                 }
             }
+            // CellX: an error is the result; anything else has no numbers (#NUM!).
+            e @ CalcResult::Error { .. } => return e,
             _ => {
                 return CalcResult::Error {
-                    error: Error::NIMPL,
+                    error: Error::NUM,
                     origin: cell,
                     message: "Unsupported argument type".to_string(),
                 }

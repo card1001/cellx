@@ -481,9 +481,12 @@ impl Model<'_> {
                 ArrayNode::Empty => return None,
             })
         };
-        let array = match self.evaluate_node_in_context(&args[0], cell) {
-            CalcResult::Range { left, right } => self.evaluate_range(left, right),
-            CalcResult::Array(a) => a,
+        let (array, rows, columns) = match self.evaluate_node_in_context(&args[0], cell) {
+            CalcResult::Range { left, right } => self.evaluate_range_clipped(left, right),
+            CalcResult::Array(a) => {
+                let (r, c) = (a.len(), a.first().map_or(0, |x| x.len()));
+                (a, r, c)
+            }
             CalcResult::Number(n) => return f(self, &[Node::NumberKind(n)], cell),
             CalcResult::Boolean(b) => return f(self, &[Node::BooleanKind(b)], cell),
             CalcResult::String(s) => return f(self, &[Node::StringKind(s)], cell),
@@ -496,32 +499,88 @@ impl Model<'_> {
             }
             _ => return f(self, args, cell),
         };
-        let single = array.len() == 1 && array[0].len() == 1;
-        let mut out = Vec::with_capacity(array.len());
-        for row in &array {
-            let mut data_row = Vec::with_capacity(row.len());
-            for value in row {
-                let result = match literal(value) {
-                    Some(node) => f(self, &[node], cell),
-                    None => match &empty {
-                        Some(r) => r.clone(),
-                        None => f(self, &[Node::EmptyArgKind], cell),
-                    },
-                };
-                if single {
-                    return result;
+        let to_node = |result: CalcResult| match result {
+            CalcResult::Number(n) => ArrayNode::Number(n),
+            CalcResult::Boolean(b) => ArrayNode::Boolean(b),
+            CalcResult::String(s) => ArrayNode::String(s),
+            CalcResult::Error { error, .. } => ArrayNode::Error(error),
+            CalcResult::EmptyCell | CalcResult::EmptyArg => ArrayNode::Empty,
+            _ => ArrayNode::Error(Error::VALUE),
+        };
+        // The result for an empty element, computed once.
+        let mut empty_value: Option<ArrayNode> = None;
+        let mut empty_result = |model: &mut Self| -> ArrayNode {
+            if let Some(v) = &empty_value {
+                return v.clone();
+            }
+            let v = to_node(match &empty {
+                Some(r) => r.clone(),
+                None => f(model, &[Node::EmptyArgKind], cell),
+            });
+            empty_value = Some(v.clone());
+            v
+        };
+        if rows == 1 && columns == 1 {
+            return match array.first().and_then(|r| r.first()).and_then(literal) {
+                Some(node) => f(self, &[node], cell),
+                None => match &empty {
+                    Some(r) => r.clone(),
+                    None => f(self, &[Node::EmptyArgKind], cell),
+                },
+            };
+        }
+        let mut out = Vec::with_capacity(rows);
+        let mut empty_row: Option<Vec<ArrayNode>> = None;
+        for i in 0..rows {
+            let Some(row) = array.get(i) else {
+                if empty_row.is_none() {
+                    let e = empty_result(self);
+                    empty_row = Some(vec![e; columns]);
                 }
-                data_row.push(match result {
-                    CalcResult::Number(n) => ArrayNode::Number(n),
-                    CalcResult::Boolean(b) => ArrayNode::Boolean(b),
-                    CalcResult::String(s) => ArrayNode::String(s),
-                    CalcResult::Error { error, .. } => ArrayNode::Error(error),
-                    CalcResult::EmptyCell | CalcResult::EmptyArg => ArrayNode::Empty,
-                    _ => ArrayNode::Error(Error::VALUE),
-                });
+                out.push(empty_row.clone().unwrap_or_default());
+                continue;
+            };
+            let mut data_row = Vec::with_capacity(columns);
+            for j in 0..columns {
+                let value = match row.get(j).and_then(literal) {
+                    Some(node) => to_node(f(self, &[node], cell)),
+                    None => empty_result(self),
+                };
+                data_row.push(value);
             }
             out.push(data_row);
         }
         CalcResult::Array(out)
+    }
+}
+
+impl Model<'_> {
+    /// CellX: a range for element-by-element functions. A whole column or row
+    /// is read only within the sheet's used area; the rest is empty. Returns
+    /// the cells read and the full (rows, columns) of the range.
+    pub(crate) fn evaluate_range_clipped(
+        &mut self,
+        left: crate::expressions::types::CellReferenceIndex,
+        right: crate::expressions::types::CellReferenceIndex,
+    ) -> (Vec<Vec<ArrayNode>>, usize, usize) {
+        let rows = (right.row - left.row + 1).max(0) as usize;
+        let columns = (right.column - left.column + 1).max(0) as usize;
+        let (last_row, last_column) = self
+            .clip_to_used_area(left.sheet, left.row, left.column, right.row, right.column)
+            .unwrap_or((right.row, right.column));
+        let last_row = last_row.min(right.row);
+        let last_column = last_column.min(right.column);
+        if last_row < left.row || last_column < left.column {
+            return (Vec::new(), rows, columns);
+        }
+        let used = self.evaluate_range(
+            left,
+            crate::expressions::types::CellReferenceIndex {
+                sheet: left.sheet,
+                row: last_row,
+                column: last_column,
+            },
+        );
+        (used, rows, columns)
     }
 }

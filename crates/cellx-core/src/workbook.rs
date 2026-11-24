@@ -344,6 +344,8 @@ pub struct Workbook {
     pub(crate) scenarios: Vec<crate::whatif::Scenario>,
     pub(crate) book_protection: Option<crate::book::BookProtection>,
     pub(crate) custom_views: Vec<crate::book::CustomView>,
+    /// Links to other workbooks, kept from the opened file and written back.
+    pub(crate) external_links: Vec<crate::ooxml::ExternalLinkPart>,
     pub(crate) pivots: Vec<PivotDef>,
     pub(crate) filters: Vec<AutoFilter>,
     pub(crate) validations: Vec<Validation>,
@@ -409,6 +411,7 @@ impl Workbook {
             scenarios: Vec::new(),
             book_protection: None,
             custom_views: Vec::new(),
+            external_links: Vec::new(),
             pivots: Vec::new(),
             filters: Vec::new(),
             validations: Vec::new(),
@@ -1509,6 +1512,19 @@ impl Workbook {
             .unwrap_or((DEFAULT_FONT.into(), DEFAULT_FONT_SIZE))
     }
 
+    /// Whether the workbook uses the 1904 date system (serial 0 is 1904-01-01).
+    pub fn date1904(&self) -> bool {
+        self.model().workbook.settings.date1904
+    }
+
+    /// Switches the date system. Cell values stay as they are, so the dates
+    /// they show move by 1462 days, as in Excel; everything is recalculated.
+    pub fn set_date1904(&mut self, on: bool) -> Result<RecalcStats> {
+        self.model_mut().workbook.settings.date1904 = on;
+        self.untracked = true;
+        self.recalc()
+    }
+
     pub fn workbook_font(&self) -> (String, f64) {
         let (n, s) = self.default_font();
         (n, s as f64)
@@ -1651,6 +1667,7 @@ impl Workbook {
             protection: self.book_protection_xml(),
             views: self.custom_workbook_views_xml(),
             pivot_caches: self.pivot_parts().into_iter().map(|p| p.cache).collect(),
+            external_links: self.external_links.clone(),
         };
         crate::ooxml::add_extras_with(xlsx.get_ref(), &self.sheet_parts(), &self.sheet_names(), &book)
     }

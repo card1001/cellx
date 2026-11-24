@@ -550,6 +550,34 @@ pub struct BookParts {
     pub views: String,
     /// Pivot cache definitions, in the order the tables refer to them.
     pub pivot_caches: Vec<String>,
+    /// Links to other workbooks (`[1]Sheet1!A1`), as read: the part and its relationships.
+    pub external_links: Vec<ExternalLinkPart>,
+}
+
+/// An `xl/externalLinks/externalLinkN.xml` part kept from the opened file.
+#[derive(Clone, Debug, Default)]
+pub struct ExternalLinkPart {
+    pub xml: Vec<u8>,
+    pub rels: Option<Vec<u8>>,
+}
+
+/// The external link parts of an xlsx, in the order of `<externalReferences>`
+/// (the first is `[1]`).
+pub fn read_external_links(xlsx: &[u8]) -> Vec<ExternalLinkPart> {
+    let Ok(mut zip) = zip::ZipArchive::new(Cursor::new(xlsx)) else { return Vec::new() };
+    let Some(wb) = read_part(&mut zip, "xl/workbook.xml") else { return Vec::new() };
+    let Ok(doc) = roxmltree::Document::parse(&wb) else { return Vec::new() };
+    let rels = rels_of(&mut zip, "xl/workbook.xml");
+    let mut out = Vec::new();
+    for n in doc.descendants().filter(|n| n.has_tag_name("externalReference")) {
+        let Some(id) = n.attribute((R_NS, "id")) else { continue };
+        let Some((_, target)) = rels.get(id) else { continue };
+        let Some(xml) = read_part_bytes(&mut zip, target) else { continue };
+        let (dir, file) = target.rsplit_once('/').unwrap_or(("", target));
+        let rels = read_part_bytes(&mut zip, &format!("{dir}/_rels/{file}.rels"));
+        out.push(ExternalLinkPart { xml, rels });
+    }
+    out
 }
 
 pub(crate) fn workbook_xml(xlsx: &[u8]) -> Option<String> {
@@ -563,7 +591,12 @@ pub fn add_extras(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]) -> 
 }
 
 pub fn add_extras_with(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String], book: &BookParts) -> Result<Vec<u8>> {
-    if parts.iter().all(SheetParts::is_empty) && book.protection.is_empty() && book.views.is_empty() && book.pivot_caches.is_empty() {
+    if parts.iter().all(SheetParts::is_empty)
+        && book.protection.is_empty()
+        && book.views.is_empty()
+        && book.pivot_caches.is_empty()
+        && book.external_links.is_empty()
+    {
         return Ok(xlsx.to_vec());
     }
     let mut zin = zerr(zip::ZipArchive::new(Cursor::new(xlsx)))?;
@@ -1036,6 +1069,34 @@ pub fn add_extras_with(xlsx: &[u8], parts: &[SheetParts], sheet_names: &[String]
             r#"<Relationship Id="rIdCxPc{n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheDefinition" Target="pivotCache/pivotCacheDefinition{n}.xml"/>"#
         ));
         pivot_caches.push_str(&format!(r#"<pivotCache cacheId="{}" r:id="rIdCxPc{n}"/>"#, crate::pivotxml::CACHE_ID_BASE + k as u32));
+    }
+    let mut external_refs = String::new();
+    for (k, link) in book.external_links.iter().enumerate() {
+        let n = k + 1;
+        put(&mut map, &mut order, format!("xl/externalLinks/externalLink{n}.xml"), link.xml.clone());
+        if let Some(rels) = &link.rels {
+            put(&mut map, &mut order, format!("xl/externalLinks/_rels/externalLink{n}.xml.rels"), rels.clone());
+        }
+        overrides.push_str(&format!(
+            r#"<Override PartName="/xl/externalLinks/externalLink{n}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml"/>"#
+        ));
+        wb_rels_new.push_str(&format!(
+            r#"<Relationship Id="rIdCxExt{n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink" Target="externalLinks/externalLink{n}.xml"/>"#
+        ));
+        external_refs.push_str(&format!(r#"<externalReference r:id="rIdCxExt{n}"/>"#));
+    }
+    if !external_refs.is_empty() {
+        if let Some(wb) = map.get("xl/workbook.xml") {
+            let mut wb = String::from_utf8_lossy(wb).to_string();
+            // After sheets (and functionGroups), before definedNames.
+            if let Some(at) = wb.find("</sheets>") {
+                wb.insert_str(at + "</sheets>".len(), &format!("<externalReferences>{external_refs}</externalReferences>"));
+            }
+            if !wb.contains("xmlns:r=") {
+                wb = wb.replacen("<workbook ", r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" "#, 1);
+            }
+            put(&mut map, &mut order, "xl/workbook.xml".into(), wb.into_bytes());
+        }
     }
     if !wb_rels_new.is_empty() {
         if let Some(r) = map.get("xl/_rels/workbook.xml.rels") {

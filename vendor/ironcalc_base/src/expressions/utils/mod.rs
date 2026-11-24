@@ -285,6 +285,15 @@ fn name_needs_quoting(name: &str) -> bool {
 /// Quotes a string sheet name if it needs to
 /// NOTE: Invalid characters in a sheet name \, /, *, \[, \], :, ?
 pub fn quote_name(name: &str) -> String {
+    // CellX: a sheet of another workbook, `[1]Sheet1`, is quoted only when the
+    // sheet name needs it (sheet names cannot hold brackets).
+    if let Some(rest) = name.strip_prefix('[') {
+        if let Some((book, sheet)) = rest.split_once(']') {
+            if !book.is_empty() && book.chars().all(|c| c.is_ascii_digit()) && !name_needs_quoting(sheet) {
+                return name.to_string();
+            }
+        }
+    }
     if name_needs_quoting(name) {
         return format!("'{}'", name.replace('\'', "''"));
     };

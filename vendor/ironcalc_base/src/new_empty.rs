@@ -115,10 +115,17 @@ impl<'a> Model<'a> {
         let mut parsed_defined_names = HashMap::new();
 
         for (name, formula, sheet_id) in entries {
-            let parsed_defined_name_formula = if let Ok(reference) =
+            // CellX: a name with relative references (`Sheet1!A1`) moves with the
+            // cell that uses it, counted from A1 as in Excel, so it is kept as a
+            // formula and not as a fixed reference.
+            let reference = if has_relative_reference(&formula, self.locale) {
+                Err(String::new())
+            } else {
                 ParsedReference::parse_reference_formula(None, &formula, self.locale, |n| {
                     self.get_sheet_index_by_name(n)
-                }) {
+                })
+            };
+            let parsed_defined_name_formula = if let Ok(reference) = reference {
                 match reference {
                     ParsedReference::CellReference(cell_reference) => {
                         ParsedDefinedName::CellReference(cell_reference)
@@ -961,5 +968,40 @@ mod tests {
 
         assert!(is_valid_sheet_name("AAAAAAAAAABBBBBBBBBBCCCCCCCCCCD")); // 31
         assert!(!is_valid_sheet_name("AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDE")); // 32
+    }
+}
+
+/// CellX: whether a defined-name formula has a reference that is not absolute.
+fn has_relative_reference(formula: &str, locale: &crate::locale::Locale) -> bool {
+    use crate::expressions::lexer::{Lexer, LexerMode};
+    use crate::expressions::token::TokenType;
+    let Ok(language) = crate::language::get_language("en") else {
+        return false;
+    };
+    let body = formula.strip_prefix('=').unwrap_or(formula);
+    let mut lexer = Lexer::new(body, LexerMode::A1, locale, language);
+    loop {
+        match lexer.next_token() {
+            TokenType::EOF | TokenType::Illegal(_) => return false,
+            TokenType::Reference {
+                absolute_row,
+                absolute_column,
+                ..
+            } => {
+                if !absolute_row || !absolute_column {
+                    return true;
+                }
+            }
+            TokenType::Range { left, right, .. } => {
+                if !left.absolute_row
+                    || !left.absolute_column
+                    || !right.absolute_row
+                    || !right.absolute_column
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
     }
 }

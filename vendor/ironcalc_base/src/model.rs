@@ -2934,7 +2934,7 @@ impl<'a> Model<'a> {
     }
 
     // Helper function that returns a defined name given the name and scope
-    fn get_parsed_defined_name(
+    pub(crate) fn get_parsed_defined_name(
         &self,
         name: &str,
         scope: Option<u32>,

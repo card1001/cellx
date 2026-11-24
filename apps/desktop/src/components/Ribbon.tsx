@@ -108,6 +108,7 @@ export interface RibbonActions {
   tableToRange(): void;
   protectSheet(): void;
   protectBook(): void;
+  date1904(): void;
   customViews(): void;
   orientation(landscape: boolean): void;
   fitWidth(fit: FitMode): void;
@@ -139,6 +140,7 @@ interface Props {
   showFormulas: boolean;
   protectedBook: boolean;
   hasArrows: boolean;
+  date1904: boolean;
 }
 
 const TABS = ["파일", "홈", "삽입", "페이지 레이아웃", "수식", "데이터", "검토", "보기"] as const;
@@ -255,6 +257,16 @@ export function Ribbon(props: Props) {
               </Btn>
               <Btn big title="인쇄 / PDF로 저장 (Ctrl+P)" onClick={a.print}>
                 <span className="ic">🖨</span>인쇄
+              </Btn>
+            </Group>
+            <Group label="옵션">
+              <Btn
+                big
+                title="1904 날짜 체계: 일련번호 0을 1904-01-01로 셉니다(Mac용 옛 Excel 파일). 바꾸면 날짜 셀이 1462일(4년 1일)씩 다르게 표시됩니다"
+                on={props.date1904}
+                onClick={a.date1904}
+              >
+                <span className="ic">📅</span>1904 날짜 체계
               </Btn>
             </Group>
             <Group label="정보">

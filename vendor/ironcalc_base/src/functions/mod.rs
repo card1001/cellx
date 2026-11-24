@@ -2317,6 +2317,27 @@ impl<'a> Model<'a> {
         args: &[Node],
         cell: CellReferenceIndex,
     ) -> CalcResult {
+        // CellX: a function of scalar arguments given a range or an array runs
+        // element by element, as in Excel (`PMT({0.05,0.06},10,1000)`).
+        if is_broadcast_function(kind)
+            && args.iter().any(|a| {
+                !matches!(
+                    crate::expressions::parser::static_analysis::run_static_analysis_on_node(a),
+                    crate::expressions::parser::static_analysis::StaticResult::Scalar
+                )
+            })
+        {
+            return self.broadcast_scalar_call(kind, args, cell);
+        }
+        self.evaluate_function_unlifted(kind, args, cell)
+    }
+
+    fn evaluate_function_unlifted(
+        &mut self,
+        kind: &Function,
+        args: &[Node],
+        cell: CellReferenceIndex,
+    ) -> CalcResult {
         match kind {
             Function::And => self.fn_and(args, cell),
             Function::False => self.fn_false(args, cell),
@@ -2681,7 +2702,7 @@ impl<'a> Model<'a> {
             Function::Seriessum => self.fn_seriessum(args, cell),
             Function::Sumproduct => self.fn_sumproduct(args, cell),
             Function::Percentof => self.fn_percentof(args, cell),
-            Function::N => self.fn_n(args, cell),
+            Function::N => self.lift_unary(args, cell, Some(CalcResult::Number(0.0)), Self::fn_n),
             Function::Cell => self.fn_cell(args, cell),
             Function::Info => self.fn_info(args, cell),
             Function::Sheets => self.fn_sheets(args, cell),
@@ -2909,4 +2930,141 @@ fn empty_args_to_defaults(args: &[Node], default: impl Fn(usize) -> Option<Node>
             _ => a.clone(),
         })
         .collect()
+}
+
+/// CellX: functions of scalar arguments that run element by element over a
+/// range or an array. IronCalc broadcast some of them over arrays only (a
+/// range argument was intersected with the formula's row), the others not at all.
+fn is_broadcast_function(kind: &Function) -> bool {
+    matches!(kind, Function::Amordegrc | Function::Amorlinc | Function::Asc | Function::BetaDist | Function::BetaDistCompat | Function::BetaInv | Function::BetaInvCompat | Function::BinomDist | Function::BinomDistCompat | Function::BinomDistRange | Function::BinomInv | Function::ChiDistCompat | Function::ChiInvCompat | Function::ChisqDist | Function::ChisqDistRT | Function::ChisqInv | Function::ChisqInvRT | Function::ConfidenceCompat | Function::ConfidenceNorm | Function::ConfidenceT | Function::Convert | Function::Coupdaybs | Function::Coupdays | Function::Coupdaysnc | Function::Coupncd | Function::Coupnum | Function::Couppcd | Function::CritbinomCompat | Function::Cumipmt | Function::Cumprinc | Function::Datedif | Function::Datevalue | Function::Days | Function::Days360 | Function::Db | Function::Ddb | Function::Delta | Function::Disc | Function::Dollar | Function::Dollarde | Function::Dollarfr | Function::Duration | Function::Edate | Function::Effect | Function::ErrorType | Function::ExponDist | Function::ExponDistCompat | Function::FDist | Function::FDistCompat | Function::FDistRT | Function::FInv | Function::FInvCompat | Function::FInvRT | Function::Findb | Function::Fisher | Function::FisherInv | Function::Fixed | Function::Fv | Function::Gamma | Function::GammaDist | Function::GammaDistCompat | Function::GammaInv | Function::GammaInvCompat | Function::GammaLn | Function::GammaLnPrecise | Function::Gauss | Function::Gestep | Function::Hour | Function::HypGeomDist | Function::HypGeomDistCompat | Function::Intrate | Function::Ipmt | Function::Ispmt | Function::Leftb | Function::Lenb | Function::LogNormDist | Function::LogNormDistCompat | Function::LogNormInv | Function::LoginvCompat | Function::Mduration | Function::Midb | Function::Minute | Function::NegbinomDist | Function::NegbinomDistCompat | Function::Nominal | Function::NormDist | Function::NormDistCompat | Function::NormInv | Function::NormInvCompat | Function::NormSDistCompat | Function::NormSInv | Function::NormSInvCompat | Function::NormSdist | Function::Nper | Function::Numbervalue | Function::Oddfprice | Function::Oddfyield | Function::Oddlprice | Function::Oddlyield | Function::Pduration | Function::Phi | Function::Pmt | Function::PoissonCompat | Function::PoissonDist | Function::Ppmt | Function::Price | Function::Pricedisc | Function::Pricemat | Function::Pv | Function::Rate | Function::Received | Function::Regexreplace | Function::Regextest | Function::Replaceb | Function::Rightb | Function::Rri | Function::Searchb | Function::Second | Function::Sln | Function::Sqrtpi | Function::Standardize | Function::Syd | Function::T | Function::TDist | Function::TDist2T | Function::TDistCompat | Function::TDistRT | Function::TInv | Function::TInv2T | Function::TInvCompat | Function::Tbilleq | Function::Tbillprice | Function::Tbillyield | Function::Time | Function::Timevalue | Function::Unichar | Function::Unicode | Function::Value | Function::Valuetotext | Function::Vdb | Function::Weeknum | Function::WeibullCompat | Function::WeibullDist | Function::Yearfrac | Function::Yield | Function::Yielddisc | Function::Yieldmat | Function::Abs | Function::Accrint | Function::Accrintm | Function::Acos | Function::Acosh | Function::Acot | Function::Acoth | Function::Arabic | Function::Asin | Function::Asinh | Function::Atan | Function::Atan2 | Function::Atanh | Function::Base | Function::Besseli | Function::Besselj | Function::Besselk | Function::Bessely | Function::Bin2dec | Function::Bin2hex | Function::Bin2oct | Function::Bitand | Function::Bitlshift | Function::Bitor | Function::Bitrshift | Function::Bitxor | Function::Ceiling | Function::CeilingMath | Function::CeilingPrecise | Function::Clean | Function::Combin | Function::Combina | Function::Complex | Function::Cos | Function::Cosh | Function::Cot | Function::Coth | Function::Csc | Function::Csch | Function::Date | Function::Day | Function::Dec2Bin | Function::Dec2hex | Function::Dec2oct | Function::Decimal | Function::Degrees | Function::EcmaCeiling | Function::Eomonth | Function::Erf | Function::ErfPrecise | Function::Erfc | Function::ErfcPrecise | Function::Even | Function::Exact | Function::Exp | Function::Fact | Function::Factdouble | Function::Find | Function::Floor | Function::FloorMath | Function::FloorPrecise | Function::Hex2bin | Function::Hex2dec | Function::Hex2oct | Function::Imabs | Function::Imaginary | Function::Imargument | Function::Imconjugate | Function::Imcos | Function::Imcosh | Function::Imcot | Function::Imcsc | Function::Imcsch | Function::Imdiv | Function::Imexp | Function::Imln | Function::Imlog10 | Function::Imlog2 | Function::Impower | Function::Imreal | Function::Imsec | Function::Imsech | Function::Imsin | Function::Imsinh | Function::Imsqrt | Function::Imsub | Function::Imtan | Function::Int | Function::IsoCeiling | Function::Isoweeknum | Function::Left | Function::Len | Function::Ln | Function::Log | Function::Log10 | Function::Lower | Function::Mid | Function::Mod | Function::Month | Function::Mround | Function::Oct2bin | Function::Oct2dec | Function::Oct2hex | Function::Odd | Function::Power | Function::Proper | Function::Quotient | Function::Radians | Function::Randbetween | Function::Replace | Function::Rept | Function::Right | Function::Roman | Function::Round | Function::Rounddown | Function::Roundup | Function::Search | Function::Sec | Function::Sech | Function::Sign | Function::Sin | Function::Sinh | Function::Sqrt | Function::Substitute | Function::Tan | Function::Tanh | Function::Text | Function::Trim | Function::Trunc | Function::Upper | Function::Weekday | Function::Year)
+}
+
+impl Model<'_> {
+    /// CellX: evaluates every argument once and, when one of them is a range
+    /// or an array, calls the function for each element. Shapes broadcast as
+    /// in Excel: a single row or column is repeated, a missing element is #N/A.
+    fn broadcast_scalar_call(
+        &mut self,
+        kind: &Function,
+        args: &[Node],
+        cell: CellReferenceIndex,
+    ) -> CalcResult {
+        use crate::expressions::parser::ArrayNode;
+        enum Arg {
+            Node(Node),
+            // The cells read, and the full rows and columns.
+            Array(Vec<Vec<ArrayNode>>, usize, usize),
+        }
+        fn literal(value: &ArrayNode) -> Node {
+            match value {
+                ArrayNode::Number(n) => Node::NumberKind(*n),
+                ArrayNode::Boolean(b) => Node::BooleanKind(*b),
+                ArrayNode::String(s) => Node::StringKind(s.clone()),
+                ArrayNode::Error(e) => Node::ErrorKind(e.clone()),
+                ArrayNode::Empty => Node::EmptyArgKind,
+            }
+        }
+        let mut evaluated = Vec::with_capacity(args.len());
+        for arg in args {
+            let value = match arg {
+                Node::EmptyArgKind => Arg::Node(Node::EmptyArgKind),
+                _ => match self.evaluate_node_in_context(arg, cell) {
+                    CalcResult::Range { left, right } => {
+                        let (array, rows, columns) = self.evaluate_range_clipped(left, right);
+                        if rows == 1 && columns == 1 {
+                            match array.first().and_then(|r| r.first()) {
+                                Some(ArrayNode::Empty) | None => Arg::Node(arg.clone()),
+                                Some(v) => Arg::Node(literal(v)),
+                            }
+                        } else {
+                            Arg::Array(array, rows, columns)
+                        }
+                    }
+                    CalcResult::Array(array) => {
+                        let (r, c) = (array.len(), array.first().map_or(0, |x| x.len()));
+                        Arg::Array(array, r, c)
+                    }
+                    CalcResult::Number(n) => Arg::Node(Node::NumberKind(n)),
+                    CalcResult::Boolean(b) => Arg::Node(Node::BooleanKind(b)),
+                    CalcResult::String(t) => Arg::Node(Node::StringKind(t)),
+                    CalcResult::Error { error, .. } => Arg::Node(Node::ErrorKind(error)),
+                    CalcResult::EmptyArg => Arg::Node(Node::EmptyArgKind),
+                    CalcResult::EmptyCell | CalcResult::Lambda(_) => Arg::Node(arg.clone()),
+                },
+            };
+            evaluated.push(value);
+        }
+        let (mut rows, mut columns) = (0, 0);
+        for value in &evaluated {
+            if let Arg::Array(_, r, c) = value {
+                rows = rows.max(*r);
+                columns = columns.max(*c);
+            }
+        }
+        let call = |model: &mut Self, args: Vec<Node>| {
+            // Literal arguments are scalars: this does not broadcast again.
+            model.evaluate_function_unlifted(kind, &args, cell)
+        };
+        if rows == 0 || columns == 0 {
+            let args = evaluated
+                .into_iter()
+                .map(|v| match v {
+                    Arg::Node(n) => n,
+                    Arg::Array(..) => Node::ErrorKind(crate::expressions::token::Error::CALC),
+                })
+                .collect();
+            return call(self, args);
+        }
+        let mut out = Vec::with_capacity(rows);
+        // The result when every array element is an empty cell, computed once.
+        let mut all_empty: Option<ArrayNode> = None;
+        for i in 0..rows {
+            let mut data_row = Vec::with_capacity(columns);
+            for j in 0..columns {
+                let mut any_value = false;
+                let element_args: Vec<Node> = evaluated
+                    .iter()
+                    .map(|v| match v {
+                        Arg::Node(n) => n.clone(),
+                        Arg::Array(a, full_rows, full_columns) => {
+                            let r = if *full_rows == 1 { 0 } else { i };
+                            let c = if *full_columns == 1 { 0 } else { j };
+                            if r >= *full_rows || c >= *full_columns {
+                                any_value = true;
+                                return Node::ErrorKind(crate::expressions::token::Error::NA);
+                            }
+                            match a.get(r).and_then(|x| x.get(c)) {
+                                Some(ArrayNode::Empty) | None => Node::EmptyArgKind,
+                                Some(v) => {
+                                    any_value = true;
+                                    literal(v)
+                                }
+                            }
+                        }
+                    })
+                    .collect();
+                if !any_value {
+                    if let Some(v) = &all_empty {
+                        data_row.push(v.clone());
+                        continue;
+                    }
+                }
+                let value = match call(self, element_args) {
+                    CalcResult::Number(n) => ArrayNode::Number(n),
+                    CalcResult::Boolean(b) => ArrayNode::Boolean(b),
+                    CalcResult::String(t) => ArrayNode::String(t),
+                    CalcResult::Error { error, .. } => ArrayNode::Error(error),
+                    CalcResult::EmptyCell | CalcResult::EmptyArg => ArrayNode::Empty,
+                    CalcResult::Array(a) if a.len() == 1 && a[0].len() == 1 => a[0][0].clone(),
+                    _ => ArrayNode::Error(crate::expressions::token::Error::VALUE),
+                };
+                if !any_value {
+                    all_empty = Some(value.clone());
+                }
+                data_row.push(value);
+            }
+            out.push(data_row);
+        }
+        CalcResult::Array(out)
+    }
 }

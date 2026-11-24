@@ -397,6 +397,16 @@ impl<'a> Model<'a> {
             return CalcResult::new_args_number_error(cell);
         }
         if arg_count == 1 {
+            // CellX: the number of sheets a reference spans.
+            return match self.evaluate_node_with_reference(&args[0], cell) {
+                CalcResult::Range { left, right } => {
+                    CalcResult::Number((right.sheet as f64 - left.sheet as f64).abs() + 1.0)
+                }
+                e @ CalcResult::Error { .. } => e,
+                _ => CalcResult::new_error(Error::REF, cell, "Not a reference".to_string()),
+            };
+        }
+        if arg_count == 1 {
             return CalcResult::Error {
                 error: Error::NIMPL,
                 origin: cell,
@@ -433,13 +443,6 @@ impl<'a> Model<'a> {
         };
         match info_type.as_str() {
             "ADDRESS" => {
-                if reference.sheet != cell.sheet {
-                    return CalcResult::Error {
-                        error: Error::NIMPL,
-                        origin: cell,
-                        message: "References to other sheets not implemented".to_string(),
-                    };
-                }
                 let column = match number_to_column(reference.column) {
                     Some(c) => c,
                     None => {
@@ -451,6 +454,21 @@ impl<'a> Model<'a> {
                     }
                 };
                 let address = format!("${}${}", column, reference.row);
+                // CellX: another sheet is written as Excel does, `[Book1]Sheet2!$A$1`.
+                if reference.sheet != cell.sheet {
+                    let sheet = match self.workbook.worksheet(reference.sheet) {
+                        Ok(ws) => ws.name.clone(),
+                        Err(_) => return CalcResult::new_error(Error::REF, cell, "Invalid sheet".to_string()),
+                    };
+                    let book = &self.workbook.name;
+                    let qualified = format!("[{book}]{sheet}");
+                    let needs_quotes = qualified.contains(|c: char| !c.is_alphanumeric() && !matches!(c, '[' | ']' | '_' | '.'));
+                    return CalcResult::String(if needs_quotes {
+                        format!("'{}'!{address}", qualified.replace('\'', "''"))
+                    } else {
+                        format!("{qualified}!{address}")
+                    });
+                }
                 CalcResult::String(address)
             }
             "COL" => CalcResult::Number(reference.column as f64),

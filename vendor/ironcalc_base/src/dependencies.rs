@@ -105,6 +105,52 @@ fn coord(absolute: bool, value: i32) -> Coord {
     Coord { absolute, value }
 }
 
+thread_local! {
+    static NAMES_SEEN: std::cell::RefCell<Option<Vec<(String, Option<u32>)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// CellX: like `collect`, and the references behind the defined names the
+/// formula uses (cell, range or formula names) count as its own. A LAMBDA
+/// name, an unknown name or one nested too deep leaves the formula unknown.
+fn collect_with_names(model: &Model, node: &Node, out: &mut Vec<RelArea>, depth: u32) -> bool {
+    let previous = NAMES_SEEN.with(|n| n.borrow_mut().replace(Vec::new()));
+    let mut known = collect(node, out);
+    let names = NAMES_SEEN.with(|n| std::mem::replace(&mut *n.borrow_mut(), previous)).unwrap_or_default();
+    for (name, scope) in names {
+        if depth >= 16 {
+            return false;
+        }
+        match model.get_parsed_defined_name(&name, scope) {
+            Ok(Some(crate::model::ParsedDefinedName::CellReference(r))) => {
+                let c = |v| coord(true, v);
+                out.push(RelArea {
+                    sheet: r.sheet,
+                    row1: c(r.row),
+                    column1: c(r.column),
+                    row2: c(r.row),
+                    column2: c(r.column),
+                });
+            }
+            Ok(Some(crate::model::ParsedDefinedName::RangeReference(range))) => {
+                let c = |v| coord(true, v);
+                out.push(RelArea {
+                    sheet: range.left.sheet,
+                    row1: c(range.left.row),
+                    column1: c(range.left.column),
+                    row2: c(range.right.row),
+                    column2: c(range.right.column),
+                });
+            }
+            Ok(Some(crate::model::ParsedDefinedName::Formula(f))) => {
+                known &= collect_with_names(model, &f, out, depth + 1);
+            }
+            _ => known = false,
+        }
+    }
+    known
+}
+
 /// Collects the references of a parsed formula. Returns false when the formula
 /// reads cells that cannot be known from its text.
 pub(crate) fn collect(node: &Node, out: &mut Vec<RelArea>) -> bool {
@@ -195,6 +241,17 @@ pub(crate) fn collect(node: &Node, out: &mut Vec<RelArea>) -> bool {
             }
             known
         }
+        // CellX: a name is resolved by the caller when it asked for names.
+        DefinedNameKind((name, scope, _))
+            if NAMES_SEEN.with(|n| n.borrow().is_some()) =>
+        {
+            NAMES_SEEN.with(|n| {
+                if let Some(v) = n.borrow_mut().as_mut() {
+                    v.push((name.clone(), *scope));
+                }
+            });
+            true
+        }
         // A range built at run time, a spill, a name or a table: unknown.
         OpRangeKind { .. }
         | SpillRangeOperator { .. }
@@ -273,7 +330,7 @@ impl DepIndex {
         };
         if fresh {
             let mut refs = Vec::new();
-            let known = collect(&node, &mut refs);
+            let known = collect_with_names(model, &node, &mut refs, 0);
             self.shapes.insert(
                 (sheet, f),
                 Shape {

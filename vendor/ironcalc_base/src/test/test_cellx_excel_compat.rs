@@ -124,3 +124,47 @@ fn date1904_does_not_leak_between_models() {
     assert_eq!(m1900._get_text("A1"), *"1900");
     assert_eq!(m1900._get_text("A2"), *"1900-01-01");
 }
+
+#[test]
+fn scalar_functions_over_ranges_and_arrays() {
+    let mut model = new_empty_model();
+    model._set("A1", "1.4");
+    model._set("A2", "2.6");
+    model._set("A3", "3.5");
+    model._set("B1", "=SUM(ROUND(A1:A3,0))");
+    model._set("B2", "=INDEX(PMT({0.05,0.06},10,1000),2)");
+    model._set("B3", "=SUM(DAYS({10,20},{1;2}))");
+    model._set("B4", "=AVERAGEA({1,TRUE,\"a\"})");
+    model._set("B5", "=SUM(HOUR({0.25,0.5}))");
+    model._set("B6", "=LARGE(NA(),1)");
+    model.evaluate();
+    assert_eq!(model._get_text("B1"), *"8");
+    assert_eq!(model._get_text("B2"), *"-135.86795822");
+    assert_eq!(model._get_text("B3"), *"54");
+    assert_eq!(model._get_text("B4"), *"0.666666667");
+    assert_eq!(model._get_text("B5"), *"18");
+    assert_eq!(model._get_text("B6"), *"#N/A");
+}
+
+#[test]
+fn relative_names_and_their_dependencies() {
+    let mut model = new_empty_user_model();
+    // Relative row, counted from A1: used in row 3 it is column A of row 3.
+    model.new_defined_name("RowValue", None, "Sheet1!$A1").unwrap();
+    model.new_defined_name("Twice", None, "Sheet1!$A$1*2").unwrap();
+    model.set_user_input(0, 1, 1, "5").unwrap();
+    model.set_user_input(0, 3, 1, "7").unwrap();
+    model.set_user_input(0, 3, 2, "=RowValue").unwrap();
+    model.set_user_input(0, 4, 2, "=Twice").unwrap();
+    assert_eq!(model.get_formatted_cell_value(0, 3, 2), Ok("7".to_string()));
+    assert_eq!(model.get_formatted_cell_value(0, 4, 2), Ok("10".to_string()));
+
+    // An incremental recalculation reaches the cells through the names.
+    let m = model.get_model_mut();
+    m.evaluate();
+    m._set("A1", "6");
+    m._set("A3", "8");
+    m.evaluate_changed(&[(0, 1, 1), (0, 3, 1)]);
+    assert_eq!(m._get_text("B3"), *"8");
+    assert_eq!(m._get_text("B4"), *"12");
+}

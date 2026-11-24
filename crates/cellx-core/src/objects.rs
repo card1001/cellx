@@ -643,6 +643,7 @@ impl Workbook {
         self.import_slicers(xlsx);
         self.import_whatif(xlsx);
         self.import_book(xlsx);
+        self.external_links = ooxml::read_external_links(xlsx);
         self.import_pivot_tables(xlsx);
         self.import_sparklines(&ooxml::sheet_xmls(xlsx, "sparklineGroup"));
         // CellX writes these names itself on save.

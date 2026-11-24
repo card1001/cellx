@@ -380,4 +380,40 @@ mod tests {
         assert_eq!(hidden(&back), vec![3]);
         assert_eq!(back.custom_views()[1].sheets[0].hidden_cols, vec![2]);
     }
+
+    #[test]
+    fn external_links_round_trip() {
+        let mut wb = Workbook::new().unwrap();
+        wb.set_inputs(0, &[(1, 1, "=IFERROR([1]Sheet1!A1,\"없음\")".to_string())]).unwrap();
+        let link = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><externalBook r:id="rId1"><sheetNames><sheetName val="Sheet1"/></sheetNames></externalBook></externalLink>"#;
+        let rels = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLinkPath" Target="other.xlsx" TargetMode="External"/></Relationships>"#;
+        wb.external_links = vec![crate::ooxml::ExternalLinkPart { xml: link.to_vec(), rels: Some(rels.to_vec()) }];
+        let dir = crate::project::new_work_dir().unwrap();
+        let path = dir.join("links.xlsx");
+        wb.save_xlsx(&path).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let wbxml = crate::ooxml::workbook_xml(&bytes).unwrap();
+        assert!(wbxml.contains("<externalReferences><externalReference r:id=\"rIdCxExt1\"/></externalReferences>"));
+        let back = Workbook::open_xlsx(&path).unwrap();
+        assert_eq!(back.external_links.len(), 1);
+        assert_eq!(back.external_links[0].xml, link.to_vec());
+        assert_eq!(back.input(0, 1, 1).unwrap(), "=IFERROR([1]Sheet1!A1,\"없음\")");
+        assert_eq!(back.value(0, 1, 1).unwrap(), crate::value::Scalar::Text("없음".into()));
+    }
+
+    #[test]
+    fn date1904_switch_and_round_trip() {
+        let mut wb = Workbook::new().unwrap();
+        wb.set_inputs(0, &[(1, 1, "0".to_string()), (1, 2, "=YEAR(A1)".to_string())]).unwrap();
+        assert_eq!(wb.value(0, 1, 2).unwrap(), crate::value::Scalar::Number(1900.0));
+        wb.set_date1904(true).unwrap();
+        assert!(wb.date1904());
+        assert_eq!(wb.value(0, 1, 2).unwrap(), crate::value::Scalar::Number(1904.0));
+        let dir = crate::project::new_work_dir().unwrap();
+        let path = dir.join("d1904.xlsx");
+        wb.save_xlsx(&path).unwrap();
+        let back = Workbook::open_xlsx(&path).unwrap();
+        assert!(back.date1904());
+        assert_eq!(back.value(0, 1, 2).unwrap(), crate::value::Scalar::Number(1904.0));
+    }
 }

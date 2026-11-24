@@ -121,6 +121,7 @@ fn main() {
             commands::show_scenario,
             commands::scenario_summary,
             commands::protect_book,
+            commands::set_date1904,
             commands::unprotect_book,
             commands::custom_views,
             commands::add_custom_view,

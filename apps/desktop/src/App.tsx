@@ -2545,6 +2545,16 @@ export default function App() {
       void run("통합 문서 보호 해제", () => api.unprotectBook(null)).then(() => refreshInfo());
     },
     customViews: () => setDialog({ kind: "customViews" }),
+    date1904: () => {
+      const on = !info?.date1904;
+      const msg = on
+        ? "1904 날짜 체계로 바꿉니다. 날짜 셀은 값이 그대로라 4년 1일 뒤의 날짜로 표시됩니다. 계속할까요?"
+        : "1900 날짜 체계로 바꿉니다. 날짜 셀은 값이 그대로라 4년 1일 앞의 날짜로 표시됩니다. 계속할까요?";
+      if (!window.confirm(msg)) return;
+      void run("날짜 체계 변경", () => api.setDate1904(on)).then((st) => {
+        if (st) void afterChange(st);
+      });
+    },
     protectSheet: () => {
       if (sheetOrSay() === null) return;
       if (protection?.protected) {
@@ -2676,6 +2686,7 @@ export default function App() {
         showPageBreaks={showPageBreaks}
         showFormulas={sheetIndex >= 0 && formulaSheets.has(sheetIndex)}
         protectedBook={!!info?.book_protected}
+        date1904={!!info?.date1904}
         hasArrows={arrows.length > 0}
       />
 

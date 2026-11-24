@@ -80,6 +80,8 @@ pub struct BookInfo {
     /// 통합 문서 보호 (구조), and whether it has a password.
     book_protected: bool,
     book_password: bool,
+    /// 1904 날짜 체계.
+    date1904: bool,
 }
 
 pub(crate) fn info(book: &mut Book) -> CmdResult<BookInfo> {
@@ -95,6 +97,7 @@ pub(crate) fn info(book: &mut Book) -> CmdResult<BookInfo> {
         tabs: book.wb.sheet_tabs(),
         book_protected: book.wb.book_protection().is_some(),
         book_password: book.wb.book_protection().is_some_and(|p| p.hash.is_some() || p.legacy.is_some()),
+        date1904: book.wb.date1904(),
     })
 }
 
@@ -1022,6 +1025,11 @@ pub fn scenario_summary(state: State<'_, AppState>, sheet: u32, results: Vec<(i3
 }
 
 use cellx_core::book::CustomView;
+
+#[tauri::command]
+pub fn set_date1904(state: State<'_, AppState>, on: bool) -> CmdResult<cellx_core::workbook::RecalcStats> {
+    edit(&state, |wb| wb.set_date1904(on))
+}
 
 #[tauri::command]
 pub fn protect_book(state: State<'_, AppState>, password: Option<String>) -> CmdResult<()> {

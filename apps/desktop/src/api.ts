@@ -491,6 +491,8 @@ export interface BookInfo {
   font: [string, number];
   protected: boolean[];
   book_protected: boolean;
+  /** 1904 날짜 체계 */
+  date1904: boolean;
   book_password: boolean;
 }
 
@@ -546,6 +548,7 @@ export const api = {
   showScenario: (sheet: number, name: string) => invoke<RecalcStats>("show_scenario", { sheet, name }),
   scenarioSummary: (sheet: number, results: [number, number][]) => invoke<number>("scenario_summary", { sheet, results }),
   protectBook: (password: string | null) => invoke<void>("protect_book", { password }),
+  setDate1904: (on: boolean) => invoke<RecalcStats>("set_date1904", { on }),
   unprotectBook: (password: string | null) => invoke<void>("unprotect_book", { password }),
   customViews: () => invoke<{ name: string; active_sheet: number }[]>("custom_views"),
   addCustomView: (name: string, active: number) => invoke<unknown>("add_custom_view", { name, active }),
