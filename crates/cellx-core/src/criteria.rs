@@ -279,7 +279,8 @@ mod tests {
         assert_eq!(parse_date_serial("1900-03-01"), Some(61.0));
         let (_, p) = criterion_sql(&col("d", ColumnKind::Date), &Scalar::Text(">=2026-01-01".into()));
         assert_eq!(p, vec![Value::Double(46023.0)]);
-    }    
+    }
+
     #[test]
     fn rejects_impossible_gregorian_dates() {
         for date in ["2026-02-29", "2026-02-31", "2026-04-31", "2026-13-01", "0000-01-01"] {
@@ -289,5 +290,4 @@ mod tests {
         assert!(parse_date_serial("2000-02-29").is_some());
         assert_eq!(parse_date_serial("1900-02-29"), None);
     }
-
 }

@@ -234,6 +234,11 @@ pub struct RecalcStats {
     /// Formulas evaluated by an incremental recalculation; `None` for a full one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evaluated: Option<usize>,
+    /// The bridge results still changed after the last allowed pass: some
+    /// values may be out of date. A warning, not an error, so that the
+    /// workbook can still be edited, saved and opened.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub not_converged: bool,
 }
 
 /// What Excel's status bar shows for a selection.
@@ -1303,12 +1308,8 @@ impl Workbook {
             }
             changes = Some(written);
         }
+        stats.not_converged = !converged;
         self.last_recalc = stats.clone();
-        if !converged {
-            return Err(CellxError::Calc(format!(
-                "브리지 재계산이 {MAX_BRIDGE_PASSES}회 반복 후에도 수렴하지 않았습니다"
-            )));
-        }
         Ok(stats)
     }
 
@@ -1944,5 +1945,4 @@ mod tests {
         wb.create_table_from_query("sales", "SELECT 7.0::DOUBLE AS amount").unwrap();
         assert_eq!(wb.value(0, 1, 1).unwrap(), Scalar::Number(7.0));
     }
-
 }

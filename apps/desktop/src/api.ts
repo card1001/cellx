@@ -433,6 +433,8 @@ export interface RecalcStats {
   bridge_cache_hits: number;
   calc_ms: number;
   bridge_ms: number;
+  /** The data engine results did not settle: some values may be out of date. */
+  not_converged?: boolean;
 }
 
 export interface SelectionStats {
