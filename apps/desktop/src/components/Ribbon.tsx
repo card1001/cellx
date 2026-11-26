@@ -273,7 +273,7 @@ export function Ribbon(props: Props) {
             <Group label={tr("정보")}>
               <div className="about">
                 <b>CellX</b>
-                <span>버전 {__APP_VERSION__}</span>
+                <span>{tr("버전")} {__APP_VERSION__}</span>
                 <span>{tr("엑셀 호환 고성능 스프레드시트")}</span>
               </div>
             </Group>
@@ -963,7 +963,7 @@ export function Ribbon(props: Props) {
         {tab === "검토" && (
           <>
             <Group label={tr("메모")}>
-              <Btn big title={props.hasMemo ? "메모 편집 (Shift+F2)" : "새 메모 (Shift+F2)"} onClick={a.newMemo}>
+              <Btn big title={tr(props.hasMemo ? "메모 편집 (Shift+F2)" : "새 메모 (Shift+F2)") } onClick={a.newMemo}>
                 <span className="ic">🗨</span>
                 {tr(props.hasMemo ? "메모 편집" : "새 메모")}
               </Btn>

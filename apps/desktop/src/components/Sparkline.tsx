@@ -142,7 +142,7 @@ export function SparklineStyleDialog(props: { group: SparklineGroup; onDone(g: S
           <select value={g.kind} onChange={(e) => setG({ ...g, kind: e.target.value as SparkKind })}>
             {SPARK_KINDS.map((k) => (
               <option key={k.kind} value={k.kind}>
-                {k.label}
+                {tr(k.label)}
               </option>
             ))}
           </select>

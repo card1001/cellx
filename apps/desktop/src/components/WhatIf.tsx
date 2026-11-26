@@ -254,8 +254,8 @@ export function ScenarioDialog(props: {
             </button>
           </div>
         </div>
-        <div className="hint">변경 셀: {current ? cellsText(current.cells) : ""}</div>
-        <div className="hint">설명: {current?.comment ?? ""}</div>
+        <div className="hint">{tr("변경 셀:")} {current ? cellsText(current.cells) : ""}</div>
+        <div className="hint">{tr("설명:")} {current?.comment ?? ""}</div>
         <div className="actions">
           <button
             className="primary"
@@ -279,7 +279,7 @@ export function ScenarioDialog(props: {
   }
   const title = mode.kind === "edit" ? (mode.old ? "시나리오 편집" : "시나리오 추가") : mode.kind === "values" ? "시나리오 값" : mode.kind === "summary" ? "시나리오 요약" : "시나리오 관리자";
   return (
-    <Modal title={title} onClose={props.onClose}>
+    <Modal title={tr(title)} onClose={props.onClose}>
       {body}
     </Modal>
   );
