@@ -145,5 +145,5 @@ export function startsEdit(e: { key: string; ctrlKey: boolean; metaKey: boolean;
 }
 
 export function formatCount(n: number): string {
-  return n.toLocaleString("ko-KR");
+  return new Intl.NumberFormat("en-US").format(n);
 }
