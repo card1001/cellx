@@ -881,7 +881,8 @@ mod tests {
             .remove(0)
             .unwrap();
         assert!(compile(&call, &mut s, &NoCells).is_err());
-    }    
+    }
+
     #[test]
     fn parses_only_valid_a1_absolute_reference_forms() {
         for address in ["A1", "$A1", "A$1", "$A$1", "XFD1048576"] {
