@@ -1261,6 +1261,7 @@ impl Workbook {
         let mut stats = RecalcStats::default();
         let mut changes = if self.untracked { None } else { changes };
         self.untracked = false;
+        let mut converged = false;
         for _ in 0..MAX_BRIDGE_PASSES {
             stats.passes += 1;
             let t = Instant::now();
@@ -1290,6 +1291,7 @@ impl Workbook {
                 changed.extend(self.compute_data_tables());
             }
             if changed.is_empty() {
+                converged = true;
                 break;
             }
             // Data engine results are written outside the history; the next
@@ -1302,6 +1304,11 @@ impl Workbook {
             changes = Some(written);
         }
         self.last_recalc = stats.clone();
+        if !converged {
+            return Err(CellxError::Calc(format!(
+                "브리지 재계산이 {MAX_BRIDGE_PASSES}회 반복 후에도 수렴하지 않았습니다"
+            )));
+        }
         Ok(stats)
     }
 
