@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { formatLocaleDate, formatLocaleNumber, formatLocaleTime, normalizeLocale, translate, translateText } from "./i18n";
+import { DEFAULT_LOCALE, formatLocaleDate, formatLocaleNumber, formatLocaleTime, normalizeLocale, translate, translateText } from "./i18n";
 
 describe("locale selection", () => {
+  it("starts in Korean until the user picks a language", () => {
+    expect(DEFAULT_LOCALE).toBe("ko-KR");
+  });
+
   it("maps common browser locales to supported locales", () => {
     expect(normalizeLocale("ko")).toBe("ko-KR");
     expect(normalizeLocale("ja-JP")).toBe("ja-JP");

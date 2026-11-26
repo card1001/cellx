@@ -333,7 +333,14 @@ export function translate(locale: Locale, key: MessageKey): string {
   return messages[locale][key] ?? messages["en-US"][key];
 }
 
-let activeLocale: Locale = normalizeLocale(typeof navigator === "undefined" ? "en-US" : navigator.language);
+/**
+ * The language on first launch, until the user picks one. Korean for now:
+ * the other languages are only partly translated, and detecting the OS
+ * language would start most non-Korean PCs in a half-translated English UI.
+ */
+export const DEFAULT_LOCALE: Locale = "ko-KR";
+
+let activeLocale: Locale = DEFAULT_LOCALE;
 
 export function translateText(locale: Locale, source: string): string {
   if (locale === "ko-KR") return source;
@@ -364,13 +371,12 @@ export function useI18n() {
   const [locale, setLocaleState] = useState<Locale>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
-      const initial = saved && LOCALES.includes(saved as Locale)
-        ? (saved as Locale)
-        : normalizeLocale(typeof navigator === "undefined" ? "en-US" : navigator.language);
+      const initial = saved && LOCALES.includes(saved as Locale) ? (saved as Locale) : DEFAULT_LOCALE;
       activeLocale = initial;
       return initial;
     } catch {
-      return "en-US";
+      activeLocale = DEFAULT_LOCALE;
+      return DEFAULT_LOCALE;
     }
   });
 
