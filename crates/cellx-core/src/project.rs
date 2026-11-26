@@ -159,10 +159,12 @@ const MAX_PROJECT_ENTRY_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_PROJECT_TOTAL_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 
 fn read_entry(zip: &mut zip::ZipArchive<File>, name: &str) -> Result<Vec<u8>> {
-    let total_size = zip.file_names().try_fold(0u64, |total, entry_name| {
-        let size = zip.by_name(entry_name).map(|entry| entry.size()).unwrap_or(0);
-        total.checked_add(size)
-    }).ok_or_else(|| CellxError::Project("프로젝트 압축 해제 크기가 너무 큽니다".into()))?;
+    let mut total_size = 0u64;
+    for index in 0..zip.len() {
+        let size = zip_err(zip.by_index(index))?.size();
+        total_size = total_size.checked_add(size)
+            .ok_or_else(|| CellxError::Project("프로젝트 압축 해제 크기가 너무 큽니다".into()))?;
+    }
     if total_size > MAX_PROJECT_TOTAL_SIZE {
         return Err(CellxError::Project("프로젝트 전체 압축 해제 크기가 허용 한도를 초과했습니다".into()));
     }
