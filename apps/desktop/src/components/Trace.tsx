@@ -148,9 +148,9 @@ export function EvaluateDialog(props: { sheet: number; sheetName: string; row: n
           {error
             ? ""
             : done
-              ? "계산이 끝났습니다."
+              ? tr("계산이 끝났습니다.")
               : part
-                ? "밑줄 친 식을 계산하려면 [계산]을 클릭하십시오. 가장 최근 결과는 기울임꼴로 표시됩니다."
+                ? tr("밑줄 친 식을 계산하려면 [계산]을 클릭하십시오. 가장 최근 결과는 기울임꼴로 표시됩니다.")
                 : ""}
         </div>
         <div className="actions">
