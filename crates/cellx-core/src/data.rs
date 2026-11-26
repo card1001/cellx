@@ -367,7 +367,7 @@ impl DataStore {
         filters: &[ColumnFilter],
     ) -> Result<Page> {
         let info = self.table_info(table)?;
-        let limit = limit.clamp(1, MAX_PAGE_SIZE);
+        let limit = limit.min(MAX_PAGE_SIZE);
         let mut where_sql = Vec::new();
         let mut params = Vec::new();
         for f in filters {
@@ -584,7 +584,7 @@ mod tests {
         let page = s.page("sales", 0, u64::MAX, None, &[]).unwrap();
         assert_eq!(page.rows.len(), 4);
         let empty = s.page("sales", 0, 0, None, &[]).unwrap();
-        assert_eq!(empty.rows.len(), 1);
+        assert!(empty.rows.is_empty());
     }
 
 }
