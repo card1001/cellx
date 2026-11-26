@@ -1,5 +1,6 @@
 // Drop-down and context menus in the style of Excel's.
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { tr } from "../i18n";
 
 export interface MenuItem {
   label?: string;
@@ -29,7 +30,7 @@ export function MenuList(props: { items: MenuItem[]; onClose(): void }) {
             }}
           >
             <span className="menu-icon">{it.checked ? "✓" : it.icon}</span>
-            <span className="menu-label">{it.label}</span>
+            <span className="menu-label">{it.label ? tr(it.label) : ""}</span>
             {it.shortcut && <span className="menu-shortcut">{it.shortcut}</span>}
           </button>
         ),
