@@ -27,6 +27,12 @@ describe("locale selection", () => {
     expect(translateText("zh-TW", "파일")).toBe("檔案");
   });
 
+  it("translates dynamic messages by their stable prefix", () => {
+    expect(translateText("en-US", "저장했습니다: report.xlsx")).toBe("Saved: report.xlsx");
+    expect(translateText("ja-JP", "저장했습니다: report.xlsx")).toBe("保存しました: report.xlsx");
+    expect(translateText("zh-CN", "내보냈습니다: data.csv")).toBe("已导出： data.csv");
+  });
+
   it("falls back to the source text for untranslated labels", () => {
     expect(translateText("en-US", "A user-defined label")).toBe("A user-defined label");
     expect(translateText("ja-JP", "A user-defined label")).toBe("A user-defined label");
