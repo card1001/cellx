@@ -152,10 +152,37 @@ pub fn open_project(path: &Path) -> Result<Workbook> {
     Ok(wb)
 }
 
+// Upper bounds for untrusted project archives. These limits are intentionally
+// generous for normal workbooks while preventing oversized allocations and
+// decompression bombs from exhausting the application process.
+const MAX_PROJECT_ENTRY_SIZE: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_PROJECT_TOTAL_SIZE: u64 = 4 * 1024 * 1024 * 1024;
+
 fn read_entry(zip: &mut zip::ZipArchive<File>, name: &str) -> Result<Vec<u8>> {
+    let total_size = zip.file_names().try_fold(0u64, |total, entry_name| {
+        let size = zip.by_name(entry_name).map(|entry| entry.size()).unwrap_or(0);
+        total.checked_add(size)
+    }).ok_or_else(|| CellxError::Project("프로젝트 압축 해제 크기가 너무 큽니다".into()))?;
+    if total_size > MAX_PROJECT_TOTAL_SIZE {
+        return Err(CellxError::Project("프로젝트 전체 압축 해제 크기가 허용 한도를 초과했습니다".into()));
+    }
+
     let mut entry = zip_err(zip.by_name(name))?;
-    let mut buf = Vec::with_capacity(entry.size() as usize);
-    entry.read_to_end(&mut buf)?;
+    let declared_size = entry.size();
+    if declared_size > MAX_PROJECT_ENTRY_SIZE {
+        return Err(CellxError::Project(format!(
+            "프로젝트 항목 크기가 허용 한도를 초과했습니다: {name}"
+        )));
+    }
+    let capacity = usize::try_from(declared_size)
+        .map_err(|_| CellxError::Project("프로젝트 항목 크기를 처리할 수 없습니다".into()))?;
+    let mut buf = Vec::with_capacity(capacity);
+    entry.take(MAX_PROJECT_ENTRY_SIZE + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > MAX_PROJECT_ENTRY_SIZE || buf.len() as u64 != declared_size {
+        return Err(CellxError::Project(format!(
+            "프로젝트 항목 크기가 올바르지 않습니다: {name}"
+        )));
+    }
     Ok(buf)
 }
 
