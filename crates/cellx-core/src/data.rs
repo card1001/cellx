@@ -568,7 +568,7 @@ mod tests {
         let v = s.scalar("SELECT amount FROM sales WHERE _rid = 1", &[]).unwrap();
         assert_eq!(v, Scalar::Number(111.0));
     }
-    
+
     #[test]
     fn recreated_table_never_reuses_a_cache_generation() {
         let mut s = store_with_sales();
@@ -586,5 +586,4 @@ mod tests {
         let empty = s.page("sales", 0, 0, None, &[]).unwrap();
         assert!(empty.rows.is_empty());
     }
-
 }

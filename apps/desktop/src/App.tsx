@@ -3222,6 +3222,11 @@ export default function App() {
           </span>
         )}
         {stats && onSheetTab && stats.bridge_calls > 0 && <span title="데이터 엔진 계산 시간">데이터 엔진 {stats.bridge_ms.toFixed(0)} ms</span>}
+        {stats?.not_converged && (
+          <span className="warn" title="데이터 시트 결과와 셀이 서로를 참조해 계산이 끝나지 않았습니다. 일부 값이 최신이 아닐 수 있습니다. 순환 참조를 확인하세요.">
+            ⚠ 계산이 수렴하지 않음
+          </span>
+        )}
         {filter && filter.columns.length > 0 && source instanceof SheetSource && (
           <span>
             {formatCount(filter.range.r1 - filter.range.r0)}개 중 {formatCount(
