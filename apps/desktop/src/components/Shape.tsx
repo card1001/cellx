@@ -400,7 +400,7 @@ export function ShapeFormatDialog(props: { shape: Shape; onDone(s: Shape | null)
               <span>{tr("세로 맞춤")}</span>
               <select value={s.valign} onChange={(e) => set({ valign: e.target.value as Shape["valign"] })}>
                 <option value="t">{tr("위쪽")}</option>
-                <option value="ctr">가운데</option>
+                <option value="ctr">{tr("가운데")}</option>
                 <option value="b">{tr("아래쪽")}</option>
               </select>
             </label>
