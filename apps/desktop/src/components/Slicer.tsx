@@ -118,7 +118,7 @@ export function SlicerLayer(props: {
                   onMouseDown={(e) => e.stopPropagation()}
                   onClick={(e) => pick(i.text, e)}
                 >
-                  {i.text || "(비어 있음)"}
+                  {i.text || tr("(비어 있음)")}
                 </button>
               ))}
             </div>
@@ -180,7 +180,7 @@ export function SlicerSettingsDialog(props: { slicer: Slicer; onDone(s: Slicer |
           props.onDone(s);
         }}
       >
-        <div className="hint">원본 이름: {s.column}</div>
+        <div className="hint">{tr("원본 이름:")} {s.column}</div>
         <label className="shape-fmt-row">
           <span>{tr("머리글")}</span>
           <input autoFocus value={s.caption} onChange={(e) => setS({ ...s, caption: e.target.value })} />
