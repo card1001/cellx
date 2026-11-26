@@ -128,7 +128,9 @@ pub fn open_project(path: &Path) -> Result<Workbook> {
 
     let dir = new_work_dir()?;
     let data_path = dir.join("data.duckdb");
-    std::fs::write(&data_path, read_entry(&mut zip, "data.duckdb")?)?;
+    // The data file goes straight to disk, whatever its size: it is opened
+    // from there anyway, and going through memory only cost RAM.
+    extract_entry(&mut zip, "data.duckdb", &data_path)?;
     let store = DataStore::open(&data_path)?;
 
     let stored: Vec<StoredBridge> = serde_json::from_slice(&read_entry(&mut zip, "bridges.json")?).map_err(json_err)?;
@@ -158,10 +160,36 @@ pub fn open_project(path: &Path) -> Result<Workbook> {
 const MAX_PROJECT_ENTRY_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_PROJECT_TOTAL_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 
+/// Unpacks an entry into a file, checking that it is as large as the archive
+/// says. A partial file is removed on failure (a full disk, for one).
+fn extract_entry(zip: &mut zip::ZipArchive<File>, name: &str, to: &Path) -> Result<()> {
+    let mut entry = zip_err(zip.by_name(name))?;
+    let declared = entry.size();
+    let result = (|| -> Result<()> {
+        let mut out = std::io::BufWriter::with_capacity(1 << 20, File::create(to)?);
+        let written = std::io::copy(&mut (&mut entry).take(declared.saturating_add(1)), &mut out)?;
+        out.flush()?;
+        if written != declared {
+            return Err(CellxError::Project(format!("프로젝트 항목 크기가 올바르지 않습니다: {name}")));
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        std::fs::remove_file(to).ok();
+    }
+    result
+}
+
+/// Reads a small entry (manifest, workbook, JSON) into memory. The data file
+/// is not one of them: it is unpacked to disk and not counted here.
 fn read_entry(zip: &mut zip::ZipArchive<File>, name: &str) -> Result<Vec<u8>> {
     let mut total_size = 0u64;
     for index in 0..zip.len() {
-        let size = zip_err(zip.by_index(index))?.size();
+        let e = zip_err(zip.by_index(index))?;
+        if e.name().is_ok_and(|n| n == "data.duckdb") {
+            continue;
+        }
+        let size = e.size();
         total_size = total_size.checked_add(size)
             .ok_or_else(|| CellxError::Project("프로젝트 압축 해제 크기가 너무 큽니다".into()))?;
     }
@@ -169,7 +197,7 @@ fn read_entry(zip: &mut zip::ZipArchive<File>, name: &str) -> Result<Vec<u8>> {
         return Err(CellxError::Project("프로젝트 전체 압축 해제 크기가 허용 한도를 초과했습니다".into()));
     }
 
-    let mut entry = zip_err(zip.by_name(name))?;
+    let entry = zip_err(zip.by_name(name))?;
     let declared_size = entry.size();
     if declared_size > MAX_PROJECT_ENTRY_SIZE {
         return Err(CellxError::Project(format!(
@@ -219,5 +247,16 @@ mod tests {
         // The data sheet came back and the bridge still works against it.
         reopened.update_data_cell("sales", 1, "v", "10").unwrap();
         assert_eq!(reopened.value(0, 1, 1).unwrap(), Scalar::Number(12.5));
+    }
+
+    /// A large project opens without the data file passing through memory.
+    /// `CELLX_BIG_PROJECT=path.cellx cargo test --release -- --ignored open_big_project`
+    #[test]
+    #[ignore]
+    fn open_big_project() {
+        let Ok(path) = std::env::var("CELLX_BIG_PROJECT") else { return };
+        let t = std::time::Instant::now();
+        let mut wb = open_project(Path::new(&path)).unwrap();
+        eprintln!("열기 {:?}, 표 {:?}", t.elapsed(), wb.tables().unwrap().iter().map(|t| (t.name.clone(), t.rows)).collect::<Vec<_>>());
     }
 }
