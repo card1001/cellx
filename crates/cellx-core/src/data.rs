@@ -87,6 +87,9 @@ pub struct ColumnFilter {
     pub criterion: String,
 }
 
+/// Hard cap for one grid request; callers cannot force unbounded result allocation.
+const MAX_PAGE_SIZE: u64 = 5_000;
+
 pub struct DataStore {
     conn: Connection,
     schema_cache: HashMap<String, TableInfo>,
@@ -364,6 +367,7 @@ impl DataStore {
         filters: &[ColumnFilter],
     ) -> Result<Page> {
         let info = self.table_info(table)?;
+        let limit = limit.clamp(1, MAX_PAGE_SIZE);
         let mut where_sql = Vec::new();
         let mut params = Vec::new();
         for f in filters {
@@ -574,4 +578,13 @@ mod tests {
         let after = s.version("sales");
         assert!(after > before, "drop/recreate must advance the generation");
     }
+    #[test]
+    fn page_limit_is_bounded() {
+        let mut s = store_with_sales();
+        let page = s.page("sales", 0, u64::MAX, None, &[]).unwrap();
+        assert_eq!(page.rows.len(), 4);
+        let empty = s.page("sales", 0, 0, None, &[]).unwrap();
+        assert_eq!(empty.rows.len(), 1);
+    }
+
 }
