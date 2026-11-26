@@ -892,5 +892,4 @@ mod tests {
             assert_eq!(parse_a1(address), None, "{address}");
         }
     }
-
 }

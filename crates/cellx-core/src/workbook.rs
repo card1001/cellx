@@ -234,6 +234,11 @@ pub struct RecalcStats {
     /// Formulas evaluated by an incremental recalculation; `None` for a full one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evaluated: Option<usize>,
+    /// The bridge results still changed after the last allowed pass: some
+    /// values may be out of date. A warning, not an error, so that the
+    /// workbook can still be edited, saved and opened.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub not_converged: bool,
 }
 
 /// What Excel's status bar shows for a selection.
@@ -1261,6 +1266,7 @@ impl Workbook {
         let mut stats = RecalcStats::default();
         let mut changes = if self.untracked { None } else { changes };
         self.untracked = false;
+        let mut converged = false;
         for _ in 0..MAX_BRIDGE_PASSES {
             stats.passes += 1;
             let t = Instant::now();
@@ -1290,6 +1296,7 @@ impl Workbook {
                 changed.extend(self.compute_data_tables());
             }
             if changed.is_empty() {
+                converged = true;
                 break;
             }
             // Data engine results are written outside the history; the next
@@ -1301,6 +1308,7 @@ impl Workbook {
             }
             changes = Some(written);
         }
+        stats.not_converged = !converged;
         self.last_recalc = stats.clone();
         Ok(stats)
     }
@@ -1937,5 +1945,4 @@ mod tests {
         wb.create_table_from_query("sales", "SELECT 7.0::DOUBLE AS amount").unwrap();
         assert_eq!(wb.value(0, 1, 1).unwrap(), Scalar::Number(7.0));
     }
-
 }

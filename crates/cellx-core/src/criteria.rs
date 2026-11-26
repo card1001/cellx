@@ -131,7 +131,19 @@ pub fn parse_date_serial(s: &str) -> Option<f64> {
     let y: i64 = parts[0].parse().ok()?;
     let m: i64 = parts[1].parse().ok()?;
     let d: i64 = parts[2].parse().ok()?;
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+    if !(1..=12).contains(&m) || y < 1 || !(1..=31).contains(&d) {
+        return None;
+    }
+    // Validate the actual Gregorian calendar date (including leap years), not
+    // merely the independent month/day ranges.
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let days_in_month = match m {
+        2 if leap => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    if d > days_in_month {
         return None;
     }
     // Days from civil (Howard Hinnant's algorithm), relative to 1970-01-01.
@@ -267,5 +279,15 @@ mod tests {
         assert_eq!(parse_date_serial("1900-03-01"), Some(61.0));
         let (_, p) = criterion_sql(&col("d", ColumnKind::Date), &Scalar::Text(">=2026-01-01".into()));
         assert_eq!(p, vec![Value::Double(46023.0)]);
+    }
+
+    #[test]
+    fn rejects_impossible_gregorian_dates() {
+        for date in ["2026-02-29", "2026-02-31", "2026-04-31", "2026-13-01", "0000-01-01"] {
+            assert_eq!(parse_date_serial(date), None, "{date}");
+        }
+        assert!(parse_date_serial("2024-02-29").is_some());
+        assert!(parse_date_serial("2000-02-29").is_some());
+        assert_eq!(parse_date_serial("1900-02-29"), None);
     }
 }
