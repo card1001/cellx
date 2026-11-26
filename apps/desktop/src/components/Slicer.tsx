@@ -1,5 +1,6 @@
 // 슬라이서: a panel of buttons that filters a table by one column.
 // Click shows one value, Ctrl+click adds or removes values, ✕ clears the filter.
+import { tr } from "../i18n";
 import { useEffect, useRef, useState } from "react";
 import type { Slicer, SlicerView } from "../api";
 import type { OverlayGeometry } from "../grid/Grid";
@@ -101,7 +102,7 @@ export function SlicerLayer(props: {
               <span>{s.caption}</span>
               <button
                 className="slicer-clear"
-                title="필터 지우기 (Alt+C)"
+                title={tr("필터 지우기 (Alt+C)")}
                 disabled={!v.filtered}
                 onMouseDown={(e) => e.stopPropagation()}
                 onClick={() => props.onPick(s.id, null)}
@@ -133,7 +134,7 @@ export function SlicerLayer(props: {
 export function SlicerInsertDialog(props: { table: string; columns: string[]; onDone(cols: string[] | null): void }) {
   const [picked, setPicked] = useState<string[]>([]);
   return (
-    <Modal title="슬라이서 삽입" onClose={() => props.onDone(null)}>
+    <Modal title={tr("슬라이서 삽입")} onClose={() => props.onDone(null)}>
       <form
         className="modal-body"
         onSubmit={(e) => {
@@ -156,10 +157,10 @@ export function SlicerInsertDialog(props: { table: string; columns: string[]; on
         </div>
         <div className="actions">
           <button type="submit" className="primary" disabled={!picked.length}>
-            확인
+            {tr("확인")}
           </button>
           <button type="button" onClick={() => props.onDone(null)}>
-            취소
+            {tr("취소")}
           </button>
         </div>
       </form>
@@ -171,7 +172,7 @@ export function SlicerInsertDialog(props: { table: string; columns: string[]; on
 export function SlicerSettingsDialog(props: { slicer: Slicer; onDone(s: Slicer | null): void }) {
   const [s, setS] = useState(props.slicer);
   return (
-    <Modal title="슬라이서 설정" onClose={() => props.onDone(null)}>
+    <Modal title={tr("슬라이서 설정")} onClose={() => props.onDone(null)}>
       <form
         className="modal-body shape-fmt"
         onSubmit={(e) => {
@@ -181,19 +182,19 @@ export function SlicerSettingsDialog(props: { slicer: Slicer; onDone(s: Slicer |
       >
         <div className="hint">원본 이름: {s.column}</div>
         <label className="shape-fmt-row">
-          <span>머리글</span>
+          <span>{tr("머리글")}</span>
           <input autoFocus value={s.caption} onChange={(e) => setS({ ...s, caption: e.target.value })} />
         </label>
         <label className="shape-fmt-row">
-          <span>열 개수</span>
+          <span>{tr("열 개수")}</span>
           <input type="number" min={1} max={20} value={s.columns} onChange={(e) => setS({ ...s, columns: Number(e.target.value) || 1 })} />
         </label>
         <div className="actions">
           <button type="submit" className="primary">
-            확인
+            {tr("확인")}
           </button>
           <button type="button" onClick={() => props.onDone(null)}>
-            취소
+            {tr("취소")}
           </button>
         </div>
       </form>

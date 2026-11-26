@@ -1,4 +1,5 @@
 // Dialogs: name/number prompts, Format Cells (Ctrl+1) and Find (Ctrl+F).
+import { tr } from "../i18n";
 import { useState, type ReactNode } from "react";
 import type { CurrentStyle } from "../api";
 import { FORMAT_CHOICES } from "../formats";
@@ -20,7 +21,7 @@ export function Modal(props: { title: string; children: ReactNode; onClose(): vo
       >
         <div className="modal-title">
           <span>{props.title}</span>
-          <button className="x" onClick={props.onClose} aria-label="닫기">
+          <button className="x" onClick={props.onClose} aria-label={tr("닫기")}>
             ✕
           </button>
         </div>
@@ -47,10 +48,10 @@ export function PromptDialog(props: { title: string; label: string; value: strin
         </label>
         <div className="actions">
           <button type="submit" className="primary">
-            확인
+            {tr("확인")}
           </button>
           <button type="button" onClick={() => props.onDone(null)}>
-            취소
+            {tr("취소")}
           </button>
         </div>
       </form>
@@ -108,7 +109,7 @@ export function FormatCellsDialog(props: { style: CurrentStyle; locked?: boolean
   const cur = <K extends keyof FormatResult>(k: K, fallback: FormatResult[K]) => (k in r ? r[k] : fallback);
   const numFmt = (cur("numFmt", s.num_fmt) as string) || "general";
   return (
-    <Modal title="셀 서식" onClose={() => props.onDone(null)} wide>
+    <Modal title={tr("셀 서식")} onClose={() => props.onDone(null)} wide>
       <div className="tabs-head">
         {TABS.map((t) => (
           <button key={t} className={t === tab ? "on" : ""} onClick={() => setTab(t)}>
@@ -128,7 +129,7 @@ export function FormatCellsDialog(props: { style: CurrentStyle; locked?: boolean
               ))}
             </div>
             <label>
-              형식 코드 (사용자 지정)
+              {tr("형식 코드 (사용자 지정)")}
               <input value={numFmt} onChange={(e) => setR({ ...r, numFmt: e.target.value })} />
             </label>
           </div>
@@ -136,20 +137,20 @@ export function FormatCellsDialog(props: { style: CurrentStyle; locked?: boolean
         {tab === "맞춤" && (
           <div className="fmt-form">
             <label>
-              가로
+              {tr("가로")}
               <select value={cur("align", s.align) as string} onChange={(e) => setR({ ...r, align: e.target.value })}>
-                <option value="general">일반</option>
-                <option value="left">왼쪽</option>
-                <option value="center">가운데</option>
-                <option value="right">오른쪽</option>
+                <option value="general">{tr("일반")}</option>
+                <option value="left">{tr("왼쪽")}</option>
+                <option value="center">{tr("가운데")}</option>
+                <option value="right">{tr("오른쪽")}</option>
               </select>
             </label>
             <label>
-              세로
+              {tr("세로")}
               <select value={cur("valign", s.valign) as string} onChange={(e) => setR({ ...r, valign: e.target.value })}>
-                <option value="top">위쪽</option>
-                <option value="center">가운데</option>
-                <option value="bottom">아래쪽</option>
+                <option value="top">{tr("위쪽")}</option>
+                <option value="center">{tr("가운데")}</option>
+                <option value="bottom">{tr("아래쪽")}</option>
               </select>
             </label>
             <label className="check">
@@ -158,14 +159,14 @@ export function FormatCellsDialog(props: { style: CurrentStyle; locked?: boolean
                 checked={cur("wrap", s.wrap) as boolean}
                 onChange={(e) => setR({ ...r, wrap: e.target.checked })}
               />
-              자동 줄 바꿈
+              {tr("자동 줄 바꿈")}
             </label>
           </div>
         )}
         {tab === "글꼴" && (
           <div className="fmt-form">
             <label>
-              글꼴
+              {tr("글꼴")}
               <select value={cur("font", s.font) as string} onChange={(e) => setR({ ...r, font: e.target.value })}>
                 {[...new Set([s.font, ...FONTS])].map((f) => (
                   <option key={f}>{f}</option>
@@ -173,7 +174,7 @@ export function FormatCellsDialog(props: { style: CurrentStyle; locked?: boolean
               </select>
             </label>
             <label>
-              크기
+              {tr("크기")}
               <select value={String(cur("size", s.size))} onChange={(e) => setR({ ...r, size: Number(e.target.value) })}>
                 {[...new Set([s.size, ...SIZES])].sort((a, b) => a - b).map((n) => (
                   <option key={n}>{n}</option>
@@ -194,8 +195,8 @@ export function FormatCellsDialog(props: { style: CurrentStyle; locked?: boolean
               </label>
             ))}
             <div>
-              글꼴 색
-              <ColorPicker noneLabel="자동" onPick={(c) => setR({ ...r, color: c })} />
+              {tr("글꼴 색")}
+              <ColorPicker noneLabel={tr("자동")} onPick={(c) => setR({ ...r, color: c })} />
             </div>
           </div>
         )}
@@ -219,21 +220,21 @@ export function FormatCellsDialog(props: { style: CurrentStyle; locked?: boolean
         {tab === "보호" && (
           <div className="fmt-form">
             <label className="check">
-              <input type="checkbox" checked={r.locked ?? props.locked ?? true} onChange={(e) => setR({ ...r, locked: e.target.checked })} /> 잠금
+              <input type="checkbox" checked={r.locked ?? props.locked ?? true} onChange={(e) => setR({ ...r, locked: e.target.checked })} /> {tr("잠금")}
             </label>
-            <div className="muted">셀 잠금은 시트를 보호해야 적용됩니다(검토 탭 → 시트 보호).</div>
+            <div className="muted">{tr("셀 잠금은 시트를 보호해야 적용됩니다(검토 탭 → 시트 보호).")}</div>
           </div>
         )}
         {tab === "채우기" && (
           <div className="fmt-form">
-            <ColorPicker noneLabel="채우기 없음" onPick={(c) => setR({ ...r, fill: c })} />
+            <ColorPicker noneLabel={tr("채우기 없음")} onPick={(c) => setR({ ...r, fill: c })} />
           </div>
         )}
         <div className="actions">
           <button className="primary" onClick={() => props.onDone(r)}>
-            확인
+            {tr("확인")}
           </button>
-          <button onClick={() => props.onDone(null)}>취소</button>
+          <button onClick={() => props.onDone(null)}>{tr("취소")}</button>
         </div>
       </div>
     </Modal>
@@ -246,8 +247,8 @@ export function FindDialog(props: { onFind(q: string, matchCase: boolean): void;
   return (
     <div className="find-box" onMouseDown={(e) => e.stopPropagation()}>
       <div className="modal-title">
-        <span>찾기</span>
-        <button className="x" onClick={props.onClose} aria-label="닫기">
+        <span>{tr("찾기")}</span>
+        <button className="x" onClick={props.onClose} aria-label={tr("닫기")}>
           ✕
         </button>
       </div>
@@ -259,7 +260,7 @@ export function FindDialog(props: { onFind(q: string, matchCase: boolean): void;
         }}
       >
         <label>
-          찾을 내용
+          {tr("찾을 내용")}
           <input
             autoFocus
             value={q}
@@ -269,15 +270,15 @@ export function FindDialog(props: { onFind(q: string, matchCase: boolean): void;
         </label>
         <label className="check">
           <input type="checkbox" checked={mc} onChange={(e) => setMc(e.target.checked)} />
-          대/소문자 구분
+          {tr("대/소문자 구분")}
         </label>
         {props.message && <div className="muted">{props.message}</div>}
         <div className="actions">
           <button type="submit" className="primary">
-            다음 찾기
+            {tr("다음 찾기")}
           </button>
           <button type="button" onClick={props.onClose}>
-            닫기
+            {tr("닫기")}
           </button>
         </div>
       </form>

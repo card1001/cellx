@@ -1,4 +1,5 @@
 // 이동/복사, 숨기기 취소 and 머리글/바닥글.
+import { tr } from "../i18n";
 import { useState } from "react";
 import type { PageSetup, SheetTab } from "../api";
 import { Modal } from "./Dialogs";
@@ -16,7 +17,7 @@ function ListBox(props: { items: { value: number; label: string }[]; value: numb
           onMouseDown={() => props.onChange(it.value)}
           onDoubleClick={() => props.onPick(it.value)}
         >
-          {it.label}
+          {tr(it.label)}
         </div>
       ))}
     </div>
@@ -33,12 +34,12 @@ export function MoveCopyDialog(props: { tabs: SheetTab[]; sheet: number; onOk(to
     props.onOk(Math.min(to, copy ? props.tabs.length : props.tabs.length - 1), copy);
   };
   return (
-    <Modal title="이동/복사" onClose={props.onClose}>
+    <Modal title={tr("이동/복사")} onClose={props.onClose}>
       <div className="modal-body">
-        <div>「{props.tabs[props.sheet]?.name}」 시트를 옮길 위치</div>
-        <div className="hint">다음 시트의 앞에:</div>
+        <div>{`「${props.tabs[props.sheet]?.name ?? ""}」 ${tr("시트를 옮길 위치")}`}</div>
+        <div className="hint">{tr("다음 시트의 앞에:")}</div>
         <ListBox
-          items={[...props.tabs.map((t, i) => ({ value: i, label: `${t.name}${t.hidden ? " (숨김)" : ""}` })), { value: props.tabs.length, label: "(끝으로 이동)" }]}
+          items={[...props.tabs.map((t, i) => ({ value: i, label: `${t.name}${t.hidden ? ` (${tr("숨김")})` : ""}` })), { value: props.tabs.length, label: tr("(끝으로 이동)") }]}
           value={before}
           onChange={setBefore}
           onPick={(v) => {
@@ -46,13 +47,13 @@ export function MoveCopyDialog(props: { tabs: SheetTab[]; sheet: number; onOk(to
           }}
         />
         <label className="check">
-          <input type="checkbox" checked={copy} onChange={(e) => setCopy(e.target.checked)} /> 복사본 만들기
+          <input type="checkbox" checked={copy} onChange={(e) => setCopy(e.target.checked)} /> {tr("복사본 만들기")}
         </label>
         <div className="actions">
           <button className="primary" onClick={ok}>
-            확인
+            {tr("확인")}
           </button>
-          <button onClick={props.onClose}>취소</button>
+          <button onClick={props.onClose}>{tr("취소")}</button>
         </div>
       </div>
     </Modal>
@@ -63,15 +64,15 @@ export function UnhideDialog(props: { tabs: SheetTab[]; onOk(sheet: number): voi
   const hidden = props.tabs.map((t, i) => ({ t, i })).filter((x) => x.t.hidden);
   const [pick, setPick] = useState(hidden[0]?.i ?? -1);
   return (
-    <Modal title="숨기기 취소" onClose={props.onClose}>
+    <Modal title={tr("숨기기 취소")} onClose={props.onClose}>
       <div className="modal-body">
-        <div className="hint">숨기기 취소할 시트:</div>
+        <div className="hint">{tr("숨기기 취소할 시트:")}</div>
         <ListBox items={hidden.map(({ t, i }) => ({ value: i, label: t.name }))} value={pick} onChange={setPick} onPick={(v) => props.onOk(v)} />
         <div className="actions">
           <button className="primary" disabled={pick < 0} onClick={() => props.onOk(pick)}>
-            확인
+            {tr("확인")}
           </button>
-          <button onClick={props.onClose}>취소</button>
+          <button onClick={props.onClose}>{tr("취소")}</button>
         </div>
       </div>
     </Modal>
@@ -116,23 +117,23 @@ function Parts(props: { title: string; parts: [string, string, string]; onChange
             if (p) props.onChange([...p.parts]);
           }}
         >
-          <option value="">미리 설정된 {props.title}...</option>
+          <option value="">{tr("미리 설정된")} {props.title}...</option>
           {PRESETS.map((p, i) => (
             <option key={i} value={i}>
-              {p.label}
+              {tr(p.label)}
             </option>
           ))}
         </select>
         {CODES.map((c) => (
-          <button key={c.code} type="button" className="hf-code" title={`${c.label} (${c.code})`} onMouseDown={(e) => e.preventDefault()} onClick={() => insert(c.code)}>
-            {c.label}
+          <button key={c.code} type="button" className="hf-code" title={`${tr(c.label)} (${c.code})`} onMouseDown={(e) => e.preventDefault()} onClick={() => insert(c.code)}>
+            {tr(c.label)}
           </button>
         ))}
       </div>
       <div className="hf-parts">
         {labels.map((l, i) => (
           <label key={i}>
-            <span className="hint">{l}</span>
+            <span className="hint">{tr(l)}</span>
             <textarea
               rows={2}
               value={props.parts[i]}
@@ -156,16 +157,16 @@ export function HeaderFooterDialog(props: { setup: PageSetup; onOk(s: PageSetup)
   const [header, setHeader] = useState<[string, string, string]>([...props.setup.header]);
   const [footer, setFooter] = useState<[string, string, string]>(footer0);
   return (
-    <Modal title="머리글/바닥글" onClose={props.onClose} wide>
+    <Modal title={tr("머리글/바닥글")} onClose={props.onClose} wide>
       <div className="modal-body">
-        <Parts title="머리글" parts={header} onChange={setHeader} />
-        <Parts title="바닥글" parts={footer} onChange={setFooter} />
-        <div className="hint">구역을 누른 뒤 단추를 누르면 그 자리에 코드가 들어갑니다. 인쇄할 때 실제 값으로 바뀝니다.</div>
+        <Parts title={tr("머리글")} parts={header} onChange={setHeader} />
+        <Parts title={tr("바닥글")} parts={footer} onChange={setFooter} />
+        <div className="hint">{tr("구역을 누른 뒤 단추를 누르면 그 자리에 코드가 들어갑니다. 인쇄할 때 실제 값으로 바뀝니다.")}</div>
         <div className="actions">
           <button className="primary" onClick={() => props.onOk({ ...props.setup, header, footer, page_numbers: false })}>
-            확인
+            {tr("확인")}
           </button>
-          <button onClick={props.onClose}>취소</button>
+          <button onClick={props.onClose}>{tr("취소")}</button>
         </div>
       </div>
     </Modal>

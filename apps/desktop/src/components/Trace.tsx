@@ -1,5 +1,6 @@
 // 수식 분석: 참조되는/참조하는 셀 추적 arrows and the 수식 계산 dialog.
 
+import { tr } from "../i18n";
 import { useEffect, useRef, useState } from "react";
 import { api, type EvalStep, type TraceArea } from "../api";
 import type { OverlayGeometry } from "../grid/Grid";
@@ -124,11 +125,11 @@ export function EvaluateDialog(props: { sheet: number; sheetName: string; row: n
   const parts = current ? stepParts(current, i > 0 ? steps?.[i - 1] : undefined) : [];
   const part = parts.some((p) => p.under);
   return (
-    <Modal title="수식 계산" onClose={props.onClose}>
+    <Modal title={tr("수식 계산")} onClose={props.onClose}>
       <div className="modal-body eval-dialog">
         <div className="eval-head">
-          <span>참조:</span>
-          <span>계산(V):</span>
+          <span>{tr("참조:")}</span>
+          <span>{tr("계산(V):")}</span>
         </div>
         <div className="eval-row">
           <span className="eval-ref">
@@ -155,14 +156,14 @@ export function EvaluateDialog(props: { sheet: number; sheetName: string; row: n
         <div className="actions">
           {done ? (
             <button ref={button} className="primary" onClick={load}>
-              다시 시작
+              {tr("다시 시작")}
             </button>
           ) : (
             <button ref={button} className="primary" disabled={!steps || !!error} onClick={() => setI((x) => x + 1)}>
-              계산
+              {tr("계산")}
             </button>
           )}
-          <button onClick={props.onClose}>닫기</button>
+          <button onClick={props.onClose}>{tr("닫기")}</button>
         </div>
       </div>
     </Modal>

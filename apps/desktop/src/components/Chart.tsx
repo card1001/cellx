@@ -1,5 +1,6 @@
 // Charts: an SVG renderer for Excel's basic chart types and the layer that places,
 // moves and resizes them over the grid.
+import { tr } from "../i18n";
 import { useEffect, useRef, useState } from "react";
 import { api, type Chart, type ChartData, type ChartKind } from "../api";
 import type { OverlayGeometry } from "../grid/Grid";
@@ -359,7 +360,7 @@ export function ChartLayer(props: {
             {d ? (
               <ChartSvg kind={c.kind} data={d} width={w} height={h} legend={c.legend} trendline={c.trendline} zoom={z} />
             ) : (
-              <div className="chart-empty">데이터 없음</div>
+              <div className="chart-empty">{tr("데이터 없음")}</div>
             )}
             {sel &&
               ["nw", "n", "ne", "e", "se", "s", "sw", "w"].map((m) => (

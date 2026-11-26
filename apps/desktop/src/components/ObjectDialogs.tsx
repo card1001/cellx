@@ -1,4 +1,5 @@
 // Dialogs for paste special, conditional formatting, pivot tables, charts and memos.
+import { tr } from "../i18n";
 import { useEffect, useState } from "react";
 import { type Aggregate, api, type CfView, type Chart, type ChartKind, type PasteSpecial, type PivotDef, type PivotSource } from "../api";
 import { CF_STYLES, type CfStyle, describeRule, HIGHLIGHT, type HighlightKind } from "../cf";
@@ -24,37 +25,37 @@ export function PasteSpecialDialog(props: { onDone(opts: PasteSpecial | null): v
     ["Divide", "나누기"],
   ];
   return (
-    <Modal title="선택하여 붙여넣기" onClose={() => props.onDone(null)}>
+    <Modal title={tr("선택하여 붙여넣기")} onClose={() => props.onDone(null)}>
       <div className="modal-body">
         <fieldset className="radio-group">
-          <legend>붙여넣기</legend>
+          <legend>{tr("붙여넣기")}</legend>
           {whats.map(([v, l]) => (
             <label key={v} className="check">
-              <input type="radio" checked={o.what === v} onChange={() => setO({ ...o, what: v })} /> {l}
+              <input type="radio" checked={o.what === v} onChange={() => setO({ ...o, what: v })} /> {tr(l)}
             </label>
           ))}
         </fieldset>
         <fieldset className="radio-group">
-          <legend>연산</legend>
+          <legend>{tr("연산")}</legend>
           {ops.map(([v, l]) => (
             <label key={v} className="check">
-              <input type="radio" checked={o.op === v} disabled={o.what === "Formats" || o.what === "ColumnWidths"} onChange={() => setO({ ...o, op: v })} /> {l}
+              <input type="radio" checked={o.op === v} disabled={o.what === "Formats" || o.what === "ColumnWidths"} onChange={() => setO({ ...o, op: v })} /> {tr(l)}
             </label>
           ))}
         </fieldset>
         <div className="row-checks">
           <label className="check">
-            <input type="checkbox" checked={o.skip_blanks} onChange={(e) => setO({ ...o, skip_blanks: e.target.checked })} /> 내용 있는 셀만 붙여넣기
+            <input type="checkbox" checked={o.skip_blanks} onChange={(e) => setO({ ...o, skip_blanks: e.target.checked })} /> {tr("내용 있는 셀만 붙여넣기")}
           </label>
           <label className="check">
-            <input type="checkbox" checked={o.transpose} disabled={o.what === "ColumnWidths"} onChange={(e) => setO({ ...o, transpose: e.target.checked })} /> 행/열 바꿈
+            <input type="checkbox" checked={o.transpose} disabled={o.what === "ColumnWidths"} onChange={(e) => setO({ ...o, transpose: e.target.checked })} /> {tr("행/열 바꿈")}
           </label>
         </div>
         <div className="actions">
           <button className="primary" autoFocus onClick={() => props.onDone(o)}>
-            확인
+            {tr("확인")}
           </button>
-          <button onClick={() => props.onDone(null)}>취소</button>
+          <button onClick={() => props.onDone(null)}>{tr("취소")}</button>
         </div>
       </div>
     </Modal>
@@ -80,31 +81,31 @@ export function HighlightDialog(props: { kind: HighlightKind; onDone(r: { a: str
       >
         <div>{spec.prompt}</div>
         <div className="cf-row">
-          {spec.values >= 1 && <input autoFocus value={a} onChange={(e) => setA(e.target.value)} placeholder="값 또는 =A1" />}
+          {spec.values >= 1 && <input autoFocus value={a} onChange={(e) => setA(e.target.value)} placeholder={tr("값 또는 =A1")} />}
           {spec.values === 2 && (
             <>
               <span>~</span>
               <input value={b} onChange={(e) => setB(e.target.value)} />
             </>
           )}
-          <span>적용할 서식:</span>
+          <span>{tr("적용할 서식:")}</span>
           <select value={style} onChange={(e) => setStyle(Number(e.target.value))}>
             {CF_STYLES.map((s, i) => (
               <option key={s.label} value={i}>
-                {s.label}
+                {tr(s.label)}
               </option>
             ))}
           </select>
         </div>
         <div className="cf-preview" style={{ background: CF_STYLES[style].fill, color: CF_STYLES[style].font }}>
-          가나다 AaBbCc 123
+          {tr("가나다 AaBbCc 123")}
         </div>
         <div className="actions">
           <button type="submit" className="primary">
-            확인
+            {tr("확인")}
           </button>
           <button type="button" onClick={() => props.onDone(null)}>
-            취소
+            {tr("취소")}
           </button>
         </div>
       </form>
@@ -123,20 +124,20 @@ export function CfManagerDialog(props: { sheet: number; onChanged(): void; onClo
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.sheet]);
   return (
-    <Modal title="조건부 서식 규칙 관리자" wide onClose={props.onClose}>
+    <Modal title={tr("조건부 서식 규칙 관리자")} wide onClose={props.onClose}>
       <div className="modal-body">
         <table className="cf-table">
           <thead>
             <tr>
-              <th>규칙 (우선 순위 순)</th>
-              <th>적용 대상</th>
+              <th>{tr("규칙 (우선 순위 순)")}</th>
+              <th>{tr("적용 대상")}</th>
             </tr>
           </thead>
           <tbody>
             {rules.length === 0 && (
               <tr>
                 <td colSpan={2} className="muted">
-                  이 시트에는 규칙이 없습니다.
+                  {tr("이 시트에는 규칙이 없습니다.")}
                 </td>
               </tr>
             )}
@@ -159,11 +160,11 @@ export function CfManagerDialog(props: { sheet: number; onChanged(): void; onClo
               props.onChanged();
             }}
           >
-            규칙 삭제
+            {tr("규칙 삭제")}
           </button>
           <span className="spacer" />
           <button className="primary" onClick={props.onClose}>
-            닫기
+            {tr("닫기")}
           </button>
         </div>
       </div>
@@ -234,10 +235,10 @@ export function PivotDialog(props: {
   const area = (f: string) => (def.rows.includes(f) ? "rows" : def.columns === f ? "columns" : def.values.some((v) => v.field === f) ? "values" : "");
 
   return (
-    <Modal title={props.initial.id ? "피벗 테이블 필드" : "피벗 테이블 만들기"} wide onClose={() => props.onDone(null, false)}>
+    <Modal title={tr(props.initial.id ? "피벗 테이블 필드" : "피벗 테이블 만들기")} wide onClose={() => props.onDone(null, false)}>
       <div className="modal-body pivot-body">
         <label>
-          표 또는 범위
+          {tr("표 또는 범위")}
           <div className="cf-row">
             <select
               value={source.kind === "Table" ? `t:${source.name}` : "range"}
@@ -247,10 +248,10 @@ export function PivotDialog(props: {
                 setDef({ ...def, source: s, rows: [], columns: null, values: [] });
               }}
             >
-              <option value="range">시트 범위</option>
+              <option value="range">{tr("시트 범위")}</option>
               {props.tables.map((t) => (
                 <option key={t} value={`t:${t}`}>
-                  데이터 시트: {t}
+                  {tr("데이터 시트:")} {t}
                 </option>
               ))}
             </select>
@@ -267,17 +268,17 @@ export function PivotDialog(props: {
         {props.initial.id === 0 && (
           <div className="cf-row">
             <label className="check">
-              <input type="radio" checked={newSheet} onChange={() => setNewSheet(true)} /> 새 워크시트
+              <input type="radio" checked={newSheet} onChange={() => setNewSheet(true)} /> {tr("새 워크시트")}
             </label>
             <label className="check">
-              <input type="radio" checked={!newSheet} onChange={() => setNewSheet(false)} /> 기존 워크시트
+              <input type="radio" checked={!newSheet} onChange={() => setNewSheet(false)} /> {tr("기존 워크시트")}
             </label>
             {!newSheet && <input value={location} onChange={(e) => setLocation(e.target.value)} placeholder={`${props.sheetName(def.sheet)}!H1`} />}
           </div>
         )}
         <div className="pivot-grid">
           <div className="pivot-fields">
-            <div className="pivot-head">보고서에 추가할 필드 선택:</div>
+            <div className="pivot-head">{tr("보고서에 추가할 필드 선택:")}</div>
             {fields.map((f) => (
               <div key={f} className="pivot-field">
                 <label className="check">
@@ -285,21 +286,21 @@ export function PivotDialog(props: {
                 </label>
                 <select value={area(f)} onChange={(e) => e.target.value && move(f, e.target.value as "rows")}>
                   <option value="">—</option>
-                  <option value="rows">행</option>
-                  <option value="columns">열</option>
-                  <option value="values">값</option>
+                  <option value="rows">{tr("행")}</option>
+                  <option value="columns">{tr("열")}</option>
+                  <option value="values">{tr("값")}</option>
                 </select>
               </div>
             ))}
-            {fields.length === 0 && !error && <div className="muted">머리글 행이 있는 범위를 지정하세요.</div>}
+            {fields.length === 0 && !error && <div className="muted">{tr("머리글 행이 있는 범위를 지정하세요.")}</div>}
           </div>
           <div className="pivot-areas">
             <div className="pivot-area">
-              <div className="pivot-head">열</div>
+              <div className="pivot-head">{tr("열")}</div>
               {def.columns && <div className="pivot-chip">{def.columns}</div>}
             </div>
             <div className="pivot-area">
-              <div className="pivot-head">행</div>
+              <div className="pivot-head">{tr("행")}</div>
               {def.rows.map((r) => (
                 <div key={r} className="pivot-chip">
                   {r}
@@ -307,7 +308,7 @@ export function PivotDialog(props: {
               ))}
             </div>
             <div className="pivot-area">
-              <div className="pivot-head">값</div>
+              <div className="pivot-head">{tr("값")}</div>
               {def.values.map((v, i) => (
                 <div key={v.field} className="pivot-chip">
                   <select
@@ -320,7 +321,7 @@ export function PivotDialog(props: {
                   >
                     {AGGS.map(([a, l]) => (
                       <option key={a} value={a}>
-                        {l}
+                        {tr(l)}
                       </option>
                     ))}
                   </select>
@@ -337,7 +338,7 @@ export function PivotDialog(props: {
               let out = def;
               if (!newSheet && location.trim()) {
                 const m = /^(?:(.+)!)?\$?([A-Za-z]+)\$?(\d+)$/.exec(location.trim());
-                if (!m) return setError("위치를 A1 형식으로 입력하세요");
+                if (!m) return setError(tr("위치를 A1 형식으로 입력하세요"));
                 let col = 0;
                 for (const ch of m[2].toUpperCase()) col = col * 26 + ch.charCodeAt(0) - 64;
                 out = { ...def, row: Number(m[3]), col };
@@ -345,9 +346,9 @@ export function PivotDialog(props: {
               props.onDone(out, newSheet);
             }}
           >
-            확인
+            {tr("확인")}
           </button>
-          <button onClick={() => props.onDone(null, false)}>취소</button>
+          <button onClick={() => props.onDone(null, false)}>{tr("취소")}</button>
         </div>
       </div>
     </Modal>
@@ -359,7 +360,7 @@ export function PivotDialog(props: {
 export function ChartDialog(props: { chart: Chart; onDone(c: Chart | null): void }) {
   const [c, setC] = useState(props.chart);
   return (
-    <Modal title="차트 편집" onClose={() => props.onDone(null)}>
+    <Modal title={tr("차트 편집")} onClose={() => props.onDone(null)}>
       <form
         className="modal-body"
         onSubmit={(e) => {
@@ -368,43 +369,43 @@ export function ChartDialog(props: { chart: Chart; onDone(c: Chart | null): void
         }}
       >
         <label>
-          차트 종류
+          {tr("차트 종류")}
           <select value={c.kind} onChange={(e) => setC({ ...c, kind: e.target.value as ChartKind })}>
             {CHART_KINDS.map((k) => (
               <option key={k.kind} value={k.kind}>
-                {k.label}
+                {tr(k.label)}
               </option>
             ))}
           </select>
         </label>
         <label>
-          차트 제목 (비우면 자동)
+          {tr("차트 제목 (비우면 자동)")}
           <input value={c.title} onChange={(e) => setC({ ...c, title: e.target.value })} />
         </label>
         <label>
-          데이터 범위
+          {tr("데이터 범위")}
           <input value={c.range} onChange={(e) => setC({ ...c, range: e.target.value })} />
         </label>
         <div className="cf-row">
           <label className="check">
-            <input type="radio" checked={!c.series_in_rows} onChange={() => setC({ ...c, series_in_rows: false })} /> 열 방향 계열
+            <input type="radio" checked={!c.series_in_rows} onChange={() => setC({ ...c, series_in_rows: false })} /> {tr("열 방향 계열")}
           </label>
           <label className="check">
-            <input type="radio" checked={c.series_in_rows} onChange={() => setC({ ...c, series_in_rows: true })} /> 행 방향 계열
+            <input type="radio" checked={c.series_in_rows} onChange={() => setC({ ...c, series_in_rows: true })} /> {tr("행 방향 계열")}
           </label>
           <label className="check">
-            <input type="checkbox" checked={c.legend} onChange={(e) => setC({ ...c, legend: e.target.checked })} /> 범례
+            <input type="checkbox" checked={c.legend} onChange={(e) => setC({ ...c, legend: e.target.checked })} /> {tr("범례")}
           </label>
           <label className="check">
-            <input type="checkbox" checked={!!c.trendline} disabled={c.kind === "Pie" || c.kind === "Doughnut"} onChange={(e) => setC({ ...c, trendline: e.target.checked })} /> 추세선(선형)
+            <input type="checkbox" checked={!!c.trendline} disabled={c.kind === "Pie" || c.kind === "Doughnut"} onChange={(e) => setC({ ...c, trendline: e.target.checked })} /> {tr("추세선(선형)")}
           </label>
         </div>
         <div className="actions">
           <button type="submit" className="primary">
-            확인
+            {tr("확인")}
           </button>
           <button type="button" onClick={() => props.onDone(null)}>
-            취소
+            {tr("취소")}
           </button>
         </div>
       </form>

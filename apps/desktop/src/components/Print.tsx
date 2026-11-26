@@ -1,6 +1,7 @@
 // Printing like Excel's 파일 → 인쇄: settings with a page preview, Excel's page breaks
 // (automatic and manual, down then over), print titles, page numbers and charts.
 // The system print dialog also saves PDF.
+import { tr, formatLocaleDate, formatLocaleTime, getActiveLocale } from "../i18n";
 import { ShapeFigure, ShapeText } from "./Shape";
 import { SparklineSvg } from "./Sparkline";
 import { useMemo, useState } from "react";
@@ -72,9 +73,9 @@ export function effectiveFooter(setup: PageSetup): [string, string, string] {
 /** A header or footer part with its codes filled in (&P, &N, &D, &T, &F, &A, &&). */
 export function renderHeaderFooter(part: string, page: number, pages: number, file: string, sheet: string): string {
   const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-  const time = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  const locale = getActiveLocale();
+  const date = formatLocaleDate(now, locale);
+  const time = formatLocaleTime(now, locale);
   return part.replace(/&([PNDTFA&])/g, (_, c: string) =>
     c === "P" ? String(page) : c === "N" ? String(pages) : c === "D" ? date : c === "T" ? time : c === "F" ? file : c === "A" ? sheet : "&",
   );
@@ -312,41 +313,41 @@ export function PrintPreviewDialog(props: {
   const viewScale = Math.min(0.62, 440 / page.h, 520 / page.w);
   const [titles, setTitles] = useState(s.title_rows ? `${s.title_rows[0]}:${s.title_rows[1]}` : "");
   return (
-    <Modal title="인쇄" wide onClose={props.onClose}>
+    <Modal title={tr("인쇄")} wide onClose={props.onClose}>
       <div className="modal-body print-preview">
         <div className="print-settings">
           <button className="primary big-print" onClick={props.onPrint}>
-            🖨 인쇄
+            🖨 {tr("인쇄")}
           </button>
           <label>
-            인쇄 대상
+            {tr("인쇄 대상")}
             <select value={props.selectionOnly ? "s" : "a"} onChange={(e) => props.onScope(e.target.value === "s")}>
-              <option value="a">활성 시트 인쇄</option>
+              <option value="a">{tr("활성 시트 인쇄")}</option>
               <option value="s" disabled={!props.hasSelection}>
-                선택 영역 인쇄
+                {tr("선택 영역 인쇄")}
               </option>
             </select>
           </label>
           <label>
-            용지 방향
+            {tr("용지 방향")}
             <select value={s.landscape ? "l" : "p"} onChange={(e) => props.onChange({ ...s, landscape: e.target.value === "l" })}>
-              <option value="p">세로 방향</option>
-              <option value="l">가로 방향</option>
+              <option value="p">{tr("세로 방향")}</option>
+              <option value="l">{tr("가로 방향")}</option>
             </select>
           </label>
           <label>
-            배율
+            {tr("배율")}
             <select value={s.fit} onChange={(e) => props.onChange({ ...s, fit: e.target.value as PageSetup["fit"] })}>
-              <option value="None">현재 크기</option>
-              <option value="Width">모든 열을 한 페이지에 맞추기</option>
-              <option value="Page">한 페이지에 시트 맞추기</option>
+              <option value="None">{tr("현재 크기")}</option>
+              <option value="Width">{tr("모든 열을 한 페이지에 맞추기")}</option>
+              <option value="Page">{tr("한 페이지에 시트 맞추기")}</option>
             </select>
           </label>
           <label>
-            인쇄 제목 (반복할 행)
+            {tr("인쇄 제목 (반복할 행)")}
             <input
               value={titles}
-              placeholder="예: 1:1"
+              placeholder={tr("예: 1:1")}
               onChange={(e) => setTitles(e.target.value)}
               onBlur={() => {
                 const m = /^\$?(\d+)(?::\$?(\d+))?$/.exec(titles.trim());
@@ -355,15 +356,15 @@ export function PrintPreviewDialog(props: {
             />
           </label>
           <label className="check">
-            <input type="checkbox" checked={s.gridlines} onChange={(e) => props.onChange({ ...s, gridlines: e.target.checked })} /> 눈금선 인쇄
+            <input type="checkbox" checked={s.gridlines} onChange={(e) => props.onChange({ ...s, gridlines: e.target.checked })} /> {tr("눈금선 인쇄")}
           </label>
           <label className="check">
-            <input type="checkbox" checked={s.headings} onChange={(e) => props.onChange({ ...s, headings: e.target.checked })} /> 행/열 머리글 인쇄
+            <input type="checkbox" checked={s.headings} onChange={(e) => props.onChange({ ...s, headings: e.target.checked })} /> {tr("행/열 머리글 인쇄")}
           </label>
           <label className="check">
-            <input type="checkbox" checked={s.page_numbers} onChange={(e) => props.onChange({ ...s, page_numbers: e.target.checked })} /> 바닥글에 페이지 번호
+            <input type="checkbox" checked={s.page_numbers} onChange={(e) => props.onChange({ ...s, page_numbers: e.target.checked })} /> {tr("바닥글에 페이지 번호")}
           </label>
-          <div className="muted">PDF는 인쇄 창에서 「PDF로 저장」(Windows: Microsoft Print to PDF)을 고르세요.</div>
+          <div className="muted">{tr("PDF는 인쇄 창에서 「PDF로 저장」(Windows: Microsoft Print to PDF)을 고르세요.")}</div>
         </div>
         <div className="print-stage">
           <div className="print-sheet" style={{ width: page.w * viewScale + 2, height: page.h * viewScale + 2 }}>
@@ -376,7 +377,7 @@ export function PrintPreviewDialog(props: {
               ◀
             </button>
             <span>
-              {i + 1} / {pag.order.length} 페이지
+              {i + 1} / {pag.order.length} {tr("페이지")}
             </span>
             <button disabled={i >= pag.order.length - 1} onClick={() => setIndex(i + 1)}>
               ▶
