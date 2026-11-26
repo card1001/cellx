@@ -1,3 +1,4 @@
+import { formatLocaleNumber, getActiveLocale, tr } from "./i18n";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -39,6 +40,7 @@ import { SlicerInsertDialog, SlicerLayer, SlicerSettingsDialog } from "./compone
 import { SparklineCreateDialog, SparklineLayer, SparklineStyleDialog } from "./components/Sparkline";
 import { arrowKey, EvaluateDialog, TraceLayer, type TraceArrow } from "./components/Trace";
 import { RecoveryDialog, SaveChangesDialog, type SaveChoice } from "./components/FileDialogs";
+import { useI18n, type Locale } from "./i18n";
 import { HeaderFooterDialog, MoveCopyDialog, UnhideDialog } from "./components/SheetDialogs";
 import { ColorPicker } from "./components/ColorPicker";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -71,7 +73,7 @@ import { Ribbon, type RibbonActions } from "./components/Ribbon";
 import { decreaseDecimals, increaseDecimals } from "./formats";
 import { canPointAt, completeFunctions, cycleAbsolute, functionPrefixAt, insertRef, type PointRef, quoteSheet, refSpans } from "./formula";
 import { fontCss, Grid, type Hit, type RefBox, type Selection } from "./grid/Grid";
-import { addr, colName, formatCount, normalize, parseAddr, type Pos, type Range, rangeLabel, toTsv } from "./grid/model";
+import { addr, colName, normalize, parseAddr, type Pos, type Range, rangeLabel, toTsv } from "./grid/model";
 import { DataSource, SheetSource } from "./grid/sources";
 
 type Tab = { kind: "sheet"; index: number } | { kind: "data"; name: string };
@@ -139,12 +141,18 @@ function editorWidth(text: string, font: string, min: number): number {
   return Math.max(min, Math.ceil(longest + 14));
 }
 
+function formatCount(n: number): string {
+  return formatLocaleNumber(n, getActiveLocale(), { maximumFractionDigits: 0 });
+}
+
 function formatNumber(n: number): string {
-  // Excel's status bar shows up to 10 significant digits.
-  return Number.isInteger(n) ? n.toLocaleString("ko-KR") : n.toLocaleString("ko-KR", { maximumSignificantDigits: 10 });
+  // Status-bar formatting follows the UI locale; workbook cell formats remain unchanged.
+  const options = Number.isInteger(n) ? undefined : { maximumSignificantDigits: 10 };
+  return formatLocaleNumber(n, getActiveLocale(), options);
 }
 
 export default function App() {
+  const { locale, setLocale, t } = useI18n();
   const [info, setInfo] = useState<BookInfo | null>(null);
   const [functions, setFunctions] = useState<string[]>([]);
   const [tab, setTabState] = useState<Tab>({ kind: "sheet", index: 0 });
@@ -243,15 +251,15 @@ export default function App() {
     setSelectionState(s);
   };
 
-  const say = (text: string, error = false) => setMessage({ text, error });
+  const say = (text: string, error = false) => setMessage({ text: tr(text), error });
   const fail = (e: unknown) => say(errorText(e), true);
   const focusGrid = () => requestAnimationFrame(() => cellInput.current?.focus({ preventScroll: true }));
 
   const ask = (title: string, label: string, value = "") =>
-    new Promise<string | null>((resolve) => setDialog({ kind: "prompt", title, label, value, resolve }));
+    new Promise<string | null>((resolve) => setDialog({ kind: "prompt", title: tr(title), label: tr(label), value, resolve }));
 
   const run = async <T,>(label: string, fn: () => Promise<T>): Promise<T | undefined> => {
-    setBusy(label);
+    setBusy(tr(label));
     try {
       return await fn();
     } catch (e) {
@@ -1077,8 +1085,8 @@ export default function App() {
     const path = await openDialog({
       multiple: false,
       filters: [
-        { name: "Excel 통합 문서 / CellX 프로젝트", extensions: ["xlsx", "cellx"] },
-        { name: "모든 파일", extensions: ["*"] },
+        { name: tr("Excel 통합 문서 / CellX 프로젝트"), extensions: ["xlsx", "cellx"] },
+        { name: tr("모든 파일"), extensions: ["*"] },
       ],
     });
     if (!path || Array.isArray(path)) return;
@@ -1094,8 +1102,8 @@ export default function App() {
     const path = await saveDialog({
       defaultPath: infoRef.current?.path ?? "통합 문서1.xlsx",
       filters: [
-        { name: "Excel 통합 문서", extensions: ["xlsx"] },
-        { name: "CellX 프로젝트 (데이터 시트 포함)", extensions: ["cellx"] },
+        { name: tr("Excel 통합 문서"), extensions: ["xlsx"] },
+        { name: tr("CellX 프로젝트 (데이터 시트 포함)"), extensions: ["cellx"] },
       ],
     });
     if (!path) return false;
@@ -1121,7 +1129,7 @@ export default function App() {
   };
 
   const importData = async () => {
-    const path = await openDialog({ multiple: false, filters: [{ name: "데이터 파일", extensions: ["csv", "tsv", "txt", "parquet"] }] });
+    const path = await openDialog({ multiple: false, filters: [{ name: tr("데이터 파일"), extensions: ["csv", "tsv", "txt", "parquet"] }] });
     if (!path || Array.isArray(path)) return;
     const base = path.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") ?? "data";
     const suggested = base.replace(/[^\p{L}\p{N}_]/gu, "_").replace(/^(\d)/, "_$1");
@@ -1585,7 +1593,7 @@ export default function App() {
   const insertPicture = async () => {
     const t = tabRef.current;
     if (t.kind !== "sheet") return say("그림은 일반 시트에 넣습니다", true);
-    const path = await openDialog({ multiple: false, filters: [{ name: "그림", extensions: ["png", "jpg", "jpeg", "gif", "bmp"] }] });
+    const path = await openDialog({ multiple: false, filters: [{ name: tr("그림"), extensions: ["png", "jpg", "jpeg", "gif", "bmp"] }] });
     if (typeof path !== "string") return;
     const f = selectionRef.current.focus;
     const p = await run("그림 삽입", () => api.addPictureFile(t.index, f.r, f.c, path));
@@ -2637,7 +2645,7 @@ export default function App() {
       <div className="not-tauri">
         <h1>CellX</h1>
         <p>
-          이 화면은 데스크톱 앱 안에서 실행됩니다. <code>pnpm tauri dev</code>로 실행하세요.
+          이 화면은 데스크톱 앱 안에서 실행됩니다. <code>pnpm tauri dev</code>{tr("로 실행하세요.")}
         </p>
       </div>
     );
@@ -2673,6 +2681,16 @@ export default function App() {
           {fileName} - CellX
         </span>
         {busy && <span className="busy">{busy}…</span>}
+        <label className="language-picker">
+          <span>{t("language")}</span>
+          <select value={locale} onChange={(event) => setLocale(event.target.value as Locale)} aria-label={t("language")}>
+            <option value="ko-KR">{tr("한국어")}</option>
+            <option value="en-US">English</option>
+            <option value="ja-JP">日本語</option>
+            <option value="zh-CN">简体中文</option>
+            <option value="zh-TW">繁體中文</option>
+          </select>
+        </label>
       </div>
       <Ribbon
         actions={actions}
@@ -2742,13 +2760,13 @@ export default function App() {
           onFocus={(e) => e.target.select()}
         />
         <div className="fb-buttons">
-          <button title="취소" disabled={!session} onMouseDown={(e) => e.preventDefault()} onClick={cancelEdit}>
+          <button title={tr("취소")} disabled={!session} onMouseDown={(e) => e.preventDefault()} onClick={cancelEdit}>
             ✕
           </button>
-          <button title="입력" disabled={!session} onMouseDown={(e) => e.preventDefault()} onClick={() => void commit("none")}>
+          <button title={tr("입력")} disabled={!session} onMouseDown={(e) => e.preventDefault()} onClick={() => void commit("none")}>
             ✓
           </button>
-          <button title="함수 삽입" onMouseDown={(e) => e.preventDefault()} onClick={() => actions.insertFunction("SUM")}>
+          <button title={tr("함수 삽입")} onMouseDown={(e) => e.preventDefault()} onClick={() => actions.insertFunction("SUM")}>
             <i>fx</i>
           </button>
         </div>
@@ -3186,7 +3204,7 @@ export default function App() {
             </button>
             );
           })}
-          <button className="tab add" onMouseDown={(e) => e.preventDefault()} onClick={insertSheet} title="새 시트 (Shift+F11)">
+          <button className="tab add" onMouseDown={(e) => e.preventDefault()} onClick={insertSheet} title={tr("새 시트 (Shift+F11)")}>
             ＋
           </button>
           {info?.tables.map((t) => (
@@ -3221,10 +3239,10 @@ export default function App() {
             {formatCount(source.total)}행 · 조회 {source.lastQueryMs.toFixed(0)} ms
           </span>
         )}
-        {stats && onSheetTab && stats.bridge_calls > 0 && <span title="데이터 엔진 계산 시간">데이터 엔진 {stats.bridge_ms.toFixed(0)} ms</span>}
+        {stats && onSheetTab && stats.bridge_calls > 0 && <span title={tr("데이터 엔진 계산 시간")}>데이터 엔진 {stats.bridge_ms.toFixed(0)} ms</span>}
         {stats?.not_converged && (
-          <span className="warn" title="데이터 시트 결과와 셀이 서로를 참조해 계산이 끝나지 않았습니다. 일부 값이 최신이 아닐 수 있습니다. 순환 참조를 확인하세요.">
-            ⚠ 계산이 수렴하지 않음
+          <span className="warn" title={tr("데이터 시트 결과와 셀이 서로를 참조해 계산이 끝나지 않았습니다. 일부 값이 최신이 아닐 수 있습니다. 순환 참조를 확인하세요.")}>
+            ⚠ {tr("계산이 수렴하지 않음")}
           </span>
         )}
         {filter && filter.columns.length > 0 && source instanceof SheetSource && (
@@ -3232,7 +3250,7 @@ export default function App() {
             {formatCount(filter.range.r1 - filter.range.r0)}개 중 {formatCount(
               Array.from({ length: filter.range.r1 - filter.range.r0 }, (_, i) => filter.range.r0 + 1 + i).filter((r) => source.rows.size(r) > 0).length,
             )}
-            개의 레코드가 있습니다
+            {tr("개의 레코드가 있습니다")}
           </span>
         )}
         {selStats && selStats.count > 1 && (
@@ -3476,7 +3494,7 @@ export default function App() {
       )}
       {dialog?.kind === "bookUnprotect" && (
         <PasswordDialog
-          title="통합 문서 보호 해제"
+          title={tr("통합 문서 보호 해제")}
           onDone={async (pw) => {
             setDialog(null);
             focusGrid();
@@ -3687,7 +3705,7 @@ export default function App() {
           <div className="menu-backdrop" style={{ position: "fixed", inset: 0, zIndex: 49 }} onMouseDown={() => setTabColorAt(null)} />
           <div className="sheet-color-pop" style={{ left: tabColorAt.x, top: Math.max(8, tabColorAt.y) }}>
             <ColorPicker
-              noneLabel="색 없음"
+              noneLabel={tr("색 없음")}
               onPick={(c) => {
                 const sheet = tabColorAt.sheet;
                 setTabColorAt(null);
@@ -3769,7 +3787,7 @@ export default function App() {
       )}
       {dialog?.kind === "unprotect" && (
         <PasswordDialog
-          title="시트 보호 해제"
+          title={tr("시트 보호 해제")}
           onDone={async (pw) => {
             setDialog(null);
             focusGrid();
@@ -3866,14 +3884,14 @@ function DataBar(props: { source: DataSource; onChange(): void }) {
   };
   return (
     <div className="data-bar">
-      <span className="label">필터</span>
+      <span className="label">{tr("필터")}</span>
       <select value={column} onChange={(e) => setColumn(e.target.value)}>
         {source.info.columns.map((c) => (
           <option key={c.name}>{c.name}</option>
         ))}
       </select>
       <input
-        placeholder="조건: 서울, >=100, *카드*, <>취소"
+        placeholder={tr("조건: 서울, >=100, *카드*, <>취소")}
         value={criterion}
         onChange={(e) => setCriterion(e.target.value)}
         onKeyDown={(e) => {
@@ -3891,7 +3909,7 @@ function DataBar(props: { source: DataSource; onChange(): void }) {
       ))}
       <span className="spacer" />
       <span className="hint">
-        수식에서 <code>{source.info.name}[열]</code> · 수식 입력 중 열을 클릭하면 참조가 들어갑니다
+        {tr("수식에서")} <code>{source.info.name}[열]</code> {tr("· 수식 입력 중 열을 클릭하면 참조가 들어갑니다")}
       </span>
     </div>
   );
@@ -3907,17 +3925,17 @@ function SqlPanel(props: { tables: TableInfo[]; onCreate(sql: string, name: stri
   return (
     <aside className="side">
       <h3>SQL</h3>
-      <p className="muted">SELECT 문만 실행합니다. 결과는 새 데이터 시트가 됩니다.</p>
+      <p className="muted">{tr("SELECT 문만 실행합니다. 결과는 새 데이터 시트가 됩니다.")}</p>
       <textarea value={sql} onChange={(e) => setSql(e.target.value)} spellCheck={false} />
       <label>
-        결과 시트 이름
+        {tr("결과 시트 이름")}
         <input value={name} onChange={(e) => setName(e.target.value)} />
       </label>
       <button className="primary" onClick={() => props.onCreate(sql, name)}>
-        실행
+        {tr("실행")}
       </button>
-      <h4>데이터 시트</h4>
-      {props.tables.length === 0 && <p className="muted">아직 없습니다. 데이터 탭의 「데이터 가져오기」로 CSV를 여세요.</p>}
+      <h4>{tr("데이터 시트")}</h4>
+      {props.tables.length === 0 && <p className="muted">{tr("아직 없습니다. 데이터 탭의 「데이터 가져오기」로 CSV를 여세요.")}</p>}
       {props.tables.map((t) => (
         <details key={t.name}>
           <summary>
@@ -3932,12 +3950,12 @@ function SqlPanel(props: { tables: TableInfo[]; onCreate(sql: string, name: stri
           </ul>
         </details>
       ))}
-      <h4>시트에서 쓰는 법</h4>
+      <h4>{tr("시트에서 쓰는 법")}</h4>
       <ul className="muted help">
-        <li>=SUMIFS(표[금액], 표[지역], "서울")</li>
-        <li>=COUNTIFS(표[상태], "&lt;&gt;취소")</li>
-        <li>=XLOOKUP(A2, 표[주문번호], 표[금액])</li>
-        <li>=DQUERY("SELECT ... FROM 표")</li>
+        <li>{tr("=SUMIFS(표[금액], 표[지역], \"서울\")")}</li>
+        <li>{tr("=COUNTIFS(표[상태], \"&lt;&gt;취소\")")}</li>
+        <li>{tr("=XLOOKUP(A2, 표[주문번호], 표[금액])")}</li>
+        <li>{tr("=DQUERY(\"SELECT ... FROM 표\")")}</li>
       </ul>
     </aside>
   );

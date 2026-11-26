@@ -1,5 +1,6 @@
 // Dialogs of the 데이터 tab and friends: sort, AutoFilter menu, text to columns,
 // remove duplicates, data validation, find & replace, names, hyperlinks, goal seek.
+import { tr } from "../i18n";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   ProtectOptions,
@@ -34,33 +35,33 @@ export function SortDialog(props: {
   const [keys, setKeys] = useState<SortKey[]>([{ col: props.initialCol, descending: false }]);
   const cols = props.columns(hasHeader);
   return (
-    <Modal title="정렬" wide onClose={() => props.onDone(null)}>
+    <Modal title={tr("정렬")} wide onClose={() => props.onDone(null)}>
       <div className="modal-body">
         <div className="cf-row">
           <button onClick={() => setKeys([...keys, { col: cols.find((c) => !keys.some((k) => k.col === c.col))?.col ?? cols[0].col, descending: false }])}>
-            + 기준 추가
+            {tr("+ 기준 추가")}
           </button>
           <button disabled={keys.length <= 1} onClick={() => setKeys(keys.slice(0, -1))}>
-            × 기준 삭제
+            {tr("× 기준 삭제")}
           </button>
           <span className="spacer" />
           <label className="check">
-            <input type="checkbox" checked={hasHeader} onChange={(e) => setHasHeader(e.target.checked)} /> 내 데이터에 머리글 표시
+            <input type="checkbox" checked={hasHeader} onChange={(e) => setHasHeader(e.target.checked)} /> {tr("내 데이터에 머리글 표시")}
           </label>
         </div>
         <table className="cf-table">
           <thead>
             <tr>
               <th />
-              <th>열</th>
-              <th>정렬 기준</th>
-              <th>정렬</th>
+              <th>{tr("열")}</th>
+              <th>{tr("정렬 기준")}</th>
+              <th>{tr("정렬")}</th>
             </tr>
           </thead>
           <tbody>
             {keys.map((k, i) => (
               <tr key={i}>
-                <td>{i === 0 ? "정렬 기준" : "다음 기준"}</td>
+                <td>{tr(i === 0 ? "정렬 기준" : "다음 기준")}</td>
                 <td>
                   <select value={k.col} onChange={(e) => setKeys(keys.map((x, j) => (j === i ? { ...x, col: Number(e.target.value) } : x)))}>
                     {cols.map((c) => (
@@ -70,11 +71,11 @@ export function SortDialog(props: {
                     ))}
                   </select>
                 </td>
-                <td>셀 값</td>
+                <td>{tr("셀 값")}</td>
                 <td>
                   <select value={k.descending ? "d" : "a"} onChange={(e) => setKeys(keys.map((x, j) => (j === i ? { ...x, descending: e.target.value === "d" } : x)))}>
-                    <option value="a">오름차순</option>
-                    <option value="d">내림차순</option>
+                    <option value="a">{tr("오름차순")}</option>
+                    <option value="d">{tr("내림차순")}</option>
                   </select>
                 </td>
               </tr>
@@ -83,9 +84,9 @@ export function SortDialog(props: {
         </table>
         <div className="actions">
           <button className="primary" onClick={() => props.onDone({ keys, hasHeader })}>
-            확인
+            {tr("확인")}
           </button>
-          <button onClick={() => props.onDone(null)}>취소</button>
+          <button onClick={() => props.onDone(null)}>{tr("취소")}</button>
         </div>
       </div>
     </Modal>
@@ -140,7 +141,7 @@ export function FilterMenu(props: {
     return () => window.removeEventListener("mousedown", close);
   });
   const shown = props.values.filter((v) => !search || v.text.toLowerCase().includes(search.toLowerCase()));
-  const label = (t: string) => (t === "" ? "(필드 값 없음)" : t);
+  const label = (t: string) => (t === "" ? tr("(필드 값 없음)") : t);
   const all = shown.every((v) => checked.has(v.text));
   const left = Math.min(props.x, window.innerWidth - 270);
   const top = Math.min(props.y, window.innerHeight - 440);
@@ -148,20 +149,20 @@ export function FilterMenu(props: {
     <div className="filter-menu" ref={ref} style={{ left, top }}>
       <button className="menu-item" onClick={() => props.onSort(false)}>
         <span className="menu-icon">↑</span>
-        {props.numeric ? "숫자 오름차순 정렬" : "텍스트 오름차순 정렬"}
+        {tr(props.numeric ? "숫자 오름차순 정렬" : "텍스트 오름차순 정렬")}
       </button>
       <button className="menu-item" onClick={() => props.onSort(true)}>
         <span className="menu-icon">↓</span>
-        {props.numeric ? "숫자 내림차순 정렬" : "텍스트 내림차순 정렬"}
+        {tr(props.numeric ? "숫자 내림차순 정렬" : "텍스트 내림차순 정렬")}
       </button>
       <div className="menu-sep" />
       <button className="menu-item" disabled={!props.current} onClick={() => props.onApply(null)}>
         <span className="menu-icon">⊘</span>
-        필터 해제
+        {tr("필터 해제")}
       </button>
       <button className="menu-item" onClick={() => setCustom((v) => !v)}>
         <span className="menu-icon">{custom ? "▾" : "▸"}</span>
-        {props.numeric ? "숫자 필터" : "텍스트 필터"}
+        {tr(props.numeric ? "숫자 필터" : "텍스트 필터")}
       </button>
       {custom ? (
         <div className="filter-custom">
@@ -170,7 +171,7 @@ export function FilterMenu(props: {
               <select value={c.op} onChange={(e) => (i ? setC2 : setC1)({ ...c, op: e.target.value as FilterOp })}>
                 {ops.map(([o, l]) => (
                   <option key={o} value={o}>
-                    {l}
+                    {tr(l)}
                   </option>
                 ))}
               </select>
@@ -178,20 +179,20 @@ export function FilterMenu(props: {
               {i === 0 && (
                 <span className="and-or">
                   <label className="check">
-                    <input type="radio" checked={and} onChange={() => setAnd(true)} /> 그리고
+                    <input type="radio" checked={and} onChange={() => setAnd(true)} /> {tr("그리고")}
                   </label>
                   <label className="check">
-                    <input type="radio" checked={!and} onChange={() => setAnd(false)} /> 또는
+                    <input type="radio" checked={!and} onChange={() => setAnd(false)} /> {tr("또는")}
                   </label>
                 </span>
               )}
             </div>
           ))}
-          <div className="muted">?는 한 글자, *는 여러 글자를 나타냅니다.</div>
+          <div className="muted">{tr("?는 한 글자, *는 여러 글자를 나타냅니다.")}</div>
         </div>
       ) : (
         <>
-          <input className="filter-search" placeholder="검색" value={search} onChange={(e) => setSearch(e.target.value)} />
+          <input className="filter-search" placeholder={tr("검색")} value={search} onChange={(e) => setSearch(e.target.value)} />
           <div className="filter-list">
             <label className="check">
               <input
@@ -206,7 +207,7 @@ export function FilterMenu(props: {
                   setChecked(next);
                 }}
               />
-              (모두 선택)
+              {tr("(모두 선택)")}
             </label>
             {shown.slice(0, 2000).map((v) => (
               <label className="check" key={v.text}>
@@ -243,9 +244,9 @@ export function FilterMenu(props: {
             } else props.onApply({ col: props.col, values: [...checked], conditions: [], and: true });
           }}
         >
-          확인
+          {tr("확인")}
         </button>
-        <button onClick={props.onClose}>취소</button>
+        <button onClick={props.onClose}>{tr("취소")}</button>
       </div>
     </div>
   );
@@ -319,19 +320,19 @@ export function TextToColumnsDialog(props: { samples: string[]; dest: string; on
   const preview = props.samples.slice(0, 8).map((s) => splitPreview(s, opts));
   const width = Math.max(1, ...preview.map((r) => r.length));
   return (
-    <Modal title="텍스트 마법사" wide onClose={() => props.onDone(null)}>
+    <Modal title={tr("텍스트 마법사")} wide onClose={() => props.onDone(null)}>
       <div className="modal-body">
         <div className="cf-row">
           <label className="check">
-            <input type="radio" checked={mode === "delim"} onChange={() => setMode("delim")} /> 구분 기호로 분리됨
+            <input type="radio" checked={mode === "delim"} onChange={() => setMode("delim")} /> {tr("구분 기호로 분리됨")}
           </label>
           <label className="check">
-            <input type="radio" checked={mode === "fixed"} onChange={() => setMode("fixed")} /> 너비가 일정함
+            <input type="radio" checked={mode === "fixed"} onChange={() => setMode("fixed")} /> {tr("너비가 일정함")}
           </label>
         </div>
         {mode === "delim" ? (
           <fieldset className="radio-group">
-            <legend>구분 기호</legend>
+            <legend>{tr("구분 기호")}</legend>
             {(
               [
                 ["tab", "탭"],
@@ -341,33 +342,33 @@ export function TextToColumnsDialog(props: { samples: string[]; dest: string; on
               ] as const
             ).map(([k, l]) => (
               <label className="check" key={k}>
-                <input type="checkbox" checked={d[k]} onChange={(e) => setD({ ...d, [k]: e.target.checked })} /> {l}
+                <input type="checkbox" checked={d[k]} onChange={(e) => setD({ ...d, [k]: e.target.checked })} /> {tr(l)}
               </label>
             ))}
             <label className="check">
-              <input type="checkbox" checked={d.other} onChange={(e) => setD({ ...d, other: e.target.checked })} /> 기타
+              <input type="checkbox" checked={d.other} onChange={(e) => setD({ ...d, other: e.target.checked })} /> {tr("기타")}
               <input className="tiny" maxLength={1} value={other} onChange={(e) => setOther(e.target.value)} />
             </label>
             <label className="check">
-              <input type="checkbox" checked={consecutive} onChange={(e) => setConsecutive(e.target.checked)} /> 연속된 구분 기호를 하나로 처리
+              <input type="checkbox" checked={consecutive} onChange={(e) => setConsecutive(e.target.checked)} /> {tr("연속된 구분 기호를 하나로 처리")}
             </label>
             <label className="check">
-              텍스트 한정자
+              {tr("텍스트 한정자")}
               <select value={qualifier} onChange={(e) => setQualifier(e.target.value)}>
                 <option value={'"'}>"</option>
                 <option value="'">'</option>
-                <option value="">{"{없음}"}</option>
+                <option value="">{tr("없음")}</option>
               </select>
             </label>
           </fieldset>
         ) : (
           <label>
-            나눌 위치 (글자 수, 쉼표로 구분)
-            <input value={widths} onChange={(e) => setWidths(e.target.value)} placeholder="예: 4, 6" />
+            {tr("나눌 위치 (글자 수, 쉼표로 구분)")}
+            <input value={widths} onChange={(e) => setWidths(e.target.value)} placeholder={tr("예: 4, 6")} />
           </label>
         )}
         <label>
-          대상
+          {tr("대상")}
           <input value={dest} onChange={(e) => setDest(e.target.value)} />
         </label>
         <div className="split-preview">
@@ -385,9 +386,9 @@ export function TextToColumnsDialog(props: { samples: string[]; dest: string; on
         </div>
         <div className="actions">
           <button className="primary" onClick={() => props.onDone({ ...opts, destText: dest })}>
-            마침
+            {tr("마침")}
           </button>
-          <button onClick={() => props.onDone(null)}>취소</button>
+          <button onClick={() => props.onDone(null)}>{tr("취소")}</button>
         </div>
       </div>
     </Modal>
@@ -405,15 +406,15 @@ export function DuplicatesDialog(props: {
   const cols = props.columns(hasHeader);
   const [picked, setPicked] = useState(() => new Set(cols.map((c) => c.col)));
   return (
-    <Modal title="중복 값 제거" onClose={() => props.onDone(null)}>
+    <Modal title={tr("중복 값 제거")} onClose={() => props.onDone(null)}>
       <div className="modal-body">
-        <div>중복 값을 삭제하려면 중복 값이 포함된 열을 하나 이상 선택하세요.</div>
+        <div>{tr("중복 값을 삭제하려면 중복 값이 포함된 열을 하나 이상 선택하세요.")}</div>
         <div className="cf-row">
-          <button onClick={() => setPicked(new Set(cols.map((c) => c.col)))}>모두 선택</button>
-          <button onClick={() => setPicked(new Set())}>모두 선택 취소</button>
+          <button onClick={() => setPicked(new Set(cols.map((c) => c.col)))}>{tr("모두 선택")}</button>
+          <button onClick={() => setPicked(new Set())}>{tr("모두 선택 취소")}</button>
           <span className="spacer" />
           <label className="check">
-            <input type="checkbox" checked={hasHeader} onChange={(e) => setHasHeader(e.target.checked)} /> 내 데이터에 머리글 표시
+            <input type="checkbox" checked={hasHeader} onChange={(e) => setHasHeader(e.target.checked)} /> {tr("내 데이터에 머리글 표시")}
           </label>
         </div>
         <div className="filter-list tall">
@@ -435,9 +436,9 @@ export function DuplicatesDialog(props: {
         </div>
         <div className="actions">
           <button className="primary" disabled={picked.size === 0} onClick={() => props.onDone({ cols: [...picked].sort((a, b) => a - b), hasHeader })}>
-            확인
+            {tr("확인")}
           </button>
-          <button onClick={() => props.onDone(null)}>취소</button>
+          <button onClick={() => props.onDone(null)}>{tr("취소")}</button>
         </div>
       </div>
     </Modal>
@@ -524,11 +525,11 @@ export function ValidationDialog(props: { initial: Validation | null; onDone(r: 
   const two = usesOp && (v.op === "Between" || v.op === "NotBetween");
   const label1 = v.kind === "List" ? "원본" : v.kind === "Custom" ? "수식" : two ? "최소값" : "값";
   return (
-    <Modal title="데이터 유효성" wide onClose={() => props.onDone(null)}>
+    <Modal title={tr("데이터 유효성")} wide onClose={() => props.onDone(null)}>
       <div className="tabs-head">
         {(["설정", "설명 메시지", "오류 메시지"] as const).map((t) => (
           <button key={t} className={t === tab ? "on" : ""} onClick={() => setTab(t)}>
-            {t}
+            {tr(t)}
           </button>
         ))}
       </div>
@@ -537,31 +538,31 @@ export function ValidationDialog(props: { initial: Validation | null; onDone(r: 
           <div className="fmt-form">
             <div className="cf-row">
               <label>
-                제한 대상
+                {tr("제한 대상")}
                 <select value={v.kind} onChange={(e) => setV({ ...v, kind: e.target.value as ValidationKind })}>
                   {KINDS.map(([k, l]) => (
                     <option key={k} value={k}>
-                      {l}
+                      {tr(l)}
                     </option>
                   ))}
                 </select>
               </label>
               <label className="check">
-                <input type="checkbox" checked={v.allow_blank} onChange={(e) => setV({ ...v, allow_blank: e.target.checked })} /> 공백 무시
+                <input type="checkbox" checked={v.allow_blank} onChange={(e) => setV({ ...v, allow_blank: e.target.checked })} /> {tr("공백 무시")}
               </label>
               {v.kind === "List" && (
                 <label className="check">
-                  <input type="checkbox" checked={v.in_cell_dropdown} onChange={(e) => setV({ ...v, in_cell_dropdown: e.target.checked })} /> 드롭다운 표시
+                  <input type="checkbox" checked={v.in_cell_dropdown} onChange={(e) => setV({ ...v, in_cell_dropdown: e.target.checked })} /> {tr("드롭다운 표시")}
                 </label>
               )}
             </div>
             {usesOp && (
               <label>
-                제한 방법
+                {tr("제한 방법")}
                 <select value={v.op} onChange={(e) => setV({ ...v, op: e.target.value as ValidationOp })}>
                   {VOPS.map(([o, l]) => (
                     <option key={o} value={o}>
-                      {l}
+                      {tr(l)}
                     </option>
                   ))}
                 </select>
@@ -569,17 +570,17 @@ export function ValidationDialog(props: { initial: Validation | null; onDone(r: 
             )}
             {v.kind !== "Any" && (
               <label>
-                {label1}
+                {tr(label1)}
                 <input
                   value={f1}
                   onChange={(e) => setF1(e.target.value)}
-                  placeholder={v.kind === "List" ? "서울,부산,대구 또는 =$E$1:$E$10" : v.kind === "Date" ? "2026-01-01" : ""}
+                  placeholder={v.kind === "List" ? tr("서울,부산,대구 또는 =$E$1:$E$10") : v.kind === "Date" ? "2026-01-01" : ""}
                 />
               </label>
             )}
             {two && (
               <label>
-                최대값
+                {tr("최대값")}
                 <input value={f2} onChange={(e) => setF2(e.target.value)} placeholder={v.kind === "Date" ? "2026-12-31" : ""} />
               </label>
             )}
@@ -588,14 +589,14 @@ export function ValidationDialog(props: { initial: Validation | null; onDone(r: 
         {tab === "설명 메시지" && (
           <div className="fmt-form">
             <label className="check">
-              <input type="checkbox" checked={v.show_input} onChange={(e) => setV({ ...v, show_input: e.target.checked })} /> 셀을 선택하면 설명 메시지 표시
+              <input type="checkbox" checked={v.show_input} onChange={(e) => setV({ ...v, show_input: e.target.checked })} /> {tr("셀을 선택하면 설명 메시지 표시")}
             </label>
             <label>
-              제목
+              {tr("제목")}
               <input value={v.input_title} onChange={(e) => setV({ ...v, input_title: e.target.value })} />
             </label>
             <label>
-              설명 메시지
+              {tr("설명 메시지")}
               <textarea value={v.input_message} onChange={(e) => setV({ ...v, input_message: e.target.value })} />
             </label>
           </div>
@@ -603,36 +604,36 @@ export function ValidationDialog(props: { initial: Validation | null; onDone(r: 
         {tab === "오류 메시지" && (
           <div className="fmt-form">
             <label className="check">
-              <input type="checkbox" checked={v.show_error} onChange={(e) => setV({ ...v, show_error: e.target.checked })} /> 유효하지 않은 데이터를 입력하면 오류 메시지 표시
+              <input type="checkbox" checked={v.show_error} onChange={(e) => setV({ ...v, show_error: e.target.checked })} /> {tr("유효하지 않은 데이터를 입력하면 오류 메시지 표시")}
             </label>
             <label>
-              스타일
+              {tr("스타일")}
               <select value={v.error_style} onChange={(e) => setV({ ...v, error_style: e.target.value as ErrorStyle })}>
-                <option value="Stop">중지</option>
-                <option value="Warning">경고</option>
-                <option value="Information">정보</option>
+                <option value="Stop">{tr("중지")}</option>
+                <option value="Warning">{tr("경고")}</option>
+                <option value="Information">{tr("정보")}</option>
               </select>
             </label>
             <label>
-              제목
+              {tr("제목")}
               <input value={v.error_title} onChange={(e) => setV({ ...v, error_title: e.target.value })} />
             </label>
             <label>
-              오류 메시지
+              {tr("오류 메시지")}
               <textarea value={v.error_message} onChange={(e) => setV({ ...v, error_message: e.target.value })} />
             </label>
           </div>
         )}
         <div className="actions">
-          <button onClick={() => props.onDone("clear")}>모두 지우기</button>
+          <button onClick={() => props.onDone("clear")}>{tr("모두 지우기")}</button>
           <span className="spacer" />
           <button
             className="primary"
             onClick={() => props.onDone({ ...v, formula1: fromField(v.kind, f1), formula2: two ? fromField(v.kind, f2) : "" })}
           >
-            확인
+            {tr("확인")}
           </button>
-          <button onClick={() => props.onDone(null)}>취소</button>
+          <button onClick={() => props.onDone(null)}>{tr("취소")}</button>
         </div>
       </div>
     </Modal>
@@ -650,33 +651,33 @@ export function ValidationAlert(props: { failure: ValidationFailure; onDone(choi
           <span className={`alert-icon ${f.style.toLowerCase()}`}>{icon}</span>
           <div>
             {f.message}
-            {f.style === "Warning" && <div className="muted">계속하시겠습니까?</div>}
+            {f.style === "Warning" && <div className="muted">{tr("계속하시겠습니까?")}</div>}
           </div>
         </div>
         <div className="actions">
           {f.style === "Stop" && (
             <>
               <button className="primary" autoFocus onClick={() => props.onDone("retry")}>
-                다시 시도
+                {tr("다시 시도")}
               </button>
-              <button onClick={() => props.onDone("cancel")}>취소</button>
+              <button onClick={() => props.onDone("cancel")}>{tr("취소")}</button>
             </>
           )}
           {f.style === "Warning" && (
             <>
               <button className="primary" autoFocus onClick={() => props.onDone("accept")}>
-                예
+                {tr("예")}
               </button>
-              <button onClick={() => props.onDone("retry")}>아니요</button>
-              <button onClick={() => props.onDone("cancel")}>취소</button>
+              <button onClick={() => props.onDone("retry")}>{tr("아니요")}</button>
+              <button onClick={() => props.onDone("cancel")}>{tr("취소")}</button>
             </>
           )}
           {f.style === "Information" && (
             <>
               <button className="primary" autoFocus onClick={() => props.onDone("accept")}>
-                확인
+                {tr("확인")}
               </button>
-              <button onClick={() => props.onDone("cancel")}>취소</button>
+              <button onClick={() => props.onDone("cancel")}>{tr("취소")}</button>
             </>
           )}
         </div>
@@ -747,15 +748,15 @@ export function FindReplaceDialog(props: {
   return (
     <div className="find-box wide" onMouseDown={(e) => e.stopPropagation()}>
       <div className="modal-title">
-        <span>찾기 및 바꾸기</span>
-        <button className="x" onClick={props.onClose} aria-label="닫기">
+        <span>{tr("찾기 및 바꾸기")}</span>
+        <button className="x" onClick={props.onClose} aria-label={tr("닫기")}>
           ✕
         </button>
       </div>
       <div className="tabs-head">
         {(["찾기", "바꾸기"] as const).map((t) => (
-          <button key={t} className={t === tab ? "on" : ""} onClick={() => setTab(t)}>
-            {t}
+          <button key={tr(t)} className={t === tab ? "on" : ""} onClick={() => setTab(t)}>
+            {tr(t)}
           </button>
         ))}
       </div>
@@ -767,25 +768,25 @@ export function FindReplaceDialog(props: {
         }}
       >
         <label>
-          찾을 내용
+          {tr("찾을 내용")}
           <input autoFocus value={o.find} onChange={(e) => setO({ ...o, find: e.target.value })} />
         </label>
         {tab === "바꾸기" && (
           <label>
-            바꿀 내용
+            {tr("바꿀 내용")}
             <input value={o.replace} onChange={(e) => setO({ ...o, replace: e.target.value })} />
           </label>
         )}
         <div className="cf-row">
           <label className="check">
-            <input type="checkbox" checked={o.matchCase} onChange={(e) => setO({ ...o, matchCase: e.target.checked })} /> 대/소문자 구분
+            <input type="checkbox" checked={o.matchCase} onChange={(e) => setO({ ...o, matchCase: e.target.checked })} /> {tr("대/소문자 구분")}
           </label>
           <label className="check">
-            <input type="checkbox" checked={o.wholeCell} onChange={(e) => setO({ ...o, wholeCell: e.target.checked })} /> 전체 셀 내용 일치
+            <input type="checkbox" checked={o.wholeCell} onChange={(e) => setO({ ...o, wholeCell: e.target.checked })} /> {tr("전체 셀 내용 일치")}
           </label>
           <select value={o.workbook ? "b" : "s"} onChange={(e) => setO({ ...o, workbook: e.target.value === "b" })}>
-            <option value="s">범위: 시트</option>
-            <option value="b">범위: 통합 문서</option>
+            <option value="s">{tr("범위: 시트")}</option>
+            <option value="b">{tr("범위: 통합 문서")}</option>
           </select>
         </div>
         {props.message && <div className="muted">{props.message}</div>}
@@ -793,18 +794,18 @@ export function FindReplaceDialog(props: {
           {tab === "바꾸기" && (
             <>
               <button type="button" onClick={() => props.onReplaceAll(o)}>
-                모두 바꾸기
+                {tr("모두 바꾸기")}
               </button>
               <button type="button" onClick={() => props.onReplace(o)}>
-                바꾸기
+                {tr("바꾸기")}
               </button>
             </>
           )}
           <button type="submit" className="primary">
-            다음 찾기
+            {tr("다음 찾기")}
           </button>
           <button type="button" onClick={props.onClose}>
-            닫기
+            {tr("닫기")}
           </button>
         </div>
       </form>
@@ -831,7 +832,7 @@ export function NameManagerDialog(props: {
   const list = props.names.filter((n) => !n.name.startsWith("_xlnm."));
   const scopeLabel = (s: number | null) => (s === null ? "통합 문서" : props.sheets[s] ?? `시트 ${s + 1}`);
   return (
-    <Modal title={edit ? (edit.old ? "이름 편집" : "새 이름") : "이름 관리자"} wide onClose={props.onClose}>
+    <Modal title={tr(edit ? (edit.old ? "이름 편집" : "새 이름") : "이름 관리자")} wide onClose={props.onClose}>
       <div className="modal-body">
         {edit ? (
           <form
@@ -844,13 +845,13 @@ export function NameManagerDialog(props: {
             }}
           >
             <label>
-              이름
+              {tr("이름")}
               <input autoFocus value={edit.name} onChange={(e) => setEdit({ ...edit, name: e.target.value })} />
             </label>
             <label>
-              범위
+              {tr("범위")}
               <select value={edit.scope ?? -1} onChange={(e) => setEdit({ ...edit, scope: Number(e.target.value) < 0 ? null : Number(e.target.value) })}>
-                <option value={-1}>통합 문서</option>
+                <option value={-1}>{tr("통합 문서")}</option>
                 {props.sheets.map((s, i) => (
                   <option key={s} value={i}>
                     {s}
@@ -859,22 +860,22 @@ export function NameManagerDialog(props: {
               </select>
             </label>
             <label>
-              참조 대상
+              {tr("참조 대상")}
               <input value={edit.formula} onChange={(e) => setEdit({ ...edit, formula: e.target.value })} />
             </label>
             <div className="actions">
               <button type="submit" className="primary">
-                확인
+                {tr("확인")}
               </button>
               <button type="button" onClick={() => (props.startNew ? props.onClose() : setEdit(null))}>
-                취소
+                {tr("취소")}
               </button>
             </div>
           </form>
         ) : (
           <>
             <div className="cf-row">
-              <button onClick={() => setEdit({ old: null, name: "", scope: null, formula: props.suggestion })}>새로 만들기...</button>
+              <button onClick={() => setEdit({ old: null, name: "", scope: null, formula: props.suggestion })}>{tr("새로 만들기...")}</button>
               <button
                 disabled={sel === null}
                 onClick={() => {
@@ -882,25 +883,25 @@ export function NameManagerDialog(props: {
                   setEdit({ old: n, name: n.name, scope: n.scope, formula: `=${n.formula.replace(/^=/, "")}` });
                 }}
               >
-                편집...
+                {tr("편집...")}
               </button>
               <button disabled={sel === null} onClick={() => (props.onDelete(list[sel!]), setSel(null))}>
-                삭제
+                {tr("삭제")}
               </button>
             </div>
             <table className="cf-table">
               <thead>
                 <tr>
-                  <th>이름</th>
-                  <th>참조 대상</th>
-                  <th>범위</th>
+                  <th>{tr("이름")}</th>
+                  <th>{tr("참조 대상")}</th>
+                  <th>{tr("범위")}</th>
                 </tr>
               </thead>
               <tbody>
                 {list.length === 0 && (
                   <tr>
                     <td colSpan={3} className="muted">
-                      정의된 이름이 없습니다. 이름 상자에 이름을 입력해도 만들 수 있습니다.
+                      {tr("정의된 이름이 없습니다. 이름 상자에 이름을 입력해도 만들 수 있습니다.")}
                     </td>
                   </tr>
                 )}
@@ -915,7 +916,7 @@ export function NameManagerDialog(props: {
             </table>
             <div className="actions">
               <button className="primary" onClick={props.onClose}>
-                닫기
+                {tr("닫기")}
               </button>
             </div>
           </>
@@ -948,7 +949,7 @@ export function HyperlinkDialog(props: {
     return `${q}!${cell.trim() || "A1"}`;
   }, [kind, url, mail, sheet, cell]);
   return (
-    <Modal title={cur ? "하이퍼링크 편집" : "하이퍼링크 삽입"} onClose={() => props.onDone(null)}>
+    <Modal title={tr(cur ? "하이퍼링크 편집" : "하이퍼링크 삽입")} onClose={() => props.onDone(null)}>
       <form
         className="modal-body"
         onSubmit={(e) => {
@@ -958,35 +959,35 @@ export function HyperlinkDialog(props: {
       >
         <div className="cf-row">
           <label className="check">
-            <input type="radio" checked={kind === "web"} onChange={() => setKind("web")} /> 웹 페이지
+            <input type="radio" checked={kind === "web"} onChange={() => setKind("web")} /> {tr("웹 페이지")}
           </label>
           <label className="check">
-            <input type="radio" checked={kind === "doc"} onChange={() => setKind("doc")} /> 현재 문서
+            <input type="radio" checked={kind === "doc"} onChange={() => setKind("doc")} /> {tr("현재 문서")}
           </label>
           <label className="check">
-            <input type="radio" checked={kind === "mail"} onChange={() => setKind("mail")} /> 전자 메일 주소
+            <input type="radio" checked={kind === "mail"} onChange={() => setKind("mail")} /> {tr("전자 메일 주소")}
           </label>
         </div>
         <label>
-          표시할 텍스트
+          {tr("표시할 텍스트")}
           <input value={text} onChange={(e) => setText(e.target.value)} />
         </label>
         {kind === "web" && (
           <label>
-            주소
+            {tr("주소")}
             <input autoFocus value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://" />
           </label>
         )}
         {kind === "mail" && (
           <label>
-            전자 메일 주소
+            {tr("전자 메일 주소")}
             <input autoFocus value={mail} onChange={(e) => setMail(e.target.value)} />
           </label>
         )}
         {kind === "doc" && (
           <div className="cf-row">
             <label>
-              시트
+              {tr("시트")}
               <select value={sheet} onChange={(e) => setSheet(e.target.value)}>
                 {props.sheets.map((s) => (
                   <option key={s}>{s}</option>
@@ -994,7 +995,7 @@ export function HyperlinkDialog(props: {
               </select>
             </label>
             <label>
-              셀 참조
+              {tr("셀 참조")}
               <input value={cell} onChange={(e) => setCell(e.target.value)} />
             </label>
           </div>
@@ -1002,15 +1003,15 @@ export function HyperlinkDialog(props: {
         <div className="actions">
           {cur && (
             <button type="button" onClick={() => props.onDone("remove")}>
-              링크 제거
+              {tr("링크 제거")}
             </button>
           )}
           <span className="spacer" />
           <button type="submit" className="primary" disabled={!target}>
-            확인
+            {tr("확인")}
           </button>
           <button type="button" onClick={() => props.onDone(null)}>
-            취소
+            {tr("취소")}
           </button>
         </div>
       </form>
@@ -1025,7 +1026,7 @@ export function GoalSeekDialog(props: { setCell: string; onDone(r: { setCell: st
   const [target, setTarget] = useState("");
   const [changing, setChanging] = useState("");
   return (
-    <Modal title="목표값 찾기" onClose={() => props.onDone(null)}>
+    <Modal title={tr("목표값 찾기")} onClose={() => props.onDone(null)}>
       <form
         className="modal-body"
         onSubmit={(e) => {
@@ -1036,23 +1037,23 @@ export function GoalSeekDialog(props: { setCell: string; onDone(r: { setCell: st
         }}
       >
         <label>
-          수식 셀
+          {tr("수식 셀")}
           <input value={setCell} onChange={(e) => setSetCell(e.target.value)} />
         </label>
         <label>
-          찾는 값
+          {tr("찾는 값")}
           <input autoFocus value={target} onChange={(e) => setTarget(e.target.value)} />
         </label>
         <label>
-          값을 바꿀 셀
-          <input value={changing} onChange={(e) => setChanging(e.target.value)} placeholder="예: B2" />
+          {tr("값을 바꿀 셀")}
+          <input value={changing} onChange={(e) => setChanging(e.target.value)} placeholder={tr("예: B2")} />
         </label>
         <div className="actions">
           <button type="submit" className="primary">
-            확인
+            {tr("확인")}
           </button>
           <button type="button" onClick={() => props.onDone(null)}>
-            취소
+            {tr("취소")}
           </button>
         </div>
       </form>
@@ -1072,10 +1073,10 @@ export function SubtotalDialog(props: {
   const [vals, setVals] = useState(() => new Set([props.columns[props.columns.length - 1]?.col].filter((x): x is number => x !== undefined)));
   const [replace, setReplace] = useState(true);
   return (
-    <Modal title="부분합" onClose={() => props.onDone(null)}>
+    <Modal title={tr("부분합")} onClose={() => props.onDone(null)}>
       <div className="modal-body">
         <label>
-          그룹화할 항목
+          {tr("그룹화할 항목")}
           <select value={group} onChange={(e) => setGroup(Number(e.target.value))}>
             {props.columns.map((c) => (
               <option key={c.col} value={c.col}>
@@ -1085,16 +1086,16 @@ export function SubtotalDialog(props: {
           </select>
         </label>
         <label>
-          사용할 함수
+          {tr("사용할 함수")}
           <select value={func} onChange={(e) => setFunc(e.target.value as typeof func)}>
-            <option value="Sum">합계</option>
-            <option value="Count">개수</option>
-            <option value="Average">평균</option>
-            <option value="Max">최대</option>
-            <option value="Min">최소</option>
+            <option value="Sum">{tr("합계")}</option>
+            <option value="Count">{tr("개수")}</option>
+            <option value="Average">{tr("평균")}</option>
+            <option value="Max">{tr("최대")}</option>
+            <option value="Min">{tr("최소")}</option>
           </select>
         </label>
-        <div>부분합 계산 항목</div>
+        <div>{tr("부분합 계산 항목")}</div>
         <div className="filter-list tall">
           {props.columns.map((c) => (
             <label className="check" key={c.col}>
@@ -1113,16 +1114,16 @@ export function SubtotalDialog(props: {
           ))}
         </div>
         <label className="check">
-          <input type="checkbox" checked={replace} onChange={(e) => setReplace(e.target.checked)} /> 새로운 값으로 대치
+          <input type="checkbox" checked={replace} onChange={(e) => setReplace(e.target.checked)} /> {tr("새로운 값으로 대치")}
         </label>
-        <div className="muted">먼저 그룹화할 열로 데이터를 정렬해 두세요.</div>
+        <div className="muted">{tr("먼저 그룹화할 열로 데이터를 정렬해 두세요.")}</div>
         <div className="actions">
-          <button onClick={() => props.onDone("removeAll")}>모두 제거</button>
+          <button onClick={() => props.onDone("removeAll")}>{tr("모두 제거")}</button>
           <span className="spacer" />
           <button className="primary" disabled={vals.size === 0} onClick={() => props.onDone({ groupCol: group, func, valueCols: [...vals].sort((a, b) => a - b), replace })}>
-            확인
+            {tr("확인")}
           </button>
-          <button onClick={() => props.onDone(null)}>취소</button>
+          <button onClick={() => props.onDone(null)}>{tr("취소")}</button>
         </div>
       </div>
     </Modal>
@@ -1160,7 +1161,7 @@ export function CreateTableDialog(props: { range: string; header: boolean; onDon
   const [range, setRange] = useState(props.range);
   const [header, setHeader] = useState(props.header);
   return (
-    <Modal title="표 만들기" onClose={() => props.onDone(null)}>
+    <Modal title={tr("표 만들기")} onClose={() => props.onDone(null)}>
       <form
         className="modal-body"
         onSubmit={(e) => {
@@ -1169,18 +1170,18 @@ export function CreateTableDialog(props: { range: string; header: boolean; onDon
         }}
       >
         <label>
-          표에 사용할 데이터를 지정하십시오.
+          {tr("표에 사용할 데이터를 지정하십시오.")}
           <input autoFocus value={range} onChange={(e) => setRange(e.target.value)} />
         </label>
         <label className="check">
-          <input type="checkbox" checked={header} onChange={(e) => setHeader(e.target.checked)} /> 머리글 포함
+          <input type="checkbox" checked={header} onChange={(e) => setHeader(e.target.checked)} /> {tr("머리글 포함")}
         </label>
         <div className="actions">
           <button type="submit" className="primary">
-            확인
+            {tr("확인")}
           </button>
           <button type="button" onClick={() => props.onDone(null)}>
-            취소
+            {tr("취소")}
           </button>
         </div>
       </form>
@@ -1239,32 +1240,32 @@ export function ProtectDialog(props: { onDone(r: { password: string | null; opti
         {step === "opts" ? (
           <>
             <label>
-              시트 보호 해제 암호 (선택)
+              {tr("시트 보호 해제 암호 (선택)")}
               <input type="password" autoFocus value={pw} onChange={(e) => setPw(e.target.value)} />
             </label>
-            <div>워크시트의 모든 사용자에게 허용할 내용 (잠긴 셀 내용 변경은 항상 막힙니다):</div>
+            <div>{tr("워크시트의 모든 사용자에게 허용할 내용 (잠긴 셀 내용 변경은 항상 막힙니다):")}</div>
             <div className="filter-list tall">
               {PROTECT_LABELS.map(([k, l]) => (
                 <label className="check" key={k}>
-                  <input type="checkbox" checked={o[k]} onChange={(e) => setO({ ...o, [k]: e.target.checked })} /> {l}
+                  <input type="checkbox" checked={o[k]} onChange={(e) => setO({ ...o, [k]: e.target.checked })} /> {tr(l)}
                 </label>
               ))}
             </div>
           </>
         ) : (
           <label>
-            계속하려면 암호를 다시 입력하십시오.
+            {tr("계속하려면 암호를 다시 입력하십시오.")}
             <input type="password" autoFocus value={pw2} onChange={(e) => setPw2(e.target.value)} />
           </label>
         )}
         {err && <div className="err-text">{err}</div>}
-        <div className="muted">암호를 잊어버리면 복구할 수 없습니다. Excel과 같은 방식의 보호여서 강력한 보안 수단은 아닙니다.</div>
+        <div className="muted">{tr("암호를 잊어버리면 복구할 수 없습니다. Excel과 같은 방식의 보호여서 강력한 보안 수단은 아닙니다.")}</div>
         <div className="actions">
           <button type="submit" className="primary">
-            확인
+            {tr("확인")}
           </button>
           <button type="button" onClick={() => props.onDone(null)}>
-            취소
+            {tr("취소")}
           </button>
         </div>
       </form>
@@ -1284,15 +1285,15 @@ export function PasswordDialog(props: { title: string; onDone(pw: string | null)
         }}
       >
         <label>
-          암호
+          {tr("암호")}
           <input type="password" autoFocus value={pw} onChange={(e) => setPw(e.target.value)} />
         </label>
         <div className="actions">
           <button type="submit" className="primary">
-            확인
+            {tr("확인")}
           </button>
           <button type="button" onClick={() => props.onDone(null)}>
-            취소
+            {tr("취소")}
           </button>
         </div>
       </form>
@@ -1311,7 +1312,7 @@ export function MessageBox(props: { title?: string; message: string; onClose(): 
         </div>
         <div className="actions">
           <button className="primary" autoFocus onClick={props.onClose}>
-            확인
+            {tr("확인")}
           </button>
         </div>
       </div>

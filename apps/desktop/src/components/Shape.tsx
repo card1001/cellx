@@ -1,3 +1,4 @@
+import { tr } from "../i18n";
 // Shapes and text boxes over the sheet (삽입 → 도형, 텍스트 상자), drawn,
 // moved, resized and typed into like Excel's.
 import { useEffect, useRef, useState } from "react";
@@ -351,18 +352,18 @@ export function ShapeFormatDialog(props: { shape: Shape; onDone(s: Shape | null)
   const set = (p: Partial<Shape>) => setS((cur) => ({ ...cur, ...p }));
   const color = (label: string, value: string | null, onChange: (v: string | null) => void, allowNone = true) => (
     <label className="shape-fmt-row">
-      <span>{label}</span>
+      <span>{tr(label)}</span>
       <input type="color" value={value ?? "#ffffff"} disabled={value === null} onChange={(e) => onChange(e.target.value.toUpperCase())} />
       {allowNone && (
         <label className="check">
           <input type="checkbox" checked={value === null} onChange={(e) => onChange(e.target.checked ? null : "#4472C4")} />
-          없음
+          {tr("없음")}
         </label>
       )}
     </label>
   );
   return (
-    <Modal title="도형 서식" onClose={() => props.onDone(null)}>
+    <Modal title={tr("도형 서식")} onClose={() => props.onDone(null)}>
       <form
         className="modal-body shape-fmt"
         onSubmit={(e) => {
@@ -373,44 +374,44 @@ export function ShapeFormatDialog(props: { shape: Shape; onDone(s: Shape | null)
         {!line && color("채우기", s.fill, (v) => set({ fill: v }))}
         {color("선", s.line, (v) => set({ line: v }))}
         <label className="shape-fmt-row">
-          <span>선 두께(px)</span>
+          <span>{tr("선 두께(px)")}</span>
           <input type="number" min={0} max={20} step={0.25} value={s.line_width} onChange={(e) => set({ line_width: Number(e.target.value) || 0 })} />
         </label>
         {!line && (
           <>
             {color("글꼴 색", s.text_color, (v) => set({ text_color: v ?? "#000000" }), false)}
             <label className="shape-fmt-row">
-              <span>글꼴 크기(pt)</span>
+              <span>{tr("글꼴 크기(pt)")}</span>
               <input type="number" min={1} max={409} value={s.font_size} onChange={(e) => set({ font_size: Number(e.target.value) || 11 })} />
               <label className="check">
                 <input type="checkbox" checked={s.bold} onChange={(e) => set({ bold: e.target.checked })} />
-                굵게
+                {tr("굵게")}
               </label>
             </label>
             <label className="shape-fmt-row">
-              <span>가로 맞춤</span>
+              <span>{tr("가로 맞춤")}</span>
               <select value={s.align} onChange={(e) => set({ align: e.target.value as Shape["align"] })}>
-                <option value="l">왼쪽</option>
-                <option value="ctr">가운데</option>
-                <option value="r">오른쪽</option>
+                <option value="l">{tr("왼쪽")}</option>
+                <option value="ctr">{tr("가운데")}</option>
+                <option value="r">{tr("오른쪽")}</option>
               </select>
             </label>
             <label className="shape-fmt-row">
-              <span>세로 맞춤</span>
+              <span>{tr("세로 맞춤")}</span>
               <select value={s.valign} onChange={(e) => set({ valign: e.target.value as Shape["valign"] })}>
-                <option value="t">위쪽</option>
-                <option value="ctr">가운데</option>
-                <option value="b">아래쪽</option>
+                <option value="t">{tr("위쪽")}</option>
+                <option value="ctr">{tr("가운데")}</option>
+                <option value="b">{tr("아래쪽")}</option>
               </select>
             </label>
           </>
         )}
         <div className="actions">
           <button type="submit" className="primary">
-            확인
+            {tr("확인")}
           </button>
           <button type="button" onClick={() => props.onDone(null)}>
-            취소
+            {tr("취소")}
           </button>
         </div>
       </form>

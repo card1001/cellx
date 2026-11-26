@@ -1,4 +1,5 @@
 // 가상 분석: 데이터 표 and 시나리오 관리자 dialogs.
+import { tr } from "../i18n";
 import { useEffect, useState } from "react";
 import { api, type Scenario } from "../api";
 import { colName, parseAddr } from "../grid/model";
@@ -8,7 +9,7 @@ export function DataTableDialog(props: { onDone(r: { row: string; col: string } 
   const [row, setRow] = useState("");
   const [col, setCol] = useState("");
   return (
-    <Modal title="데이터 표" onClose={() => props.onDone(null)}>
+    <Modal title={tr("데이터 표")} onClose={() => props.onDone(null)}>
       <form
         className="modal-body shape-fmt"
         onSubmit={(e) => {
@@ -17,20 +18,20 @@ export function DataTableDialog(props: { onDone(r: { row: string; col: string } 
         }}
       >
         <label className="shape-fmt-row">
-          <span>행 입력 셀(R):</span>
-          <input autoFocus value={row} placeholder="예: $B$1" onChange={(e) => setRow(e.target.value)} />
+          <span>{tr("행 입력 셀(R):")}</span>
+          <input autoFocus value={row} placeholder={tr("예: $B$1")} onChange={(e) => setRow(e.target.value)} />
         </label>
         <label className="shape-fmt-row">
-          <span>열 입력 셀(C):</span>
-          <input value={col} placeholder="예: $B$2" onChange={(e) => setCol(e.target.value)} />
+          <span>{tr("열 입력 셀(C):")}</span>
+          <input value={col} placeholder={tr("예: $B$2")} onChange={(e) => setCol(e.target.value)} />
         </label>
-        <div className="hint">선택한 범위의 첫 행에는 행 입력 셀에 넣을 값, 첫 열에는 열 입력 셀에 넣을 값을 둡니다.</div>
+        <div className="hint">{tr("선택한 범위의 첫 행에는 행 입력 셀에 넣을 값, 첫 열에는 열 입력 셀에 넣을 값을 둡니다.")}</div>
         <div className="actions">
           <button type="submit" className="primary">
-            확인
+            {tr("확인")}
           </button>
           <button type="button" onClick={() => props.onDone(null)}>
-            취소
+            {tr("취소")}
           </button>
         </div>
       </form>
@@ -113,24 +114,24 @@ export function ScenarioDialog(props: {
         }}
       >
         <label className="shape-fmt-row">
-          <span>시나리오 이름(N):</span>
+          <span>{tr("시나리오 이름(N):")}</span>
           <input autoFocus value={mode.name} onChange={(e) => setMode({ ...mode, name: e.target.value })} />
         </label>
         <label className="shape-fmt-row">
-          <span>변경 셀(C):</span>
+          <span>{tr("변경 셀(C):")}</span>
           <input value={mode.cells} onChange={(e) => setMode({ ...mode, cells: e.target.value })} />
         </label>
-        <div className="hint">인접하지 않은 셀은 쉼표로 구분합니다.</div>
+        <div className="hint">{tr("인접하지 않은 셀은 쉼표로 구분합니다.")}</div>
         <label className="shape-fmt-row">
-          <span>설명(O):</span>
+          <span>{tr("설명(O):")}</span>
           <input value={mode.comment} onChange={(e) => setMode({ ...mode, comment: e.target.value })} />
         </label>
         <div className="actions">
           <button type="submit" className="primary">
-            확인
+            {tr("확인")}
           </button>
           <button type="button" onClick={() => setMode({ kind: "list" })}>
-            취소
+            {tr("취소")}
           </button>
         </div>
       </form>
@@ -145,7 +146,7 @@ export function ScenarioDialog(props: {
           void save(d, mode.old);
         }}
       >
-        <div className="hint">각 변경 셀의 값을 입력하십시오.</div>
+        <div className="hint">{tr("각 변경 셀의 값을 입력하십시오.")}</div>
         <div className="scenario-values">
           {d.cells.map(([r, c, v], i) => (
             <label key={`${r}:${c}`} className="shape-fmt-row">
@@ -165,10 +166,10 @@ export function ScenarioDialog(props: {
         </div>
         <div className="actions">
           <button type="submit" className="primary">
-            확인
+            {tr("확인")}
           </button>
           <button type="button" onClick={() => setMode({ kind: "list" })}>
-            취소
+            {tr("취소")}
           </button>
         </div>
       </form>
@@ -189,17 +190,17 @@ export function ScenarioDialog(props: {
           }
         }}
       >
-        <div className="hint">보고서 종류: 시나리오 요약</div>
+        <div className="hint">{tr("보고서 종류: 시나리오 요약")}</div>
         <label className="shape-fmt-row">
-          <span>결과 셀(R):</span>
+          <span>{tr("결과 셀(R):")}</span>
           <input autoFocus value={mode.results} onChange={(e) => setMode({ ...mode, results: e.target.value })} />
         </label>
         <div className="actions">
           <button type="submit" className="primary">
-            확인
+            {tr("확인")}
           </button>
           <button type="button" onClick={() => setMode({ kind: "list" })}>
-            취소
+            {tr("취소")}
           </button>
         </div>
       </form>
@@ -209,7 +210,7 @@ export function ScenarioDialog(props: {
       <div className="modal-body scenario-manager">
         <div className="scenario-main">
           <div className="list-box scenario-list" role="listbox">
-            {list.length === 0 && <div className="hint">정의된 시나리오가 없습니다. 시나리오를 추가하려면 [추가]를 선택하십시오.</div>}
+            {list.length === 0 && <div className="hint">{tr("정의된 시나리오가 없습니다. 시나리오를 추가하려면 [추가]를 선택하십시오.")}</div>}
             {list.map((s) => (
               <div
                 key={s.name}
@@ -231,7 +232,7 @@ export function ScenarioDialog(props: {
             ))}
           </div>
           <div className="scenario-buttons">
-            <button onClick={() => setMode({ kind: "edit", old: null, name: "", cells: props.selection, comment: "" })}>추가(A)...</button>
+            <button onClick={() => setMode({ kind: "edit", old: null, name: "", cells: props.selection, comment: "" })}>{tr("추가(A)...")}</button>
             <button
               disabled={!current}
               onClick={async () => {
@@ -240,21 +241,21 @@ export function ScenarioDialog(props: {
                 await reload();
               }}
             >
-              삭제(D)
+              {tr("삭제(D)")}
             </button>
             <button
               disabled={!current}
               onClick={() => current && setMode({ kind: "edit", old: current.name, name: current.name, cells: cellsText(current.cells), comment: current.comment })}
             >
-              편집(E)...
+              {tr("편집(E)...")}
             </button>
             <button disabled={!list.length} onClick={() => setMode({ kind: "summary", results: "" })}>
-              요약(U)...
+              {tr("요약(U)...")}
             </button>
           </div>
         </div>
-        <div className="hint">변경 셀: {current ? cellsText(current.cells) : ""}</div>
-        <div className="hint">설명: {current?.comment ?? ""}</div>
+        <div className="hint">{tr("변경 셀:")} {current ? cellsText(current.cells) : ""}</div>
+        <div className="hint">{tr("설명:")} {current?.comment ?? ""}</div>
         <div className="actions">
           <button
             className="primary"
@@ -269,16 +270,16 @@ export function ScenarioDialog(props: {
               }
             }}
           >
-            표시(S)
+            {tr("표시(S)")}
           </button>
-          <button onClick={props.onClose}>닫기</button>
+          <button onClick={props.onClose}>{tr("닫기")}</button>
         </div>
       </div>
     );
   }
   const title = mode.kind === "edit" ? (mode.old ? "시나리오 편집" : "시나리오 추가") : mode.kind === "values" ? "시나리오 값" : mode.kind === "summary" ? "시나리오 요약" : "시나리오 관리자";
   return (
-    <Modal title={title} onClose={props.onClose}>
+    <Modal title={tr(title)} onClose={props.onClose}>
       {body}
     </Modal>
   );
@@ -290,7 +291,7 @@ export function BookProtectDialog(props: { onDone(pw: string | null | undefined)
   const [pw2, setPw2] = useState("");
   const [err, setErr] = useState<string | null>(null);
   return (
-    <Modal title="구조 및 창 보호" onClose={() => props.onDone(undefined)}>
+    <Modal title={tr("구조 및 창 보호")} onClose={() => props.onDone(undefined)}>
       <form
         className="modal-body shape-fmt"
         onSubmit={(e) => {
@@ -299,22 +300,22 @@ export function BookProtectDialog(props: { onDone(pw: string | null | undefined)
           props.onDone(pw || null);
         }}
       >
-        <div className="hint">보호할 대상: 구조 — 시트 추가, 삭제, 이름 바꾸기, 이동, 숨기기를 막습니다.</div>
+        <div className="hint">{tr("보호할 대상: 구조 — 시트 추가, 삭제, 이름 바꾸기, 이동, 숨기기를 막습니다.")}</div>
         <label className="shape-fmt-row">
-          <span>암호(선택):</span>
+          <span>{tr("암호(선택):")}</span>
           <input type="password" autoFocus value={pw} onChange={(e) => setPw(e.target.value)} />
         </label>
         <label className="shape-fmt-row">
-          <span>암호 확인:</span>
+          <span>{tr("암호 확인:")}</span>
           <input type="password" value={pw2} disabled={!pw} onChange={(e) => setPw2(e.target.value)} />
         </label>
         {err && <div className="err-text">{err}</div>}
         <div className="actions">
           <button type="submit" className="primary">
-            확인
+            {tr("확인")}
           </button>
           <button type="button" onClick={() => props.onDone(undefined)}>
-            취소
+            {tr("취소")}
           </button>
         </div>
       </form>
@@ -346,7 +347,7 @@ export function CustomViewsDialog(props: { active: number; onShown(sheet: number
   };
   if (adding !== null)
     return (
-      <Modal title="보기 추가" onClose={() => setAdding(null)}>
+      <Modal title={tr("보기 추가")} onClose={() => setAdding(null)}>
         <form
           className="modal-body shape-fmt"
           onSubmit={async (e) => {
@@ -361,23 +362,23 @@ export function CustomViewsDialog(props: { active: number; onShown(sheet: number
           }}
         >
           <label className="shape-fmt-row">
-            <span>이름(N):</span>
+            <span>{tr("이름(N):")}</span>
             <input autoFocus value={adding} onChange={(e) => setAdding(e.target.value)} />
           </label>
-          <div className="hint">보기에 포함: 숨겨진 행·열, 필터 설정</div>
+          <div className="hint">{tr("보기에 포함: 숨겨진 행·열, 필터 설정")}</div>
           <div className="actions">
             <button type="submit" className="primary" disabled={!adding.trim()}>
-              확인
+              {tr("확인")}
             </button>
             <button type="button" onClick={() => setAdding(null)}>
-              취소
+              {tr("취소")}
             </button>
           </div>
         </form>
       </Modal>
     );
   return (
-    <Modal title="사용자 지정 보기" onClose={props.onClose}>
+    <Modal title={tr("사용자 지정 보기")} onClose={props.onClose}>
       <div className="modal-body scenario-manager">
         <div className="scenario-main">
           <div className="list-box scenario-list" role="listbox">
@@ -396,10 +397,10 @@ export function CustomViewsDialog(props: { active: number; onShown(sheet: number
           </div>
           <div className="scenario-buttons">
             <button className="primary" disabled={!pick} onClick={() => pick && void show(pick)}>
-              표시(S)
+              {tr("표시(S)")}
             </button>
-            <button onClick={props.onClose}>닫기</button>
-            <button onClick={() => setAdding("")}>추가(A)...</button>
+            <button onClick={props.onClose}>{tr("닫기")}</button>
+            <button onClick={() => setAdding("")}>{tr("추가(A)...")}</button>
             <button
               disabled={!pick}
               onClick={async () => {
@@ -408,7 +409,7 @@ export function CustomViewsDialog(props: { active: number; onShown(sheet: number
                 await reload();
               }}
             >
-              삭제(D)
+              {tr("삭제(D)")}
             </button>
           </div>
         </div>

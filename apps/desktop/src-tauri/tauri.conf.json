@@ -55,16 +55,25 @@
       },
       "wix": {
         "language": [
-          "ko-KR"
+          "ko-KR",
+          "en-US",
+          "ja-JP",
+          "zh-CN",
+          "zh-TW"
         ]
       },
       "nsis": {
         "languages": [
-          "Korean"
+          "Korean",
+          "English",
+          "Japanese",
+          "SimpChinese",
+          "TradChinese"
         ],
         "installMode": "currentUser",
         "startMenuFolder": "CellX",
-        "installerIcon": "icons/icon.ico"
+        "installerIcon": "icons/icon.ico",
+        "displayLanguageSelector": true
       }
     }
   }

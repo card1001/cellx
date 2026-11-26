@@ -1,3 +1,4 @@
+import { tr } from "../i18n";
 // Colour palette in the layout of Office's: theme-like shades plus standard colours.
 const BASE = ["#FFFFFF", "#000000", "#E7E6E6", "#44546A", "#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5", "#70AD47"];
 const STANDARD = ["#C00000", "#FF0000", "#FFC000", "#FFFF00", "#92D050", "#00B050", "#00B0F0", "#0070C0", "#002060", "#7030A0"];
@@ -23,7 +24,7 @@ const SHADES: string[][] = [0.8, 0.6, 0.4, -0.25, -0.5].map((t) =>
 export function ColorPicker(props: { onPick(color: string | null): void; noneLabel: string }) {
   return (
     <div className="color-picker" onMouseDown={(e) => e.preventDefault()}>
-      <div className="cp-title">테마 색</div>
+      <div className="cp-title">{tr("테마 색")}</div>
       <div className="cp-row">
         {BASE.map((c) => (
           <button key={c} className="cp-swatch" style={{ background: c }} title={c} onClick={() => props.onPick(c)} />
@@ -38,7 +39,7 @@ export function ColorPicker(props: { onPick(color: string | null): void; noneLab
           </div>
         ))}
       </div>
-      <div className="cp-title">표준 색</div>
+      <div className="cp-title">{tr("표준 색")}</div>
       <div className="cp-row">
         {STANDARD.map((c) => (
           <button key={c} className="cp-swatch" style={{ background: c }} title={c} onClick={() => props.onPick(c)} />

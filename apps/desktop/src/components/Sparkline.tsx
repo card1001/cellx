@@ -1,4 +1,5 @@
 // 스파크라인: small charts inside cells, and the dialogs that make and style them.
+import { tr } from "../i18n";
 import { type ReactElement, useState } from "react";
 import type { SparkKind, SparklineGroup, SparklineView } from "../api";
 import type { OverlayGeometry } from "../grid/Grid";
@@ -93,7 +94,7 @@ export function SparklineCreateDialog(props: { kind: SparkKind; data: string; lo
   const [data, setData] = useState(props.data);
   const [location, setLocation] = useState(props.location);
   return (
-    <Modal title="스파크라인 만들기" onClose={() => props.onDone(null)}>
+    <Modal title={tr("스파크라인 만들기")} onClose={() => props.onDone(null)}>
       <form
         className="modal-body"
         onSubmit={(e) => {
@@ -101,22 +102,22 @@ export function SparklineCreateDialog(props: { kind: SparkKind; data: string; lo
           props.onDone({ data, location });
         }}
       >
-        <div className="hint">원하는 데이터 선택</div>
+        <div className="hint">{tr("원하는 데이터 선택")}</div>
         <label className="shape-fmt-row">
-          <span>데이터 범위(D):</span>
+          <span>{tr("데이터 범위(D):")}</span>
           <input autoFocus value={data} onChange={(e) => setData(e.target.value)} />
         </label>
-        <div className="hint">스파크라인을 배치할 위치 선택</div>
+        <div className="hint">{tr("스파크라인을 배치할 위치 선택")}</div>
         <label className="shape-fmt-row">
-          <span>위치 범위(L):</span>
+          <span>{tr("위치 범위(L):")}</span>
           <input value={location} onChange={(e) => setLocation(e.target.value)} />
         </label>
         <div className="actions">
           <button type="submit" className="primary">
-            확인
+            {tr("확인")}
           </button>
           <button type="button" onClick={() => props.onDone(null)}>
-            취소
+            {tr("취소")}
           </button>
         </div>
       </form>
@@ -128,7 +129,7 @@ export function SparklineCreateDialog(props: { kind: SparkKind; data: string; lo
 export function SparklineStyleDialog(props: { group: SparklineGroup; onDone(g: SparklineGroup | null): void }) {
   const [g, setG] = useState(props.group);
   return (
-    <Modal title="스파크라인 디자인" onClose={() => props.onDone(null)}>
+    <Modal title={tr("스파크라인 디자인")} onClose={() => props.onDone(null)}>
       <form
         className="modal-body shape-fmt"
         onSubmit={(e) => {
@@ -137,37 +138,37 @@ export function SparklineStyleDialog(props: { group: SparklineGroup; onDone(g: S
         }}
       >
         <label className="shape-fmt-row">
-          <span>종류</span>
+          <span>{tr("종류")}</span>
           <select value={g.kind} onChange={(e) => setG({ ...g, kind: e.target.value as SparkKind })}>
             {SPARK_KINDS.map((k) => (
               <option key={k.kind} value={k.kind}>
-                {k.label}
+                {tr(k.label)}
               </option>
             ))}
           </select>
         </label>
         <label className="shape-fmt-row">
-          <span>스파크라인 색</span>
+          <span>{tr("스파크라인 색")}</span>
           <input type="color" value={g.color} onChange={(e) => setG({ ...g, color: e.target.value.toUpperCase() })} />
         </label>
         <label className="shape-fmt-row">
-          <span>음수·강조 색</span>
+          <span>{tr("음수·강조 색")}</span>
           <input type="color" value={g.negative_color} onChange={(e) => setG({ ...g, negative_color: e.target.value.toUpperCase() })} />
         </label>
         <label className="shape-fmt-row check">
           <input type="checkbox" checked={g.markers} onChange={(e) => setG({ ...g, markers: e.target.checked })} />
-          표식
+          {tr("표식")}
         </label>
         <label className="shape-fmt-row check">
           <input type="checkbox" checked={g.high_low} onChange={(e) => setG({ ...g, high_low: e.target.checked })} />
-          높은 점·낮은 점
+          {tr("높은 점·낮은 점")}
         </label>
         <div className="actions">
           <button type="submit" className="primary">
-            확인
+            {tr("확인")}
           </button>
           <button type="button" onClick={() => props.onDone(null)}>
-            취소
+            {tr("취소")}
           </button>
         </div>
       </form>
