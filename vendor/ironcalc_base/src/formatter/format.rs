@@ -128,8 +128,15 @@ pub fn format_number(value_original: f64, format: &str, locale: &Locale) -> Form
             // We should have different codepaths for general formatting and errors
             let value_abs = value.abs();
             if (1.0e-8..1.0e+11).contains(&value_abs) {
-                let mut text = format!("{value:.9}");
-                text = text.trim_end_matches('0').trim_end_matches('.').to_string();
+                // CellX: at most 15 significant digits, so that the binary
+                // noise past them does not show (12345678.123456, not
+                // 12345678.123455999).
+                let int_digits = if value_abs < 1.0 { 0 } else { value_abs.log10().floor() as i32 + 1 };
+                let decimals = (15 - int_digits).clamp(0, 9) as usize;
+                let mut text = format!("{value:.decimals$}");
+                if text.contains('.') {
+                    text = text.trim_end_matches('0').trim_end_matches('.').to_string();
+                }
                 if locale.numbers.symbols.decimal != "." {
                     text = text.replace('.', &locale.numbers.symbols.decimal.to_string());
                 }

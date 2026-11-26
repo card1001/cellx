@@ -10,6 +10,10 @@ import type { CellStyle } from "../api";
 import { REF_COLORS } from "../formula";
 import { MAX_SCROLL_PX, normalize, type Pos, type Range } from "./model";
 import type { CellData, GridSource, Merge } from "./sources";
+import { fitGeneral } from "./general";
+
+/** Fitted General texts, by value, font and room. */
+const generalCache = new Map<string, string | null>();
 
 export interface Selection {
   anchor: Pos;
@@ -488,6 +492,18 @@ export function Grid(props: Props) {
         let text = cell.text;
         let clipX = rect.x;
         let clipW = rect.w;
+        // A General number takes the digits the column has room for, as in Excel.
+        if (cell.general !== undefined && !st?.wrap && !it.merge) {
+          const room = rect.w - 2 * pad;
+          const key = `${cell.general}|${ctx.font}|${Math.round(room)}`;
+          let fitted = generalCache.get(key);
+          if (fitted === undefined) {
+            fitted = fitGeneral(cell.general, (t) => ctx.measureText(t).width <= room);
+            if (generalCache.size > 20000) generalCache.clear();
+            generalCache.set(key, fitted);
+          }
+          if (fitted !== null) text = fitted;
+        }
         const measured = ctx.measureText(text).width;
         if (cell.numeric && !st?.wrap && !it.merge && measured > rect.w - 2 * pad) {
           // Numbers never spill: Excel shows #### when they do not fit.

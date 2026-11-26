@@ -383,6 +383,8 @@ export interface CellView {
   bridge: boolean;
   link?: boolean;
   style?: CellStyle;
+  /** The number, when shown in the General format: fitted to the column width. */
+  general?: number;
 }
 
 export interface Viewport {

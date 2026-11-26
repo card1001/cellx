@@ -168,6 +168,11 @@ pub struct CellView {
     pub link: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style: Option<CellStyle>,
+    /// The number, when the cell shows it in the General format: the grid
+    /// fits it to the column width as Excel does (fewer decimals, then
+    /// scientific notation) instead of cutting it to 11 characters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub general: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1560,10 +1565,22 @@ impl Workbook {
                 if text.is_empty() && style.is_none() {
                     continue;
                 }
+                let general = match scalar {
+                    Scalar::Number(n)
+                        if self
+                            .model()
+                            .get_style_for_cell(sheet, row, col)
+                            .is_ok_and(|s| s.num_fmt.is_empty() || s.num_fmt.eq_ignore_ascii_case("general")) =>
+                    {
+                        Some(n)
+                    }
+                    _ => None,
+                };
                 cells.push(CellView {
                     row,
                     col,
                     text,
+                    general,
                     numeric: matches!(scalar, Scalar::Number(_)),
                     error: matches!(scalar, Scalar::Error(_)),
                     bridge: self.bridges.contains_key(&(sheet, row, col)),

@@ -33,6 +33,7 @@ impl Workbook {
                 cell.text = self.input(sheet, cell.row, cell.col).unwrap_or(formula);
                 cell.numeric = false;
                 cell.error = false;
+                cell.general = None;
             }
         }
         Ok(view)
