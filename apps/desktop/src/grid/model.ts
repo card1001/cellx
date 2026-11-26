@@ -1,3 +1,4 @@
+import { getActiveLocale } from "../i18n";
 // Pure helpers shared by the grid and the app. Kept free of React so they are easy to test.
 
 export const MAX_ROWS = 1_048_576;
@@ -145,5 +146,5 @@ export function startsEdit(e: { key: string; ctrlKey: boolean; metaKey: boolean;
 }
 
 export function formatCount(n: number): string {
-  return new Intl.NumberFormat("en-US").format(n);
+  return new Intl.NumberFormat(getActiveLocale()).format(n);
 }
