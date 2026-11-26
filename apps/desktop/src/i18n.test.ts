@@ -33,6 +33,15 @@ describe("locale selection", () => {
     expect(translateText("zh-CN", "내보냈습니다: data.csv")).toBe("已导出： data.csv");
   });
 
+  it("translates additional command labels in all supported locales", () => {
+    expect(translateText("en-US", "찾기...")).toBe("Find...");
+    expect(translateText("ja-JP", "찾기...")).toBe("検索...");
+    expect(translateText("zh-CN", "찾기...")).toBe("查找...");
+    expect(translateText("zh-TW", "찾기...")).toBe("尋找...");
+    expect(translateText("ja-JP", "선택하여 붙여넣기...")).toBe("形式を選択して貼り付け...");
+    expect(translateText("zh-TW", "첫 행 고정")).toBe("凍結頂端列");
+  });
+
   it("falls back to the source text for untranslated labels", () => {
     expect(translateText("en-US", "A user-defined label")).toBe("A user-defined label");
     expect(translateText("ja-JP", "A user-defined label")).toBe("A user-defined label");
