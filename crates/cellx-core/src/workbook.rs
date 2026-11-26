@@ -1927,4 +1927,15 @@ mod tests {
         assert_eq!(reopened.value(0, 2, 1).unwrap(), Scalar::Number(325.0));
         std::fs::remove_dir_all(&dir).ok();
     }
+    #[test]
+    fn bridge_cache_does_not_survive_table_drop_and_recreation() {
+        let mut wb = book();
+        wb.set_input(0, 1, 1, "=SUM(sales[amount])").unwrap();
+        assert_eq!(wb.value(0, 1, 1).unwrap(), Scalar::Number(650.0));
+
+        wb.drop_table("sales").unwrap();
+        wb.create_table_from_query("sales", "SELECT 7.0::DOUBLE AS amount").unwrap();
+        assert_eq!(wb.value(0, 1, 1).unwrap(), Scalar::Number(7.0));
+    }
+
 }

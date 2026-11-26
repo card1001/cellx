@@ -428,10 +428,18 @@ fn parse_args(inner: &str) -> Result<Vec<Arg>> {
 
 /// Parses `B4`, `$B$4` into (row, column), both 1-based.
 pub fn parse_a1(s: &str) -> Option<(i32, i32)> {
-    let s = s.replace('$', "");
+    // Excel permits an optional absolute marker before the column and/or row:
+    // A1, $A1, A$1 and $A$1. Reject misplaced or repeated markers.
+    let s = s.strip_prefix('$').unwrap_or(s);
     let split = s.find(|c: char| c.is_ascii_digit())?;
     let (letters, digits) = s.split_at(split);
-    if letters.is_empty() || letters.len() > 3 || !letters.chars().all(|c| c.is_ascii_alphabetic()) {
+    let letters = letters.strip_suffix('$').unwrap_or(letters);
+    if letters.is_empty()
+        || letters.len() > 3
+        || !letters.chars().all(|c| c.is_ascii_alphabetic())
+        || digits.is_empty()
+        || !digits.chars().all(|c| c.is_ascii_digit())
+    {
         return None;
     }
     let row: i32 = digits.parse().ok()?;
@@ -439,7 +447,8 @@ pub fn parse_a1(s: &str) -> Option<(i32, i32)> {
     for c in letters.to_ascii_uppercase().chars() {
         column = column * 26 + (c as i32 - 'A' as i32 + 1);
     }
-    (row >= 1 && row <= 1_048_576 && column <= 16_384).then_some((row, column))
+    (row >= 1 && row <= 1_048_576 && column >= 1 && column <= 16_384)
+        .then_some((row, column))
 }
 
 // ---------------------------------------------------------------- evaluation
@@ -873,4 +882,15 @@ mod tests {
             .unwrap();
         assert!(compile(&call, &mut s, &NoCells).is_err());
     }
+
+    #[test]
+    fn parses_only_valid_a1_absolute_reference_forms() {
+        for address in ["A1", "$A1", "A$1", "$A$1", "XFD1048576"] {
+            assert!(parse_a1(address).is_some(), "{address}");
+        }
+        for address in ["", "A0", "XFE1", "A1048577", "A$$1", "$$A1", "A$-1", "A1x", "1A"] {
+            assert_eq!(parse_a1(address), None, "{address}");
+        }
+    }
+
 }

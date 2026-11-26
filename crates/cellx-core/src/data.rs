@@ -92,6 +92,9 @@ pub struct DataStore {
     schema_cache: HashMap<String, TableInfo>,
     /// Bumped on every change to a table; lets the bridge invalidate cached results.
     versions: HashMap<String, u64>,
+    /// Monotonic generation across table creation, replacement and deletion.
+    /// Prevents a dropped/recreated table from reusing an old cache version.
+    version_clock: u64,
 }
 
 pub fn quote_ident(name: &str) -> String {
@@ -128,9 +131,11 @@ impl DataStore {
             conn,
             schema_cache: HashMap::new(),
             versions: HashMap::new(),
+            version_clock: 0,
         };
         for name in store.table_names()? {
-            store.versions.insert(name, 1);
+            store.version_clock = store.version_clock.saturating_add(1);
+            store.versions.insert(name, store.version_clock);
         }
         Ok(store)
     }
@@ -217,16 +222,19 @@ impl DataStore {
     }
 
     pub fn drop_table(&mut self, table: &str) -> Result<()> {
+        let canonical = self.canonical_table(table).unwrap_or_else(|| table.to_string());
         self.conn
             .execute_batch(&format!("DROP TABLE IF EXISTS {}", quote_ident(table)))?;
-        self.versions.remove(table);
-        self.schema_cache.remove(table);
+        self.versions.remove(&canonical);
+        self.schema_cache.remove(&canonical);
         Ok(())
     }
 
     fn touch(&mut self, table: &str) {
-        *self.versions.entry(table.to_string()).or_insert(0) += 1;
-        self.schema_cache.remove(table);
+        let canonical = self.canonical_table(table).unwrap_or_else(|| table.to_string());
+        self.version_clock = self.version_clock.saturating_add(1);
+        self.versions.insert(canonical.clone(), self.version_clock);
+        self.schema_cache.remove(&canonical);
     }
 
     pub fn table_info(&mut self, table: &str) -> Result<TableInfo> {
@@ -555,5 +563,15 @@ mod tests {
         assert!(s.version("sales") > before);
         let v = s.scalar("SELECT amount FROM sales WHERE _rid = 1", &[]).unwrap();
         assert_eq!(v, Scalar::Number(111.0));
+    }
+    
+    #[test]
+    fn recreated_table_never_reuses_a_cache_generation() {
+        let mut s = store_with_sales();
+        let before = s.version("sales");
+        s.drop_table("SALES").unwrap();
+        s.create_table_from_sql("sales", "SELECT 1 AS amount").unwrap();
+        let after = s.version("sales");
+        assert!(after > before, "drop/recreate must advance the generation");
     }
 }
