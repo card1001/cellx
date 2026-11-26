@@ -382,7 +382,13 @@ export default function App() {
   useEffect(() => {
     if (!isTauri()) return;
     const id = window.setInterval(() => {
-      if (infoRef.current?.dirty) void api.autosave().catch(() => {});
+      if (infoRef.current?.dirty) {
+        void api.autosave().catch((error) => {
+          // A failed recovery write must be visible; silently swallowing it
+          // would give the user a false sense that unsaved work is protected.
+          fail(`자동 복구 파일을 저장하지 못했습니다: ${errorText(error)}`);
+        });
+      }
     }, 3 * 60 * 1000);
     return () => window.clearInterval(id);
   }, []);
