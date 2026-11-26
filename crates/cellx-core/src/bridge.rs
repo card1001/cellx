@@ -428,10 +428,1320 @@ fn parse_args(inner: &str) -> Result<Vec<Arg>> {
 
 /// Parses `B4`, `$B$4` into (row, column), both 1-based.
 pub fn parse_a1(s: &str) -> Option<(i32, i32)> {
-    let s = s.replace('$', "");
+    // Excel permits an optional absolute marker before the column and/or row:
+    // A1, $A1, A$1 and $A$1. Do not silently accept misplaced/repeated '
+
+// ---------------------------------------------------------------- evaluation
+
+/// Resolves cell references to their current values in the calculation engine.
+pub trait CellResolver {
+    fn cell_value(&self, cell: &CellRef) -> Scalar;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Resolved {
+    Value(Scalar),
+    Column(ColumnInfo, String), // column + canonical table
+}
+
+fn resolve_arg(arg: &Arg, store: &mut DataStore, cells: &dyn CellResolver) -> Result<Resolved> {
+    if arg.0.len() == 1 {
+        if let Term::Column { table, column } = &arg.0[0] {
+            let canonical = store
+                .canonical_table(table)
+                .ok_or_else(|| CellxError::UnknownTable(table.clone()))?;
+            let col = store.column(&canonical, column)?;
+            return Ok(Resolved::Column(col, canonical));
+        }
+    }
+    let mut values = Vec::new();
+    for t in &arg.0 {
+        values.push(match t {
+            Term::Str(s) => Scalar::Text(s.clone()),
+            Term::Num(n) => Scalar::Number(*n),
+            Term::Bool(b) => Scalar::Bool(*b),
+            Term::Cell(c) => cells.cell_value(c),
+            Term::Column { table, column } => {
+                return Err(CellxError::Bridge(format!(
+                    "{table}[{column}]는 & 연결에 쓸 수 없습니다"
+                )))
+            }
+        });
+    }
+    if values.len() == 1 {
+        return Ok(Resolved::Value(values.remove(0)));
+    }
+    if let Some(e) = values.iter().find(|v| matches!(v, Scalar::Error(_))) {
+        return Ok(Resolved::Value(e.clone()));
+    }
+    Ok(Resolved::Value(Scalar::Text(
+        values.iter().map(|v| v.as_criterion_text()).collect::<String>(),
+    )))
+}
+
+/// The SQL a bridge call will run, plus its parameters. Also used as the cache key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompiledCall {
+    pub sql: String,
+    pub params: Vec<Value>,
+    pub tables: Vec<String>,
+    pub kind: CallKind,
+    /// Value returned when the query yields NULL / no row.
+    pub if_empty: Scalar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CallKind {
+    Scalar,
+    Table,
+}
+
+impl CompiledCall {
+    pub fn cache_key(&self) -> String {
+        format!("{}\u{1f}{:?}", self.sql, self.params)
+    }
+}
+
+fn expect_column(r: Resolved, function: &str, index: usize) -> Result<(ColumnInfo, String)> {
+    match r {
+        Resolved::Column(c, t) => Ok((c, t)),
+        Resolved::Value(_) => Err(CellxError::Bridge(format!(
+            "{function}의 {}번째 인수는 표[열] 형식이어야 합니다",
+            index + 1
+        ))),
+    }
+}
+
+fn expect_value(r: Resolved, function: &str, index: usize) -> Result<Scalar> {
+    match r {
+        Resolved::Value(v) => Ok(v),
+        Resolved::Column(..) => Err(CellxError::Bridge(format!(
+            "{function}의 {}번째 인수는 값이어야 합니다",
+            index + 1
+        ))),
+    }
+}
+
+/// Compiles a bridge call to SQL, resolving cell references through `cells`.
+pub fn compile(call: &BridgeCall, store: &mut DataStore, cells: &dyn CellResolver) -> Result<CompiledCall> {
+    let f = call.function.as_str();
+    if f == "DQUERY" {
+        if call.args.len() != 1 {
+            return Err(CellxError::Bridge("DQUERY는 SQL 문자열 하나를 받습니다".into()));
+        }
+        let sql = match resolve_arg(&call.args[0], store, cells)? {
+            Resolved::Value(Scalar::Text(s)) => s,
+            _ => return Err(CellxError::Bridge("DQUERY의 인수는 SQL 문자열이어야 합니다".into())),
+        };
+        store.validate_user_select(&sql)?;
+        let tables = store.table_names()?;
+        return Ok(CompiledCall {
+            sql: format!("SELECT * FROM ({}) AS _q", sql.trim().trim_end_matches(';')),
+            params: vec![],
+            tables,
+            kind: CallKind::Table,
+            if_empty: Scalar::Error("#CALC!".into()),
+        });
+    }
+
+    let mut resolved = Vec::with_capacity(call.args.len());
+    for a in &call.args {
+        resolved.push(resolve_arg(a, store, cells)?);
+    }
+    let arity = |min: usize, max: usize| -> Result<()> {
+        if resolved.len() < min || resolved.len() > max {
+            Err(CellxError::Bridge(format!("{f}의 인수 개수가 맞지 않습니다")))
+        } else {
+            Ok(())
+        }
+    };
+
+    let mut table: Option<String> = None;
+    let mut use_table = |t: &str| -> Result<()> {
+        match &table {
+            Some(existing) if existing != t => Err(CellxError::Bridge(format!(
+                "{f}의 범위는 모두 같은 데이터 시트에 있어야 합니다 ({existing}, {t})"
+            ))),
+            _ => {
+                table = Some(t.to_string());
+                Ok(())
+            }
+        }
+    };
+
+    let mut where_parts: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
+    let mut add_criterion = |col: &ColumnInfo, crit: &Scalar| {
+        let (sql, mut p) = criterion_sql(col, crit);
+        where_parts.push(sql);
+        params.append(&mut p);
+    };
+
+    let (select, if_empty) = match f {
+        "SUM" | "COUNT" | "COUNTA" | "AVERAGE" | "MIN" | "MAX" => {
+            arity(1, 1)?;
+            let (col, t) = expect_column(resolved.remove(0), f, 0)?;
+            use_table(&t)?;
+            let num = numeric_expr(&col);
+            let c = quote_ident(&col.name);
+            match f {
+                "SUM" => (format!("SUM({num})"), Scalar::Number(0.0)),
+                "COUNT" => (format!("COUNT({num})"), Scalar::Number(0.0)),
+                "COUNTA" => (
+                    format!("COUNT(CASE WHEN {c} IS NOT NULL AND CAST({c} AS VARCHAR) <> '' THEN 1 END)"),
+                    Scalar::Number(0.0),
+                ),
+                "AVERAGE" => (format!("AVG({num})"), Scalar::Error("#DIV/0!".into())),
+                "MIN" => (format!("MIN({num})"), Scalar::Number(0.0)),
+                _ => (format!("MAX({num})"), Scalar::Number(0.0)),
+            }
+        }
+        "COUNTIF" | "SUMIF" | "AVERAGEIF" => {
+            arity(2, if f == "COUNTIF" { 2 } else { 3 })?;
+            let (crit_col, t) = expect_column(resolved.remove(0), f, 0)?;
+            use_table(&t)?;
+            let crit = expect_value(resolved.remove(0), f, 1)?;
+            add_criterion(&crit_col, &crit);
+            let target = if resolved.is_empty() {
+                crit_col
+            } else {
+                let (c, t2) = expect_column(resolved.remove(0), f, 2)?;
+                use_table(&t2)?;
+                c
+            };
+            match f {
+                "COUNTIF" => ("COUNT(*)".to_string(), Scalar::Number(0.0)),
+                "SUMIF" => (format!("SUM({})", numeric_expr(&target)), Scalar::Number(0.0)),
+                _ => (format!("AVG({})", numeric_expr(&target)), Scalar::Error("#DIV/0!".into())),
+            }
+        }
+        "COUNTIFS" | "SUMIFS" | "AVERAGEIFS" | "MINIFS" | "MAXIFS" => {
+            let has_target = f != "COUNTIFS";
+            let min = if has_target { 3 } else { 2 };
+            if resolved.len() < min || (resolved.len() - usize::from(has_target)) % 2 != 0 {
+                return Err(CellxError::Bridge(format!("{f}의 인수 개수가 맞지 않습니다")));
+            }
+            let target = if has_target {
+                let (c, t) = expect_column(resolved.remove(0), f, 0)?;
+                use_table(&t)?;
+                Some(c)
+            } else {
+                None
+            };
+            let offset = usize::from(has_target);
+            let mut i = 0;
+            while !resolved.is_empty() {
+                let (col, t) = expect_column(resolved.remove(0), f, offset + i)?;
+                use_table(&t)?;
+                let crit = expect_value(resolved.remove(0), f, offset + i + 1)?;
+                if let Scalar::Error(e) = &crit {
+                    return Ok(constant(Scalar::Error(e.clone())));
+                }
+                add_criterion(&col, &crit);
+                i += 2;
+            }
+            match (f, target) {
+                ("COUNTIFS", _) => ("COUNT(*)".to_string(), Scalar::Number(0.0)),
+                ("SUMIFS", Some(c)) => (format!("SUM({})", numeric_expr(&c)), Scalar::Number(0.0)),
+                ("AVERAGEIFS", Some(c)) => {
+                    (format!("AVG({})", numeric_expr(&c)), Scalar::Error("#DIV/0!".into()))
+                }
+                ("MINIFS", Some(c)) => (format!("MIN({})", numeric_expr(&c)), Scalar::Number(0.0)),
+                (_, Some(c)) => (format!("MAX({})", numeric_expr(&c)), Scalar::Number(0.0)),
+                _ => unreachable!(),
+            }
+        }
+        "XLOOKUP" => {
+            arity(3, 4)?;
+            let key = expect_value(resolved.remove(0), f, 0)?;
+            let (key_col, t) = expect_column(resolved.remove(0), f, 1)?;
+            use_table(&t)?;
+            let (ret_col, t2) = expect_column(resolved.remove(0), f, 2)?;
+            use_table(&t2)?;
+            let not_found = if resolved.is_empty() {
+                Scalar::Error("#N/A".into())
+            } else {
+                expect_value(resolved.remove(0), f, 3)?
+            };
+            // XLOOKUP matches exactly: no wildcards, no operators.
+            let exact = match &key {
+                Scalar::Text(s) => Scalar::Text(format!("={}", s.replace('~', "~~").replace('*', "~*").replace('?', "~?"))),
+                other => other.clone(),
+            };
+            add_criterion(&key_col, &exact);
+            let t = table.clone().unwrap_or_default();
+            let sql = format!(
+                "SELECT {c} FROM {tbl} WHERE {w} ORDER BY _rid LIMIT 1",
+                c = quote_ident(&ret_col.name),
+                tbl = quote_ident(&t),
+                w = where_parts.join(" AND ")
+            );
+            return Ok(CompiledCall {
+                sql,
+                params,
+                tables: vec![t],
+                kind: CallKind::Scalar,
+                if_empty: not_found,
+            });
+        }
+        other => return Err(CellxError::Bridge(format!("{other}는 데이터 시트에서 지원하지 않습니다"))),
+    };
+
+    let t = table.ok_or_else(|| CellxError::Bridge(format!("{f}에 데이터 시트 범위가 없습니다")))?;
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_parts.join(" AND "))
+    };
+    Ok(CompiledCall {
+        sql: format!("SELECT {select} FROM {}{where_clause}", quote_ident(&t)),
+        params,
+        tables: vec![t],
+        kind: CallKind::Scalar,
+        if_empty,
+    })
+}
+
+fn constant(v: Scalar) -> CompiledCall {
+    CompiledCall {
+        sql: String::new(),
+        params: vec![],
+        tables: vec![],
+        kind: CallKind::Scalar,
+        if_empty: v,
+    }
+}
+
+/// Runs a compiled call.
+pub fn execute(compiled: &CompiledCall, store: &DataStore) -> Result<BridgeValue> {
+    if compiled.sql.is_empty() {
+        return Ok(BridgeValue::Scalar(compiled.if_empty.clone()));
+    }
+    match compiled.kind {
+        CallKind::Scalar => {
+            let v = store.scalar(&compiled.sql, &compiled.params)?;
+            Ok(BridgeValue::Scalar(if v == Scalar::Empty {
+                compiled.if_empty.clone()
+            } else {
+                v
+            }))
+        }
+        CallKind::Table => {
+            let (names, rows, truncated) = store.rows(&compiled.sql, &compiled.params, DQUERY_MAX_ROWS)?;
+            if truncated {
+                return Err(CellxError::Bridge(format!(
+                    "DQUERY 결과가 {DQUERY_MAX_ROWS}행을 넘습니다. 집계하거나 LIMIT를 지정하세요"
+                )));
+            }
+            let mut out = vec![names.into_iter().map(Scalar::Text).collect::<Vec<_>>()];
+            out.extend(rows);
+            Ok(BridgeValue::Array(out))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoCells;
+    impl CellResolver for NoCells {
+        fn cell_value(&self, c: &CellRef) -> Scalar {
+            if c.row == 1 && c.column == 2 {
+                Scalar::Text("서울".into())
+            } else if c.row == 2 && c.column == 2 {
+                Scalar::Number(46023.0) // 2026-01-01
+            } else {
+                Scalar::Empty
+            }
+        }
+    }
+
+    fn store() -> DataStore {
+        let mut s = DataStore::open_in_memory().unwrap();
+        s.create_table_from_sql(
+            "sales",
+            "SELECT * FROM (VALUES
+                (1, '서울', 100.0::DOUBLE, DATE '2025-12-31', '정상'),
+                (2, '부산', 250.0, DATE '2026-02-01', '취소'),
+                (3, '서울', 300.0, DATE '2026-03-10', '정상'),
+                (4, '대구', NULL,  DATE '2026-03-11', '정상'),
+                (5, '서울특별시', 50.0, DATE '2026-04-01', NULL)
+             ) AS t(order_id, region, amount, order_date, status)",
+        )
+        .unwrap();
+        s
+    }
+
+    fn run(formula: &str) -> BridgeValue {
+        let mut s = store();
+        let calls = find_calls(formula, &|n| n.eq_ignore_ascii_case("sales"));
+        assert_eq!(calls.len(), 1, "{formula}");
+        let call = calls.into_iter().next().unwrap().unwrap();
+        let compiled = compile(&call, &mut s, &NoCells).unwrap();
+        execute(&compiled, &s).unwrap()
+    }
+
+    fn num(v: BridgeValue) -> f64 {
+        match v {
+            BridgeValue::Scalar(Scalar::Number(n)) => n,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn finds_calls_inside_regular_formulas() {
+        let f = "=ROUND(SUMIFS(sales[amount], sales[region], \"서울\"), 0) + SUM(A1:A3)";
+        let calls = find_calls(f, &|n| n == "sales");
+        assert_eq!(calls.len(), 1);
+        let c = calls[0].as_ref().unwrap();
+        assert_eq!(&f[c.span.0..c.span.1], "SUMIFS(sales[amount], sales[region], \"서울\")");
+        // SUM(A1:A3) is a normal range and stays with the calculation engine.
+        assert!(find_calls("=SUM(A1:A3)", &|n| n == "sales").is_empty());
+    }
+
+    #[test]
+    fn aggregates() {
+        assert_eq!(num(run("=SUM(sales[amount])")), 700.0);
+        assert_eq!(num(run("=COUNT(sales[amount])")), 4.0);
+        assert_eq!(num(run("=COUNTA(sales[status])")), 4.0);
+        assert_eq!(num(run("=AVERAGE(sales[amount])")), 175.0);
+        assert_eq!(num(run("=MAX(sales[amount])")), 300.0);
+    }
+
+    #[test]
+    fn criteria_functions() {
+        assert_eq!(num(run("=SUMIFS(sales[amount], sales[region], B1)")), 400.0);
+        assert_eq!(num(run("=SUMIFS(sales[amount], sales[region], \"서울*\")")), 450.0);
+        assert_eq!(num(run("=COUNTIFS(sales[status], \"<>취소\")")), 4.0);
+        assert_eq!(num(run("=SUMIFS(sales[amount], sales[order_date], \">=\"&B2)")), 600.0);
+        assert_eq!(num(run("=COUNTIF(sales[amount], \">=250\")")), 2.0);
+        assert_eq!(num(run("=SUMIF(sales[region], \"부산\", sales[amount])")), 250.0);
+        assert_eq!(num(run("=MINIFS(sales[amount], sales[region], \"서울\")")), 100.0);
+        assert_eq!(
+            run("=AVERAGEIFS(sales[amount], sales[region], \"제주\")"),
+            BridgeValue::Scalar(Scalar::Error("#DIV/0!".into()))
+        );
+    }
+
+    #[test]
+    fn xlookup_exact_match() {
+        assert_eq!(
+            run("=XLOOKUP(3, sales[order_id], sales[region])"),
+            BridgeValue::Scalar(Scalar::Text("서울".into()))
+        );
+        assert_eq!(
+            run("=XLOOKUP(99, sales[order_id], sales[region])"),
+            BridgeValue::Scalar(Scalar::Error("#N/A".into()))
+        );
+        assert_eq!(
+            run("=XLOOKUP(\"서울*\", sales[region], sales[order_id], \"없음\")"),
+            BridgeValue::Scalar(Scalar::Text("없음".into()))
+        );
+    }
+
+    #[test]
+    fn dquery_spills_with_header() {
+        let v = run("=DQUERY(\"SELECT region, SUM(amount) AS total FROM sales GROUP BY 1 ORDER BY 1\")");
+        match &v {
+            BridgeValue::Array(rows) => {
+                assert_eq!(rows[0], vec![Scalar::Text("region".into()), Scalar::Text("total".into())]);
+                assert_eq!(rows.len(), 5);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(v.to_formula_literal().starts_with("{\"region\",\"total\";"));
+    }
+
+    #[test]
+    fn mixed_tables_are_rejected() {
+        let mut s = store();
+        s.create_table_from_sql("other", "SELECT 1 AS x").unwrap();
+        let call = find_calls("=SUMIFS(sales[amount], other[x], 1)", &|_| true)
+            .remove(0)
+            .unwrap();
+        assert!(compile(&call, &mut s, &NoCells).is_err());
+    }
+}
+.
+    let s = s.strip_prefix('
+
+// ---------------------------------------------------------------- evaluation
+
+/// Resolves cell references to their current values in the calculation engine.
+pub trait CellResolver {
+    fn cell_value(&self, cell: &CellRef) -> Scalar;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Resolved {
+    Value(Scalar),
+    Column(ColumnInfo, String), // column + canonical table
+}
+
+fn resolve_arg(arg: &Arg, store: &mut DataStore, cells: &dyn CellResolver) -> Result<Resolved> {
+    if arg.0.len() == 1 {
+        if let Term::Column { table, column } = &arg.0[0] {
+            let canonical = store
+                .canonical_table(table)
+                .ok_or_else(|| CellxError::UnknownTable(table.clone()))?;
+            let col = store.column(&canonical, column)?;
+            return Ok(Resolved::Column(col, canonical));
+        }
+    }
+    let mut values = Vec::new();
+    for t in &arg.0 {
+        values.push(match t {
+            Term::Str(s) => Scalar::Text(s.clone()),
+            Term::Num(n) => Scalar::Number(*n),
+            Term::Bool(b) => Scalar::Bool(*b),
+            Term::Cell(c) => cells.cell_value(c),
+            Term::Column { table, column } => {
+                return Err(CellxError::Bridge(format!(
+                    "{table}[{column}]는 & 연결에 쓸 수 없습니다"
+                )))
+            }
+        });
+    }
+    if values.len() == 1 {
+        return Ok(Resolved::Value(values.remove(0)));
+    }
+    if let Some(e) = values.iter().find(|v| matches!(v, Scalar::Error(_))) {
+        return Ok(Resolved::Value(e.clone()));
+    }
+    Ok(Resolved::Value(Scalar::Text(
+        values.iter().map(|v| v.as_criterion_text()).collect::<String>(),
+    )))
+}
+
+/// The SQL a bridge call will run, plus its parameters. Also used as the cache key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompiledCall {
+    pub sql: String,
+    pub params: Vec<Value>,
+    pub tables: Vec<String>,
+    pub kind: CallKind,
+    /// Value returned when the query yields NULL / no row.
+    pub if_empty: Scalar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CallKind {
+    Scalar,
+    Table,
+}
+
+impl CompiledCall {
+    pub fn cache_key(&self) -> String {
+        format!("{}\u{1f}{:?}", self.sql, self.params)
+    }
+}
+
+fn expect_column(r: Resolved, function: &str, index: usize) -> Result<(ColumnInfo, String)> {
+    match r {
+        Resolved::Column(c, t) => Ok((c, t)),
+        Resolved::Value(_) => Err(CellxError::Bridge(format!(
+            "{function}의 {}번째 인수는 표[열] 형식이어야 합니다",
+            index + 1
+        ))),
+    }
+}
+
+fn expect_value(r: Resolved, function: &str, index: usize) -> Result<Scalar> {
+    match r {
+        Resolved::Value(v) => Ok(v),
+        Resolved::Column(..) => Err(CellxError::Bridge(format!(
+            "{function}의 {}번째 인수는 값이어야 합니다",
+            index + 1
+        ))),
+    }
+}
+
+/// Compiles a bridge call to SQL, resolving cell references through `cells`.
+pub fn compile(call: &BridgeCall, store: &mut DataStore, cells: &dyn CellResolver) -> Result<CompiledCall> {
+    let f = call.function.as_str();
+    if f == "DQUERY" {
+        if call.args.len() != 1 {
+            return Err(CellxError::Bridge("DQUERY는 SQL 문자열 하나를 받습니다".into()));
+        }
+        let sql = match resolve_arg(&call.args[0], store, cells)? {
+            Resolved::Value(Scalar::Text(s)) => s,
+            _ => return Err(CellxError::Bridge("DQUERY의 인수는 SQL 문자열이어야 합니다".into())),
+        };
+        store.validate_user_select(&sql)?;
+        let tables = store.table_names()?;
+        return Ok(CompiledCall {
+            sql: format!("SELECT * FROM ({}) AS _q", sql.trim().trim_end_matches(';')),
+            params: vec![],
+            tables,
+            kind: CallKind::Table,
+            if_empty: Scalar::Error("#CALC!".into()),
+        });
+    }
+
+    let mut resolved = Vec::with_capacity(call.args.len());
+    for a in &call.args {
+        resolved.push(resolve_arg(a, store, cells)?);
+    }
+    let arity = |min: usize, max: usize| -> Result<()> {
+        if resolved.len() < min || resolved.len() > max {
+            Err(CellxError::Bridge(format!("{f}의 인수 개수가 맞지 않습니다")))
+        } else {
+            Ok(())
+        }
+    };
+
+    let mut table: Option<String> = None;
+    let mut use_table = |t: &str| -> Result<()> {
+        match &table {
+            Some(existing) if existing != t => Err(CellxError::Bridge(format!(
+                "{f}의 범위는 모두 같은 데이터 시트에 있어야 합니다 ({existing}, {t})"
+            ))),
+            _ => {
+                table = Some(t.to_string());
+                Ok(())
+            }
+        }
+    };
+
+    let mut where_parts: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
+    let mut add_criterion = |col: &ColumnInfo, crit: &Scalar| {
+        let (sql, mut p) = criterion_sql(col, crit);
+        where_parts.push(sql);
+        params.append(&mut p);
+    };
+
+    let (select, if_empty) = match f {
+        "SUM" | "COUNT" | "COUNTA" | "AVERAGE" | "MIN" | "MAX" => {
+            arity(1, 1)?;
+            let (col, t) = expect_column(resolved.remove(0), f, 0)?;
+            use_table(&t)?;
+            let num = numeric_expr(&col);
+            let c = quote_ident(&col.name);
+            match f {
+                "SUM" => (format!("SUM({num})"), Scalar::Number(0.0)),
+                "COUNT" => (format!("COUNT({num})"), Scalar::Number(0.0)),
+                "COUNTA" => (
+                    format!("COUNT(CASE WHEN {c} IS NOT NULL AND CAST({c} AS VARCHAR) <> '' THEN 1 END)"),
+                    Scalar::Number(0.0),
+                ),
+                "AVERAGE" => (format!("AVG({num})"), Scalar::Error("#DIV/0!".into())),
+                "MIN" => (format!("MIN({num})"), Scalar::Number(0.0)),
+                _ => (format!("MAX({num})"), Scalar::Number(0.0)),
+            }
+        }
+        "COUNTIF" | "SUMIF" | "AVERAGEIF" => {
+            arity(2, if f == "COUNTIF" { 2 } else { 3 })?;
+            let (crit_col, t) = expect_column(resolved.remove(0), f, 0)?;
+            use_table(&t)?;
+            let crit = expect_value(resolved.remove(0), f, 1)?;
+            add_criterion(&crit_col, &crit);
+            let target = if resolved.is_empty() {
+                crit_col
+            } else {
+                let (c, t2) = expect_column(resolved.remove(0), f, 2)?;
+                use_table(&t2)?;
+                c
+            };
+            match f {
+                "COUNTIF" => ("COUNT(*)".to_string(), Scalar::Number(0.0)),
+                "SUMIF" => (format!("SUM({})", numeric_expr(&target)), Scalar::Number(0.0)),
+                _ => (format!("AVG({})", numeric_expr(&target)), Scalar::Error("#DIV/0!".into())),
+            }
+        }
+        "COUNTIFS" | "SUMIFS" | "AVERAGEIFS" | "MINIFS" | "MAXIFS" => {
+            let has_target = f != "COUNTIFS";
+            let min = if has_target { 3 } else { 2 };
+            if resolved.len() < min || (resolved.len() - usize::from(has_target)) % 2 != 0 {
+                return Err(CellxError::Bridge(format!("{f}의 인수 개수가 맞지 않습니다")));
+            }
+            let target = if has_target {
+                let (c, t) = expect_column(resolved.remove(0), f, 0)?;
+                use_table(&t)?;
+                Some(c)
+            } else {
+                None
+            };
+            let offset = usize::from(has_target);
+            let mut i = 0;
+            while !resolved.is_empty() {
+                let (col, t) = expect_column(resolved.remove(0), f, offset + i)?;
+                use_table(&t)?;
+                let crit = expect_value(resolved.remove(0), f, offset + i + 1)?;
+                if let Scalar::Error(e) = &crit {
+                    return Ok(constant(Scalar::Error(e.clone())));
+                }
+                add_criterion(&col, &crit);
+                i += 2;
+            }
+            match (f, target) {
+                ("COUNTIFS", _) => ("COUNT(*)".to_string(), Scalar::Number(0.0)),
+                ("SUMIFS", Some(c)) => (format!("SUM({})", numeric_expr(&c)), Scalar::Number(0.0)),
+                ("AVERAGEIFS", Some(c)) => {
+                    (format!("AVG({})", numeric_expr(&c)), Scalar::Error("#DIV/0!".into()))
+                }
+                ("MINIFS", Some(c)) => (format!("MIN({})", numeric_expr(&c)), Scalar::Number(0.0)),
+                (_, Some(c)) => (format!("MAX({})", numeric_expr(&c)), Scalar::Number(0.0)),
+                _ => unreachable!(),
+            }
+        }
+        "XLOOKUP" => {
+            arity(3, 4)?;
+            let key = expect_value(resolved.remove(0), f, 0)?;
+            let (key_col, t) = expect_column(resolved.remove(0), f, 1)?;
+            use_table(&t)?;
+            let (ret_col, t2) = expect_column(resolved.remove(0), f, 2)?;
+            use_table(&t2)?;
+            let not_found = if resolved.is_empty() {
+                Scalar::Error("#N/A".into())
+            } else {
+                expect_value(resolved.remove(0), f, 3)?
+            };
+            // XLOOKUP matches exactly: no wildcards, no operators.
+            let exact = match &key {
+                Scalar::Text(s) => Scalar::Text(format!("={}", s.replace('~', "~~").replace('*', "~*").replace('?', "~?"))),
+                other => other.clone(),
+            };
+            add_criterion(&key_col, &exact);
+            let t = table.clone().unwrap_or_default();
+            let sql = format!(
+                "SELECT {c} FROM {tbl} WHERE {w} ORDER BY _rid LIMIT 1",
+                c = quote_ident(&ret_col.name),
+                tbl = quote_ident(&t),
+                w = where_parts.join(" AND ")
+            );
+            return Ok(CompiledCall {
+                sql,
+                params,
+                tables: vec![t],
+                kind: CallKind::Scalar,
+                if_empty: not_found,
+            });
+        }
+        other => return Err(CellxError::Bridge(format!("{other}는 데이터 시트에서 지원하지 않습니다"))),
+    };
+
+    let t = table.ok_or_else(|| CellxError::Bridge(format!("{f}에 데이터 시트 범위가 없습니다")))?;
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_parts.join(" AND "))
+    };
+    Ok(CompiledCall {
+        sql: format!("SELECT {select} FROM {}{where_clause}", quote_ident(&t)),
+        params,
+        tables: vec![t],
+        kind: CallKind::Scalar,
+        if_empty,
+    })
+}
+
+fn constant(v: Scalar) -> CompiledCall {
+    CompiledCall {
+        sql: String::new(),
+        params: vec![],
+        tables: vec![],
+        kind: CallKind::Scalar,
+        if_empty: v,
+    }
+}
+
+/// Runs a compiled call.
+pub fn execute(compiled: &CompiledCall, store: &DataStore) -> Result<BridgeValue> {
+    if compiled.sql.is_empty() {
+        return Ok(BridgeValue::Scalar(compiled.if_empty.clone()));
+    }
+    match compiled.kind {
+        CallKind::Scalar => {
+            let v = store.scalar(&compiled.sql, &compiled.params)?;
+            Ok(BridgeValue::Scalar(if v == Scalar::Empty {
+                compiled.if_empty.clone()
+            } else {
+                v
+            }))
+        }
+        CallKind::Table => {
+            let (names, rows, truncated) = store.rows(&compiled.sql, &compiled.params, DQUERY_MAX_ROWS)?;
+            if truncated {
+                return Err(CellxError::Bridge(format!(
+                    "DQUERY 결과가 {DQUERY_MAX_ROWS}행을 넘습니다. 집계하거나 LIMIT를 지정하세요"
+                )));
+            }
+            let mut out = vec![names.into_iter().map(Scalar::Text).collect::<Vec<_>>()];
+            out.extend(rows);
+            Ok(BridgeValue::Array(out))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoCells;
+    impl CellResolver for NoCells {
+        fn cell_value(&self, c: &CellRef) -> Scalar {
+            if c.row == 1 && c.column == 2 {
+                Scalar::Text("서울".into())
+            } else if c.row == 2 && c.column == 2 {
+                Scalar::Number(46023.0) // 2026-01-01
+            } else {
+                Scalar::Empty
+            }
+        }
+    }
+
+    fn store() -> DataStore {
+        let mut s = DataStore::open_in_memory().unwrap();
+        s.create_table_from_sql(
+            "sales",
+            "SELECT * FROM (VALUES
+                (1, '서울', 100.0::DOUBLE, DATE '2025-12-31', '정상'),
+                (2, '부산', 250.0, DATE '2026-02-01', '취소'),
+                (3, '서울', 300.0, DATE '2026-03-10', '정상'),
+                (4, '대구', NULL,  DATE '2026-03-11', '정상'),
+                (5, '서울특별시', 50.0, DATE '2026-04-01', NULL)
+             ) AS t(order_id, region, amount, order_date, status)",
+        )
+        .unwrap();
+        s
+    }
+
+    fn run(formula: &str) -> BridgeValue {
+        let mut s = store();
+        let calls = find_calls(formula, &|n| n.eq_ignore_ascii_case("sales"));
+        assert_eq!(calls.len(), 1, "{formula}");
+        let call = calls.into_iter().next().unwrap().unwrap();
+        let compiled = compile(&call, &mut s, &NoCells).unwrap();
+        execute(&compiled, &s).unwrap()
+    }
+
+    fn num(v: BridgeValue) -> f64 {
+        match v {
+            BridgeValue::Scalar(Scalar::Number(n)) => n,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn finds_calls_inside_regular_formulas() {
+        let f = "=ROUND(SUMIFS(sales[amount], sales[region], \"서울\"), 0) + SUM(A1:A3)";
+        let calls = find_calls(f, &|n| n == "sales");
+        assert_eq!(calls.len(), 1);
+        let c = calls[0].as_ref().unwrap();
+        assert_eq!(&f[c.span.0..c.span.1], "SUMIFS(sales[amount], sales[region], \"서울\")");
+        // SUM(A1:A3) is a normal range and stays with the calculation engine.
+        assert!(find_calls("=SUM(A1:A3)", &|n| n == "sales").is_empty());
+    }
+
+    #[test]
+    fn aggregates() {
+        assert_eq!(num(run("=SUM(sales[amount])")), 700.0);
+        assert_eq!(num(run("=COUNT(sales[amount])")), 4.0);
+        assert_eq!(num(run("=COUNTA(sales[status])")), 4.0);
+        assert_eq!(num(run("=AVERAGE(sales[amount])")), 175.0);
+        assert_eq!(num(run("=MAX(sales[amount])")), 300.0);
+    }
+
+    #[test]
+    fn criteria_functions() {
+        assert_eq!(num(run("=SUMIFS(sales[amount], sales[region], B1)")), 400.0);
+        assert_eq!(num(run("=SUMIFS(sales[amount], sales[region], \"서울*\")")), 450.0);
+        assert_eq!(num(run("=COUNTIFS(sales[status], \"<>취소\")")), 4.0);
+        assert_eq!(num(run("=SUMIFS(sales[amount], sales[order_date], \">=\"&B2)")), 600.0);
+        assert_eq!(num(run("=COUNTIF(sales[amount], \">=250\")")), 2.0);
+        assert_eq!(num(run("=SUMIF(sales[region], \"부산\", sales[amount])")), 250.0);
+        assert_eq!(num(run("=MINIFS(sales[amount], sales[region], \"서울\")")), 100.0);
+        assert_eq!(
+            run("=AVERAGEIFS(sales[amount], sales[region], \"제주\")"),
+            BridgeValue::Scalar(Scalar::Error("#DIV/0!".into()))
+        );
+    }
+
+    #[test]
+    fn xlookup_exact_match() {
+        assert_eq!(
+            run("=XLOOKUP(3, sales[order_id], sales[region])"),
+            BridgeValue::Scalar(Scalar::Text("서울".into()))
+        );
+        assert_eq!(
+            run("=XLOOKUP(99, sales[order_id], sales[region])"),
+            BridgeValue::Scalar(Scalar::Error("#N/A".into()))
+        );
+        assert_eq!(
+            run("=XLOOKUP(\"서울*\", sales[region], sales[order_id], \"없음\")"),
+            BridgeValue::Scalar(Scalar::Text("없음".into()))
+        );
+    }
+
+    #[test]
+    fn dquery_spills_with_header() {
+        let v = run("=DQUERY(\"SELECT region, SUM(amount) AS total FROM sales GROUP BY 1 ORDER BY 1\")");
+        match &v {
+            BridgeValue::Array(rows) => {
+                assert_eq!(rows[0], vec![Scalar::Text("region".into()), Scalar::Text("total".into())]);
+                assert_eq!(rows.len(), 5);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(v.to_formula_literal().starts_with("{\"region\",\"total\";"));
+    }
+
+    #[test]
+    fn mixed_tables_are_rejected() {
+        let mut s = store();
+        s.create_table_from_sql("other", "SELECT 1 AS x").unwrap();
+        let call = find_calls("=SUMIFS(sales[amount], other[x], 1)", &|_| true)
+            .remove(0)
+            .unwrap();
+        assert!(compile(&call, &mut s, &NoCells).is_err());
+    }
+}
+).unwrap_or(s);
     let split = s.find(|c: char| c.is_ascii_digit())?;
     let (letters, digits) = s.split_at(split);
-    if letters.is_empty() || letters.len() > 3 || !letters.chars().all(|c| c.is_ascii_alphabetic()) {
+    let letters = letters.strip_suffix('
+
+// ---------------------------------------------------------------- evaluation
+
+/// Resolves cell references to their current values in the calculation engine.
+pub trait CellResolver {
+    fn cell_value(&self, cell: &CellRef) -> Scalar;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Resolved {
+    Value(Scalar),
+    Column(ColumnInfo, String), // column + canonical table
+}
+
+fn resolve_arg(arg: &Arg, store: &mut DataStore, cells: &dyn CellResolver) -> Result<Resolved> {
+    if arg.0.len() == 1 {
+        if let Term::Column { table, column } = &arg.0[0] {
+            let canonical = store
+                .canonical_table(table)
+                .ok_or_else(|| CellxError::UnknownTable(table.clone()))?;
+            let col = store.column(&canonical, column)?;
+            return Ok(Resolved::Column(col, canonical));
+        }
+    }
+    let mut values = Vec::new();
+    for t in &arg.0 {
+        values.push(match t {
+            Term::Str(s) => Scalar::Text(s.clone()),
+            Term::Num(n) => Scalar::Number(*n),
+            Term::Bool(b) => Scalar::Bool(*b),
+            Term::Cell(c) => cells.cell_value(c),
+            Term::Column { table, column } => {
+                return Err(CellxError::Bridge(format!(
+                    "{table}[{column}]는 & 연결에 쓸 수 없습니다"
+                )))
+            }
+        });
+    }
+    if values.len() == 1 {
+        return Ok(Resolved::Value(values.remove(0)));
+    }
+    if let Some(e) = values.iter().find(|v| matches!(v, Scalar::Error(_))) {
+        return Ok(Resolved::Value(e.clone()));
+    }
+    Ok(Resolved::Value(Scalar::Text(
+        values.iter().map(|v| v.as_criterion_text()).collect::<String>(),
+    )))
+}
+
+/// The SQL a bridge call will run, plus its parameters. Also used as the cache key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompiledCall {
+    pub sql: String,
+    pub params: Vec<Value>,
+    pub tables: Vec<String>,
+    pub kind: CallKind,
+    /// Value returned when the query yields NULL / no row.
+    pub if_empty: Scalar,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CallKind {
+    Scalar,
+    Table,
+}
+
+impl CompiledCall {
+    pub fn cache_key(&self) -> String {
+        format!("{}\u{1f}{:?}", self.sql, self.params)
+    }
+}
+
+fn expect_column(r: Resolved, function: &str, index: usize) -> Result<(ColumnInfo, String)> {
+    match r {
+        Resolved::Column(c, t) => Ok((c, t)),
+        Resolved::Value(_) => Err(CellxError::Bridge(format!(
+            "{function}의 {}번째 인수는 표[열] 형식이어야 합니다",
+            index + 1
+        ))),
+    }
+}
+
+fn expect_value(r: Resolved, function: &str, index: usize) -> Result<Scalar> {
+    match r {
+        Resolved::Value(v) => Ok(v),
+        Resolved::Column(..) => Err(CellxError::Bridge(format!(
+            "{function}의 {}번째 인수는 값이어야 합니다",
+            index + 1
+        ))),
+    }
+}
+
+/// Compiles a bridge call to SQL, resolving cell references through `cells`.
+pub fn compile(call: &BridgeCall, store: &mut DataStore, cells: &dyn CellResolver) -> Result<CompiledCall> {
+    let f = call.function.as_str();
+    if f == "DQUERY" {
+        if call.args.len() != 1 {
+            return Err(CellxError::Bridge("DQUERY는 SQL 문자열 하나를 받습니다".into()));
+        }
+        let sql = match resolve_arg(&call.args[0], store, cells)? {
+            Resolved::Value(Scalar::Text(s)) => s,
+            _ => return Err(CellxError::Bridge("DQUERY의 인수는 SQL 문자열이어야 합니다".into())),
+        };
+        store.validate_user_select(&sql)?;
+        let tables = store.table_names()?;
+        return Ok(CompiledCall {
+            sql: format!("SELECT * FROM ({}) AS _q", sql.trim().trim_end_matches(';')),
+            params: vec![],
+            tables,
+            kind: CallKind::Table,
+            if_empty: Scalar::Error("#CALC!".into()),
+        });
+    }
+
+    let mut resolved = Vec::with_capacity(call.args.len());
+    for a in &call.args {
+        resolved.push(resolve_arg(a, store, cells)?);
+    }
+    let arity = |min: usize, max: usize| -> Result<()> {
+        if resolved.len() < min || resolved.len() > max {
+            Err(CellxError::Bridge(format!("{f}의 인수 개수가 맞지 않습니다")))
+        } else {
+            Ok(())
+        }
+    };
+
+    let mut table: Option<String> = None;
+    let mut use_table = |t: &str| -> Result<()> {
+        match &table {
+            Some(existing) if existing != t => Err(CellxError::Bridge(format!(
+                "{f}의 범위는 모두 같은 데이터 시트에 있어야 합니다 ({existing}, {t})"
+            ))),
+            _ => {
+                table = Some(t.to_string());
+                Ok(())
+            }
+        }
+    };
+
+    let mut where_parts: Vec<String> = Vec::new();
+    let mut params: Vec<Value> = Vec::new();
+    let mut add_criterion = |col: &ColumnInfo, crit: &Scalar| {
+        let (sql, mut p) = criterion_sql(col, crit);
+        where_parts.push(sql);
+        params.append(&mut p);
+    };
+
+    let (select, if_empty) = match f {
+        "SUM" | "COUNT" | "COUNTA" | "AVERAGE" | "MIN" | "MAX" => {
+            arity(1, 1)?;
+            let (col, t) = expect_column(resolved.remove(0), f, 0)?;
+            use_table(&t)?;
+            let num = numeric_expr(&col);
+            let c = quote_ident(&col.name);
+            match f {
+                "SUM" => (format!("SUM({num})"), Scalar::Number(0.0)),
+                "COUNT" => (format!("COUNT({num})"), Scalar::Number(0.0)),
+                "COUNTA" => (
+                    format!("COUNT(CASE WHEN {c} IS NOT NULL AND CAST({c} AS VARCHAR) <> '' THEN 1 END)"),
+                    Scalar::Number(0.0),
+                ),
+                "AVERAGE" => (format!("AVG({num})"), Scalar::Error("#DIV/0!".into())),
+                "MIN" => (format!("MIN({num})"), Scalar::Number(0.0)),
+                _ => (format!("MAX({num})"), Scalar::Number(0.0)),
+            }
+        }
+        "COUNTIF" | "SUMIF" | "AVERAGEIF" => {
+            arity(2, if f == "COUNTIF" { 2 } else { 3 })?;
+            let (crit_col, t) = expect_column(resolved.remove(0), f, 0)?;
+            use_table(&t)?;
+            let crit = expect_value(resolved.remove(0), f, 1)?;
+            add_criterion(&crit_col, &crit);
+            let target = if resolved.is_empty() {
+                crit_col
+            } else {
+                let (c, t2) = expect_column(resolved.remove(0), f, 2)?;
+                use_table(&t2)?;
+                c
+            };
+            match f {
+                "COUNTIF" => ("COUNT(*)".to_string(), Scalar::Number(0.0)),
+                "SUMIF" => (format!("SUM({})", numeric_expr(&target)), Scalar::Number(0.0)),
+                _ => (format!("AVG({})", numeric_expr(&target)), Scalar::Error("#DIV/0!".into())),
+            }
+        }
+        "COUNTIFS" | "SUMIFS" | "AVERAGEIFS" | "MINIFS" | "MAXIFS" => {
+            let has_target = f != "COUNTIFS";
+            let min = if has_target { 3 } else { 2 };
+            if resolved.len() < min || (resolved.len() - usize::from(has_target)) % 2 != 0 {
+                return Err(CellxError::Bridge(format!("{f}의 인수 개수가 맞지 않습니다")));
+            }
+            let target = if has_target {
+                let (c, t) = expect_column(resolved.remove(0), f, 0)?;
+                use_table(&t)?;
+                Some(c)
+            } else {
+                None
+            };
+            let offset = usize::from(has_target);
+            let mut i = 0;
+            while !resolved.is_empty() {
+                let (col, t) = expect_column(resolved.remove(0), f, offset + i)?;
+                use_table(&t)?;
+                let crit = expect_value(resolved.remove(0), f, offset + i + 1)?;
+                if let Scalar::Error(e) = &crit {
+                    return Ok(constant(Scalar::Error(e.clone())));
+                }
+                add_criterion(&col, &crit);
+                i += 2;
+            }
+            match (f, target) {
+                ("COUNTIFS", _) => ("COUNT(*)".to_string(), Scalar::Number(0.0)),
+                ("SUMIFS", Some(c)) => (format!("SUM({})", numeric_expr(&c)), Scalar::Number(0.0)),
+                ("AVERAGEIFS", Some(c)) => {
+                    (format!("AVG({})", numeric_expr(&c)), Scalar::Error("#DIV/0!".into()))
+                }
+                ("MINIFS", Some(c)) => (format!("MIN({})", numeric_expr(&c)), Scalar::Number(0.0)),
+                (_, Some(c)) => (format!("MAX({})", numeric_expr(&c)), Scalar::Number(0.0)),
+                _ => unreachable!(),
+            }
+        }
+        "XLOOKUP" => {
+            arity(3, 4)?;
+            let key = expect_value(resolved.remove(0), f, 0)?;
+            let (key_col, t) = expect_column(resolved.remove(0), f, 1)?;
+            use_table(&t)?;
+            let (ret_col, t2) = expect_column(resolved.remove(0), f, 2)?;
+            use_table(&t2)?;
+            let not_found = if resolved.is_empty() {
+                Scalar::Error("#N/A".into())
+            } else {
+                expect_value(resolved.remove(0), f, 3)?
+            };
+            // XLOOKUP matches exactly: no wildcards, no operators.
+            let exact = match &key {
+                Scalar::Text(s) => Scalar::Text(format!("={}", s.replace('~', "~~").replace('*', "~*").replace('?', "~?"))),
+                other => other.clone(),
+            };
+            add_criterion(&key_col, &exact);
+            let t = table.clone().unwrap_or_default();
+            let sql = format!(
+                "SELECT {c} FROM {tbl} WHERE {w} ORDER BY _rid LIMIT 1",
+                c = quote_ident(&ret_col.name),
+                tbl = quote_ident(&t),
+                w = where_parts.join(" AND ")
+            );
+            return Ok(CompiledCall {
+                sql,
+                params,
+                tables: vec![t],
+                kind: CallKind::Scalar,
+                if_empty: not_found,
+            });
+        }
+        other => return Err(CellxError::Bridge(format!("{other}는 데이터 시트에서 지원하지 않습니다"))),
+    };
+
+    let t = table.ok_or_else(|| CellxError::Bridge(format!("{f}에 데이터 시트 범위가 없습니다")))?;
+    let where_clause = if where_parts.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", where_parts.join(" AND "))
+    };
+    Ok(CompiledCall {
+        sql: format!("SELECT {select} FROM {}{where_clause}", quote_ident(&t)),
+        params,
+        tables: vec![t],
+        kind: CallKind::Scalar,
+        if_empty,
+    })
+}
+
+fn constant(v: Scalar) -> CompiledCall {
+    CompiledCall {
+        sql: String::new(),
+        params: vec![],
+        tables: vec![],
+        kind: CallKind::Scalar,
+        if_empty: v,
+    }
+}
+
+/// Runs a compiled call.
+pub fn execute(compiled: &CompiledCall, store: &DataStore) -> Result<BridgeValue> {
+    if compiled.sql.is_empty() {
+        return Ok(BridgeValue::Scalar(compiled.if_empty.clone()));
+    }
+    match compiled.kind {
+        CallKind::Scalar => {
+            let v = store.scalar(&compiled.sql, &compiled.params)?;
+            Ok(BridgeValue::Scalar(if v == Scalar::Empty {
+                compiled.if_empty.clone()
+            } else {
+                v
+            }))
+        }
+        CallKind::Table => {
+            let (names, rows, truncated) = store.rows(&compiled.sql, &compiled.params, DQUERY_MAX_ROWS)?;
+            if truncated {
+                return Err(CellxError::Bridge(format!(
+                    "DQUERY 결과가 {DQUERY_MAX_ROWS}행을 넘습니다. 집계하거나 LIMIT를 지정하세요"
+                )));
+            }
+            let mut out = vec![names.into_iter().map(Scalar::Text).collect::<Vec<_>>()];
+            out.extend(rows);
+            Ok(BridgeValue::Array(out))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct NoCells;
+    impl CellResolver for NoCells {
+        fn cell_value(&self, c: &CellRef) -> Scalar {
+            if c.row == 1 && c.column == 2 {
+                Scalar::Text("서울".into())
+            } else if c.row == 2 && c.column == 2 {
+                Scalar::Number(46023.0) // 2026-01-01
+            } else {
+                Scalar::Empty
+            }
+        }
+    }
+
+    fn store() -> DataStore {
+        let mut s = DataStore::open_in_memory().unwrap();
+        s.create_table_from_sql(
+            "sales",
+            "SELECT * FROM (VALUES
+                (1, '서울', 100.0::DOUBLE, DATE '2025-12-31', '정상'),
+                (2, '부산', 250.0, DATE '2026-02-01', '취소'),
+                (3, '서울', 300.0, DATE '2026-03-10', '정상'),
+                (4, '대구', NULL,  DATE '2026-03-11', '정상'),
+                (5, '서울특별시', 50.0, DATE '2026-04-01', NULL)
+             ) AS t(order_id, region, amount, order_date, status)",
+        )
+        .unwrap();
+        s
+    }
+
+    fn run(formula: &str) -> BridgeValue {
+        let mut s = store();
+        let calls = find_calls(formula, &|n| n.eq_ignore_ascii_case("sales"));
+        assert_eq!(calls.len(), 1, "{formula}");
+        let call = calls.into_iter().next().unwrap().unwrap();
+        let compiled = compile(&call, &mut s, &NoCells).unwrap();
+        execute(&compiled, &s).unwrap()
+    }
+
+    fn num(v: BridgeValue) -> f64 {
+        match v {
+            BridgeValue::Scalar(Scalar::Number(n)) => n,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn finds_calls_inside_regular_formulas() {
+        let f = "=ROUND(SUMIFS(sales[amount], sales[region], \"서울\"), 0) + SUM(A1:A3)";
+        let calls = find_calls(f, &|n| n == "sales");
+        assert_eq!(calls.len(), 1);
+        let c = calls[0].as_ref().unwrap();
+        assert_eq!(&f[c.span.0..c.span.1], "SUMIFS(sales[amount], sales[region], \"서울\")");
+        // SUM(A1:A3) is a normal range and stays with the calculation engine.
+        assert!(find_calls("=SUM(A1:A3)", &|n| n == "sales").is_empty());
+    }
+
+    #[test]
+    fn aggregates() {
+        assert_eq!(num(run("=SUM(sales[amount])")), 700.0);
+        assert_eq!(num(run("=COUNT(sales[amount])")), 4.0);
+        assert_eq!(num(run("=COUNTA(sales[status])")), 4.0);
+        assert_eq!(num(run("=AVERAGE(sales[amount])")), 175.0);
+        assert_eq!(num(run("=MAX(sales[amount])")), 300.0);
+    }
+
+    #[test]
+    fn criteria_functions() {
+        assert_eq!(num(run("=SUMIFS(sales[amount], sales[region], B1)")), 400.0);
+        assert_eq!(num(run("=SUMIFS(sales[amount], sales[region], \"서울*\")")), 450.0);
+        assert_eq!(num(run("=COUNTIFS(sales[status], \"<>취소\")")), 4.0);
+        assert_eq!(num(run("=SUMIFS(sales[amount], sales[order_date], \">=\"&B2)")), 600.0);
+        assert_eq!(num(run("=COUNTIF(sales[amount], \">=250\")")), 2.0);
+        assert_eq!(num(run("=SUMIF(sales[region], \"부산\", sales[amount])")), 250.0);
+        assert_eq!(num(run("=MINIFS(sales[amount], sales[region], \"서울\")")), 100.0);
+        assert_eq!(
+            run("=AVERAGEIFS(sales[amount], sales[region], \"제주\")"),
+            BridgeValue::Scalar(Scalar::Error("#DIV/0!".into()))
+        );
+    }
+
+    #[test]
+    fn xlookup_exact_match() {
+        assert_eq!(
+            run("=XLOOKUP(3, sales[order_id], sales[region])"),
+            BridgeValue::Scalar(Scalar::Text("서울".into()))
+        );
+        assert_eq!(
+            run("=XLOOKUP(99, sales[order_id], sales[region])"),
+            BridgeValue::Scalar(Scalar::Error("#N/A".into()))
+        );
+        assert_eq!(
+            run("=XLOOKUP(\"서울*\", sales[region], sales[order_id], \"없음\")"),
+            BridgeValue::Scalar(Scalar::Text("없음".into()))
+        );
+    }
+
+    #[test]
+    fn dquery_spills_with_header() {
+        let v = run("=DQUERY(\"SELECT region, SUM(amount) AS total FROM sales GROUP BY 1 ORDER BY 1\")");
+        match &v {
+            BridgeValue::Array(rows) => {
+                assert_eq!(rows[0], vec![Scalar::Text("region".into()), Scalar::Text("total".into())]);
+                assert_eq!(rows.len(), 5);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(v.to_formula_literal().starts_with("{\"region\",\"total\";"));
+    }
+
+    #[test]
+    fn mixed_tables_are_rejected() {
+        let mut s = store();
+        s.create_table_from_sql("other", "SELECT 1 AS x").unwrap();
+        let call = find_calls("=SUMIFS(sales[amount], other[x], 1)", &|_| true)
+            .remove(0)
+            .unwrap();
+        assert!(compile(&call, &mut s, &NoCells).is_err());
+    }
+}
+).unwrap_or(letters);
+    if letters.is_empty()
+        || letters.len() > 3
+        || !letters.chars().all(|c| c.is_ascii_alphabetic())
+        || digits.is_empty()
+        || !digits.chars().all(|c| c.is_ascii_digit())
+    {
         return None;
     }
     let row: i32 = digits.parse().ok()?;
@@ -439,7 +1749,8 @@ pub fn parse_a1(s: &str) -> Option<(i32, i32)> {
     for c in letters.to_ascii_uppercase().chars() {
         column = column * 26 + (c as i32 - 'A' as i32 + 1);
     }
-    (row >= 1 && row <= 1_048_576 && column <= 16_384).then_some((row, column))
+    (row >= 1 && row <= 1_048_576 && column >= 1 && column <= 16_384)
+        .then_some((row, column))
 }
 
 // ---------------------------------------------------------------- evaluation
@@ -872,5 +2183,15 @@ mod tests {
             .remove(0)
             .unwrap();
         assert!(compile(&call, &mut s, &NoCells).is_err());
+    }
+    
+    #[test]
+    fn parses_only_valid_a1_absolute_reference_forms() {
+        for address in ["A1", "$A1", "A$1", "$A$1", "XFD1048576"] {
+            assert!(parse_a1(address).is_some(), "{address}");
+        }
+        for address in ["", "A0", "XFE1", "A1048577", "A$$1", "$$A1", "A$-1", "A1x", "1A"] {
+            assert_eq!(parse_a1(address), None, "{address}");
+        }
     }
 }
