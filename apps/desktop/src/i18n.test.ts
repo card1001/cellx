@@ -58,6 +58,13 @@ describe("locale formatting", () => {
     expect(formatLocaleNumber(1234.5, "zh-CN")).toBe("1,234.5");
   });
 
+  it("formats dates using the selected locale", () => {
+    const date = new Date("2026-11-27T00:00:00Z");
+    expect(formatLocaleDate(date, "ja-JP", { timeZone: "UTC", year: "numeric", month: "2-digit", day: "2-digit" })).toBe("2026/11/27");
+    expect(formatLocaleDate(date, "zh-CN", { timeZone: "UTC", year: "numeric", month: "2-digit", day: "2-digit" })).toBe("2026/11/27");
+    expect(formatLocaleDate(date, "zh-TW", { timeZone: "UTC", year: "numeric", month: "2-digit", day: "2-digit" })).toBe("2026/11/27");
+  });
+
   it("formats date and time using the selected locale", () => {
     const date = new Date("2026-11-27T13:05:00Z");
     expect(formatLocaleDate(date, "en-US", { timeZone: "UTC", year: "numeric", month: "2-digit", day: "2-digit" })).toBe("11/27/2026");
@@ -65,25 +72,3 @@ describe("locale formatting", () => {
   });
 });
 
-describe("locale layout safeguards", () => {
-  it("keeps long translated controls scrollable and dialog content reflowable", () => {
-    const source = `:root { --ui-font: "Segoe UI", "Yu Gothic UI", "Meiryo", "Microsoft YaHei UI",
-      "Microsoft JhengHei UI", "Malgun Gothic", "Noto Sans CJK JP",
-      "Noto Sans CJK SC", "Noto Sans CJK TC", sans-serif; }`;
-    expect(source).toContain("Noto Sans CJK JP");
-    expect(source).toContain("Noto Sans CJK SC");
-    expect(source).toContain("Noto Sans CJK TC");
-  });
-
-  it("uses locale-specific date patterns for CSV output", () => {
-    const formats: Record<string, string> = {
-      "ko-KR": "yyyy-MM-dd",
-      "en-US": "MM/dd/yyyy",
-      "ja-JP": "yyyy/MM/dd",
-      "zh-CN": "yyyy-MM-dd",
-      "zh-TW": "yyyy/MM/dd",
-    };
-    expect(Object.keys(formats)).toHaveLength(5);
-    expect(formats["en-US"]).toBe("MM/dd/yyyy");
-  });
-});
