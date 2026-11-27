@@ -1,7 +1,7 @@
 //! Tauri commands for saved data-transformation recipes.
 use cellx_core::data::TableInfo;
 use cellx_core::project::SavedPipeline;
-use cellx_core::transform::{TransformPipeline, TransformValue};
+use cellx_core::transform::TransformPipeline;
 use cellx_core::value::Scalar;
 use serde::Serialize;
 use tauri::State;
@@ -17,15 +17,6 @@ pub struct TransformPreview {
     pub truncated: bool,
 }
 
-fn parameters(pipeline: &TransformPipeline, state: &mut crate::commands::Book) -> CmdResult<(String, Vec<duckdb::types::Value>)> {
-    let plan = state.wb.data().plan_transform(pipeline).map_err(|e| e.to_string())?;
-    let params = plan.parameters.iter().map(|value| match value {
-        TransformValue::Text(value) => duckdb::types::Value::Text(value.clone()),
-        TransformValue::Number(value) => duckdb::types::Value::Double(*value),
-        TransformValue::Boolean(value) => duckdb::types::Value::Boolean(*value),
-    }).collect();
-    Ok((plan.sql, params))
-}
 
 #[tauri::command]
 pub fn transform_pipelines(state: State<'_, AppState>) -> CmdResult<Vec<SavedPipeline>> {
@@ -70,18 +61,7 @@ pub fn delete_transform_pipeline(state: State<'_, AppState>, id: String) -> CmdR
 #[tauri::command]
 pub fn preview_transform(state: State<'_, AppState>, pipeline: TransformPipeline) -> CmdResult<TransformPreview> {
     let mut book = state.0.lock().map_err(|_| "내부 상태를 잠글 수 없습니다".to_string())?;
-    let (sql, params) = parameters(&pipeline, &mut book)?;
-    let preview_sql = format!("SELECT * FROM ({sql}) AS \"_cellx_preview\" LIMIT 101");
-    let (mut columns, mut rows, _) = book.wb.data().rows(&preview_sql, &params, 101).map_err(|e| e.to_string())?;
-    // _rid is an internal row identity and is never displayed as a user column.
-    if columns.first().is_some_and(|name| name == "_rid") {
-        columns.remove(0);
-        for row in &mut rows {
-            if !row.is_empty() { row.remove(0); }
-        }
-    }
-    let truncated = rows.len() > 100;
-    rows.truncate(100);
+    let (columns, rows, truncated) = book.wb.data().preview_transform(&pipeline, 100).map_err(|e| e.to_string())?;
     Ok(TransformPreview { columns, rows, truncated })
 }
 

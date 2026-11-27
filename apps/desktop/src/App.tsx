@@ -30,6 +30,9 @@ import {
   type RecalcStats,
   type SelectionStats,
   type TableInfo,
+  type TransformPipeline,
+  type SavedPipeline,
+  type TransformPreview,
 } from "./api";
 import { colorScaleRule, dataBarRule, highlightRule, type HighlightKind, ICON_SETS, iconSetRule, ratingRule } from "./cf";
 import { CHART_KINDS, ChartLayer } from "./components/Chart";
@@ -3121,7 +3124,7 @@ export default function App() {
         {showSql && (
           <SqlPanel
             tables={info?.tables ?? []}
-            onCreate={async (sql, name) => {
+            onExecuted={async (table) => {\n              await refreshInfo();\n              sources.current.delete(tabKey({ kind: "data", name: table.name }));\n              switchTab({ kind: "data", name: table.name });\n              say(`${table.name}: ${formatCount(table.rows)}행`);\n            }}\n            onCreate={async (sql, name) => {
               const table = await run("쿼리 실행 중", () => api.queryToTable(sql, name));
               if (!table) return;
               await refreshInfo();
@@ -3915,7 +3918,7 @@ function DataBar(props: { source: DataSource; onChange(): void }) {
   );
 }
 
-function SqlPanel(props: { tables: TableInfo[]; onCreate(sql: string, name: string): Promise<void> }) {
+function SqlPanel(props: { tables: TableInfo[]; onCreate(sql: string, name: string): Promise<void>; onExecuted(table: TableInfo): Promise<void> }) {
   const first = props.tables[0];
   const groupCol = first?.columns.find((c) => c.kind === "Text") ?? first?.columns[0];
   const [sql, setSql] = useState(
@@ -3957,6 +3960,135 @@ function SqlPanel(props: { tables: TableInfo[]; onCreate(sql: string, name: stri
         <li>{tr("=XLOOKUP(A2, 표[주문번호], 표[금액])")}</li>
         <li>{tr("=DQUERY(\"SELECT ... FROM 표\")")}</li>
       </ul>
+      <TransformPanel tables={props.tables} onExecuted={props.onExecuted} />
     </aside>
+  );
+}
+
+function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInfo): Promise<void> }) {
+  const [source, setSource] = useState(props.tables[0]?.name ?? "");
+  const [columnsText, setColumnsText] = useState(props.tables[0]?.columns.map((c) => c.name).join(", ") ?? "");
+  const [filterColumn, setFilterColumn] = useState("");
+  const [filterValue, setFilterValue] = useState("");
+  const [name, setName] = useState("정제 파이프라인");
+  const [output, setOutput] = useState("clean_result");
+  const [saved, setSaved] = useState<SavedPipeline[]>([]);
+  const [selectedId, setSelectedId] = useState("");
+  const [preview, setPreview] = useState<TransformPreview | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const current = props.tables.find((t) => t.name === source);
+  useEffect(() => {
+    if (!props.tables.some((t) => t.name === source)) {
+      const next = props.tables[0];
+      setSource(next?.name ?? "");
+      setColumnsText(next?.columns.map((c) => c.name).join(", ") ?? "");
+    }
+  }, [props.tables, source]);
+  useEffect(() => {
+    void api.transformPipelines().then(setSaved).catch((e) => setError(errorText(e)));
+  }, []);
+  useEffect(() => {
+    setColumnsText(current?.columns.map((c) => c.name).join(", ") ?? "");
+    setFilterColumn(current?.columns[0]?.name ?? "");
+  }, [source]);
+  const buildPipeline = (): TransformPipeline => {
+    if (!source) throw new Error("원본 데이터 시트를 선택하세요.");
+    const steps: TransformPipeline["steps"] = [];
+    if (filterColumn && filterValue.trim()) {
+      steps.push({
+        type: "filter",
+        predicate: { op: "compare", column: filterColumn, operator: "equal", value: { type: "text", value: filterValue } },
+      });
+    }
+    const selected = columnsText.split(",").map((v) => v.trim()).filter(Boolean);
+    if (selected.length) steps.push({ type: "select_columns", columns: selected });
+    return { source_table: source, steps };
+  };
+  const runBusy = async (work: () => Promise<void>) => {
+    setBusy(true);
+    setError("");
+    try { await work(); } catch (e) { setError(errorText(e)); } finally { setBusy(false); }
+  };
+  const previewNow = () => runBusy(async () => setPreview(await api.previewTransform(buildPipeline())));
+  const saveNow = () => runBusy(async () => {
+    const pipeline = buildPipeline();
+    const id = selectedId || crypto.randomUUID();
+    const list = await api.saveTransformPipeline({ id, name: name.trim() || "새 파이프라인", pipeline });
+    setSaved(list);
+    setSelectedId(id);
+  });
+  const executeNow = () => runBusy(async () => {
+    if (!selectedId) throw new Error("먼저 파이프라인을 저장하세요.");
+    const table = await api.executeTransformPipeline(selectedId, output.trim());
+    await props.onExecuted(table);
+  });
+  const loadSaved = (id: string) => {
+    setSelectedId(id);
+    const item = saved.find((p) => p.id === id);
+    if (!item) return;
+    setName(item.name);
+    setSource(item.pipeline.source_table);
+    const select = item.pipeline.steps.find((step) => step.type === "select_columns");
+    if (select?.type === "select_columns") setColumnsText(select.columns.join(", "));
+    const filter = item.pipeline.steps.find((step) => step.type === "filter");
+    if (filter?.type === "filter" && filter.predicate.op === "compare" && filter.predicate.value.type === "text") {
+      setFilterColumn(filter.predicate.column);
+      setFilterValue(filter.predicate.value.value);
+    } else {
+      setFilterValue("");
+    }
+    setPreview(null);
+  };
+  return (
+    <section style={{ borderTop: "1px solid var(--border)", marginTop: 16, paddingTop: 12 }}>
+      <h4>데이터 변환 파이프라인</h4>
+      <label>저장된 파이프라인
+        <select value={selectedId} onChange={(e) => loadSaved(e.target.value)}>
+          <option value="">새 파이프라인</option>
+          {saved.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+        </select>
+      </label>
+      <label>파이프라인 이름
+        <input value={name} onChange={(e) => setName(e.target.value)} />
+      </label>
+      <label>원본 데이터 시트
+        <select value={source} onChange={(e) => { setSource(e.target.value); setSelectedId(""); setPreview(null); }}>
+          {props.tables.map((t) => <option key={t.name} value={t.name}>{t.name}</option>)}
+        </select>
+      </label>
+      <label>출력 열 (쉼표로 구분)
+        <input value={columnsText} onChange={(e) => setColumnsText(e.target.value)} placeholder="열 이름, 열 이름" />
+      </label>
+      <label>같음 조건 열
+        <select value={filterColumn} onChange={(e) => setFilterColumn(e.target.value)}>
+          {(current?.columns ?? []).map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+        </select>
+      </label>
+      <label>필터 값
+        <input value={filterValue} onChange={(e) => setFilterValue(e.target.value)} placeholder="비우면 필터 미적용" />
+      </label>
+      <label>결과 데이터 시트 이름
+        <input value={output} onChange={(e) => setOutput(e.target.value)} />
+      </label>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <button disabled={busy || !source} onClick={() => void previewNow()}>미리보기</button>
+        <button disabled={busy || !source} onClick={() => void saveNow()}>저장</button>
+        <button disabled={busy || !selectedId} onClick={() => void executeNow()}>새 데이터 시트로 실행</button>
+        {selectedId && <button disabled={busy} onClick={() => void runBusy(async () => {
+          const list = await api.deleteTransformPipeline(selectedId);
+          setSaved(list); setSelectedId(""); setPreview(null);
+        })}>삭제</button>}
+      </div>
+      {error && <p role="alert" style={{ color: "var(--danger, #b42318)" }}>{error}</p>}
+      {preview && <>
+        <p className="muted">미리보기: {preview.rows.length}행{preview.truncated ? " 이상" : ""} · {preview.columns.length}열</p>
+        <div style={{ overflow: "auto", maxHeight: 220 }}>
+          <table><thead><tr>{preview.columns.map((c) => <th key={c}>{c}</th>)}</tr></thead>
+            <tbody>{preview.rows.map((row, i) => <tr key={i}>{row.map((v, j) => <td key={j}>{v.t === "Empty" ? "" : v.t === "Number" ? v.v : v.t === "Bool" ? String(v.v) : v.v}</td>)}</tr>)}</tbody>
+          </table>
+        </div>
+      </>}
+    </section>
   );
 }
