@@ -1,8 +1,9 @@
 //! Tauri commands. The UI never talks to IronCalc or DuckDB directly: every call
 //! goes through these functions, which run on Tauri's worker threads.
 
+use std::any::Any;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock, RwLock};
 
 use cellx_core::data::{ColumnFilter, Page, Sort, TableInfo};
 use cellx_core::project;
@@ -42,8 +43,46 @@ pub struct AppState(pub Mutex<Book>);
 
 pub(crate) type CmdResult<T> = Result<T, String>;
 
-fn err(e: impl std::fmt::Display) -> String {
-    e.to_string()
+static ACTIVE_LOCALE: OnceLock<RwLock<String>> = OnceLock::new();
+
+fn active_locale() -> String {
+    ACTIVE_LOCALE
+        .get_or_init(|| RwLock::new("ko-KR".to_string()))
+        .read()
+        .map(|locale| locale.clone())
+        .unwrap_or_else(|_| "ko-KR".to_string())
+}
+
+fn err(e: impl std::fmt::Display + 'static) -> String {
+    if let Some(core_error) = (&e as &dyn Any).downcast_ref::<cellx_core::CellxError>() {
+        core_error.localized_message(&active_locale())
+    } else {
+        e.to_string()
+    }
+}
+
+#[tauri::command]
+pub fn set_locale(locale: String) -> CmdResult<()> {
+    let normalized = if locale.to_ascii_lowercase().starts_with("ko") {
+        "ko-KR"
+    } else if locale.to_ascii_lowercase().starts_with("ja") {
+        "ja-JP"
+    } else if locale.eq_ignore_ascii_case("zh-TW")
+        || locale.to_ascii_lowercase().starts_with("zh-hant")
+        || locale.eq_ignore_ascii_case("zh-HK")
+    {
+        "zh-TW"
+    } else if locale.to_ascii_lowercase().starts_with("zh") {
+        "zh-CN"
+    } else {
+        "en-US"
+    };
+    let mut current = ACTIVE_LOCALE
+        .get_or_init(|| RwLock::new("ko-KR".to_string()))
+        .write()
+        .map_err(|_| "Unable to update application language".to_string())?;
+    *current = normalized.to_string();
+    Ok(())
 }
 
 fn lock<'a>(state: &'a State<'_, AppState>) -> CmdResult<std::sync::MutexGuard<'a, Book>> {
