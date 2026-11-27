@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 export const LOCALES = ["ko-KR", "en-US", "ja-JP", "zh-CN", "zh-TW"] as const;
 export type Locale = (typeof LOCALES)[number];
@@ -764,6 +765,9 @@ export function useI18n() {
       // Language selection still works for this session when storage is unavailable.
     }
     document.documentElement.lang = locale;
+    void invoke("set_locale", { locale }).catch(() => {
+      // The UI can still be used in a browser preview without the Tauri host.
+    });
   }, [locale]);
 
   return {
