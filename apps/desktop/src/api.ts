@@ -488,6 +488,7 @@ export type TransformStep =
   | { type: "group_by"; columns: string[]; aggregates: AggregateSpec[] };
 export interface TransformPipeline { source_table: string; steps: TransformStep[] }
 export interface SavedPipeline { id: string; name: string; pipeline: TransformPipeline }
+export interface SavedConnector { id: string; name: string; path: string; table_name: string; locale: string }
 export interface TransformPreview { columns: string[]; rows: Scalar[][]; truncated: boolean }
 
 export interface Page {
@@ -737,6 +738,10 @@ export const api = {
   previewTransform: (pipeline: TransformPipeline) => invoke<TransformPreview>("preview_transform", { pipeline }),
   executeTransformPipeline: (id: string, outputTable: string) =>
     invoke<TableInfo>("execute_transform_pipeline", { id, outputTable }),
+  dataConnectors: () => invoke<SavedConnector[]>("data_connectors"),
+  saveDataConnector: (connector: SavedConnector) => invoke<TableInfo>("save_data_connector", { connector }),
+  refreshDataConnector: (id: string) => invoke<TableInfo>("refresh_data_connector", { id }),
+  deleteDataConnector: (id: string) => invoke<SavedConnector[]>("delete_data_connector", { id }),
   dataPage: (table: string, offset: number, limit: number, sort: Sort | null, filters: ColumnFilter[]) =>
     invoke<Page>("data_page", { table, offset, limit, sort, filters }),
   updateDataCell: (table: string, rid: number, column: string, text: string) =>

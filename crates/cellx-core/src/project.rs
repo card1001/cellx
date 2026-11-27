@@ -31,6 +31,17 @@ pub struct SavedPipeline {
     pub pipeline: TransformPipeline,
 }
 
+/// A reusable local file source. Paths are intentionally local to the machine
+/// and are never uploaded or resolved through a remote service.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SavedConnector {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub table_name: String,
+    pub locale: String,
+}
+
 pub const FORMAT_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize)]
@@ -62,10 +73,19 @@ pub fn new_work_dir() -> Result<PathBuf> {
 }
 
 pub fn save_project(wb: &mut Workbook, path: &Path) -> Result<()> {
-    save_project_with_pipelines(wb, path, &[])
+    save_project_with_assets(wb, path, &[], &[])
 }
 
 pub fn save_project_with_pipelines(wb: &mut Workbook, path: &Path, pipelines: &[SavedPipeline]) -> Result<()> {
+    save_project_with_assets(wb, path, pipelines, &[])
+}
+
+pub fn save_project_with_assets(
+    wb: &mut Workbook,
+    path: &Path,
+    pipelines: &[SavedPipeline],
+    connectors: &[SavedConnector],
+) -> Result<()> {
     if wb.data_path().is_none() {
         let dir = new_work_dir()?;
         wb.persist_data_to(&dir.join("data.duckdb"))?;
@@ -101,6 +121,9 @@ pub fn save_project_with_pipelines(wb: &mut Workbook, path: &Path, pipelines: &[
         zip_err(zip.start_file("pipelines.json", opts))?;
         zip.write_all(&serde_json::to_vec_pretty(pipelines).map_err(json_err)?)?;
 
+        zip_err(zip.start_file("connectors.json", opts))?;
+        zip.write_all(&serde_json::to_vec_pretty(connectors).map_err(json_err)?)?;
+
         let bridges: Vec<StoredBridge> = wb
             .bridges()
             .iter()
@@ -124,10 +147,20 @@ pub fn save_project_with_pipelines(wb: &mut Workbook, path: &Path, pipelines: &[
 }
 
 pub fn open_project(path: &Path) -> Result<Workbook> {
-    Ok(open_project_with_pipelines(path)?.0)
+    Ok(open_project_with_assets(path)?.0)
 }
 
 pub fn open_project_with_pipelines(path: &Path) -> Result<(Workbook, Vec<SavedPipeline>)> {
+    let (wb, pipelines, _) = open_project_with_assets(path)?;
+    let connectors = if zip.file_names().any(|name| name == "connectors.json") {
+        serde_json::from_slice(&read_entry(&mut zip, "connectors.json")?).map_err(json_err)?
+    } else {
+        Vec::new()
+    };
+    Ok((wb, pipelines, connectors))
+}
+
+pub fn open_project_with_assets(path: &Path) -> Result<(Workbook, Vec<SavedPipeline>, Vec<SavedConnector>)> {
     let file = File::open(path)?;
     let mut zip = zip_err(zip::ZipArchive::new(file))?;
 
@@ -273,10 +306,18 @@ mod tests {
                 steps: vec![],
             },
         };
-        save_project_with_pipelines(&mut wb, &path, &[saved_pipeline.clone()]).unwrap();
+        let saved_connector = SavedConnector {
+            id: "connector-1".into(),
+            name: "Sales source".into(),
+            path: "/local/sales.csv".into(),
+            table_name: "sales".into(),
+            locale: "ko-KR".into(),
+        };
+        save_project_with_assets(&mut wb, &path, &[saved_pipeline.clone()], &[saved_connector.clone()]).unwrap();
 
-        let (mut reopened, pipelines) = open_project_with_pipelines(&path).unwrap();
+        let (mut reopened, pipelines, connectors) = open_project_with_assets(&path).unwrap();
         assert_eq!(pipelines, vec![saved_pipeline]);
+        assert_eq!(connectors, vec![saved_connector]);
         assert_eq!(reopened.value(0, 1, 2).unwrap(), Scalar::Number(40.0));
         assert_eq!(reopened.input(0, 1, 1).unwrap(), "=SUM(sales[v])");
         // The data sheet came back and the bridge still works against it.

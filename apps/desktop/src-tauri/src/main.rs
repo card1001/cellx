@@ -4,6 +4,7 @@
 mod commands;
 mod recovery;
 mod pipeline_commands;
+mod connector_commands;
 
 use std::sync::Mutex;
 
@@ -85,6 +86,10 @@ fn main() {
             pipeline_commands::delete_transform_pipeline,
             pipeline_commands::preview_transform,
             pipeline_commands::execute_transform_pipeline,
+            connector_commands::data_connectors,
+            connector_commands::save_data_connector,
+            connector_commands::refresh_data_connector,
+            connector_commands::delete_data_connector,
             commands::data_page,
             commands::update_data_cell,
             commands::export_table,

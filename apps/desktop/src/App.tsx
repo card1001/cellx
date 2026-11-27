@@ -34,6 +34,7 @@ import {
   type SavedPipeline,
   type TransformPreview,
   type AggregateFunction,
+  type SavedConnector,
 } from "./api";
 import { colorScaleRule, dataBarRule, highlightRule, type HighlightKind, ICON_SETS, iconSetRule, ratingRule } from "./cf";
 import { CHART_KINDS, ChartLayer } from "./components/Chart";
@@ -3987,8 +3988,10 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   const [name, setName] = useState("정제 파이프라인");
   const [output, setOutput] = useState("clean_result");
   const [saved, setSaved] = useState<SavedPipeline[]>([]);
+  const [connectors, setConnectors] = useState<SavedConnector[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [preview, setPreview] = useState<TransformPreview | null>(null);
+  const [stepPreviews, setStepPreviews] = useState<{ step: number; preview: TransformPreview }[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const current = props.tables.find((t) => t.name === source);
@@ -4002,6 +4005,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   }, [props.tables, source]);
   useEffect(() => {
     void api.transformPipelines().then(setSaved).catch((e) => setError(errorText(e)));
+    void api.dataConnectors().then(setConnectors).catch((e) => setError(errorText(e)));
   }, []);
   useEffect(() => {
     const stored = saved.find((item) => item.id === selectedId && item.pipeline.source_table === source);
@@ -4017,6 +4021,16 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
       setFilterColumn(current?.columns[0]?.name ?? "");
       setFilterValue("");
     }
+    const join = stored?.pipeline.steps.find((step) => step.type === "join");
+    if (join?.type === "join") {
+      setJoinTable(join.table);
+      setJoinLeft(join.left_column);
+      setJoinRight(join.right_column);
+    } else {
+      setJoinTable("");
+      setJoinLeft("");
+      setJoinRight("");
+    }
   }, [source, selectedId, saved]);
   const buildPipeline = (): TransformPipeline => {
     if (!source) throw new Error("원본 데이터 시트를 선택하세요.");
@@ -4026,6 +4040,10 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
         type: "filter",
         predicate: { op: "compare", column: filterColumn, operator: "equal", value: { type: "text", value: filterValue } },
       });
+    }
+    if (joinTable) {
+      if (!joinLeft || !joinRight) throw new Error("조인 기준 열을 모두 선택하세요.");
+      steps.push({ type: "join", table: joinTable, left_column: joinLeft, right_column: joinRight, kind: "left", suffix: joinTable });
     }
     const groups = groupColumnsText.split(",").map((v) => v.trim()).filter(Boolean);
     const aggregates = (aggregateColumn.trim() || aggregateFunction === "count") && aggregateName.trim()
@@ -4044,7 +4062,38 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
     setError("");
     try { await work(); } catch (e) { setError(errorText(e)); } finally { setBusy(false); }
   };
-  const previewNow = () => runBusy(async () => setPreview(await api.previewTransform(buildPipeline())));
+  const addConnector = () => runBusy(async () => {
+    const picked = await openDialog({
+      multiple: false,
+      filters: [{ name: "CSV / TSV / Parquet", extensions: ["csv", "tsv", "parquet"] }],
+    });
+    if (typeof picked !== "string") return;
+    const fileName = picked.split(/[\\/]/).pop() ?? "source.csv";
+    const baseName = fileName.replace(/\.[^.]+$/, "") || "source";
+    const safeName = `data_${baseName.toLowerCase().replace(/[^a-z0-9_]/g, "_")}`.slice(0, 64);
+    const connector: SavedConnector = {
+      id: crypto.randomUUID(),
+      name: baseName.slice(0, 120),
+      path: picked,
+      table_name: safeName,
+      locale: getActiveLocale(),
+    };
+    const table = await api.saveDataConnector(connector);
+    setConnectors(await api.dataConnectors());
+    await props.onExecuted(table);
+  });
+  const previewNow = () => runBusy(async () => { setStepPreviews([]); setPreview(await api.previewTransform(buildPipeline())); });
+  const previewStepsNow = () => runBusy(async () => {
+    const pipeline = buildPipeline();
+    if (!pipeline.steps.length) throw new Error("단계가 없습니다. 필터, 열 선택, 조인 또는 그룹 집계를 추가하세요.");
+    setPreview(null);
+    setStepPreviews([]);
+    for (let index = 0; index < pipeline.steps.length; index += 1) {
+      const partial = { source_table: pipeline.source_table, steps: pipeline.steps.slice(0, index + 1) };
+      const result = await api.previewTransform(partial);
+      setStepPreviews((previous) => [...previous, { step: index + 1, preview: result }]);
+    }
+  });
   const saveNow = () => runBusy(async () => {
     const pipeline = buildPipeline();
     const id = selectedId || crypto.randomUUID();
@@ -4094,6 +4143,21 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   };
   return (
     <section style={{ borderTop: "1px solid var(--border)", marginTop: 16, paddingTop: 12 }}>
+      <h4>로컬 파일 연결</h4>
+      <p className="muted">CSV, TSV, Parquet 파일을 로컬에서 가져오고 필요할 때 다시 불러옵니다. 파일 경로는 이 PC의 경로로 저장되며 외부로 전송되지 않습니다.</p>
+      <button disabled={busy} onClick={() => void addConnector()}>로컬 파일 연결 추가</button>
+      {connectors.map((connector) => (
+        <div key={connector.id} style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+          <span style={{ flex: 1 }}>{connector.name} <span className="muted">→ {connector.table_name}</span></span>
+          <button disabled={busy} onClick={() => void runBusy(async () => {
+            const table = await api.refreshDataConnector(connector.id);
+            await props.onExecuted(table);
+          })}>새로 고침</button>
+          <button disabled={busy} onClick={() => void runBusy(async () => {
+            setConnectors(await api.deleteDataConnector(connector.id));
+          })}>연결 해제</button>
+        </div>
+      ))}
       <h4>데이터 변환 파이프라인</h4>
       <label>저장된 파이프라인
         <select value={selectedId} onChange={(e) => loadSaved(e.target.value)}>
@@ -4172,6 +4236,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
       </label>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         <button disabled={busy || !source} onClick={() => void previewNow()}>미리보기</button>
+        <button disabled={busy || !source} onClick={() => void previewStepsNow()}>단계별 미리보기</button>
         <button disabled={busy || !source} onClick={() => void saveNow()}>저장</button>
         <button disabled={busy || !selectedId} onClick={() => void executeNow()}>새 데이터 시트로 실행</button>
         {selectedId && <button disabled={busy} onClick={() => void runBusy(async () => {
@@ -4180,6 +4245,19 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
         })}>삭제</button>}
       </div>
       {error && <p role="alert" style={{ color: "var(--danger, #b42318)" }}>{error}</p>}
+      {stepPreviews.length > 0 && <div>
+        <p className="muted">단계별 결과</p>
+        {stepPreviews.map(({ step, preview: result }) => (
+          <details key={step}>
+            <summary>단계 {step} · {result.rows.length}행{result.truncated ? " 이상" : ""} · {result.columns.length}열</summary>
+            <div style={{ overflow: "auto", maxHeight: 160 }}>
+              <table><thead><tr>{result.columns.map((column) => <th key={column}>{column}</th>)}</tr></thead>
+                <tbody>{result.rows.slice(0, 10).map((row, rowIndex) => <tr key={rowIndex}>{row.map((value, colIndex) => <td key={colIndex}>{value.t === "Empty" ? "" : value.t === "Number" ? value.v : value.t === "Bool" ? String(value.v) : value.v}</td>)}</tr>)}</tbody>
+              </table>
+            </div>
+          </details>
+        ))}
+      </div>}
       {preview && <>
         <p className="muted">미리보기: {preview.rows.length}행{preview.truncated ? " 이상" : ""} · {preview.columns.length}열</p>
         <div style={{ overflow: "auto", maxHeight: 220 }}>

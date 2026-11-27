@@ -371,6 +371,37 @@ impl DataStore {
         Ok((columns, rows, truncated))
     }
 
+    /// Returns a bounded preview without materializing or modifying a table.
+    pub fn preview_transform(
+        &mut self,
+        pipeline: &TransformPipeline,
+        max_rows: usize,
+    ) -> Result<(Vec<String>, Vec<Vec<Scalar>>, bool)> {
+        let plan = self.plan_transform(pipeline)?;
+        let parameters = plan.parameters.iter().map(|value| match value {
+            TransformValue::Text(value) => duckdb::types::Value::Text(value.clone()),
+            TransformValue::Number(value) => duckdb::types::Value::Double(*value),
+            TransformValue::Boolean(value) => duckdb::types::Value::Boolean(*value),
+        }).collect::<Vec<_>>();
+        let limit = max_rows.clamp(1, 500).saturating_add(1);
+        let sql = format!(
+            "SELECT * FROM ({}) AS {} LIMIT {}",
+            plan.sql,
+            quote_ident("_cellx_preview"),
+            limit
+        );
+        let (mut columns, mut rows, engine_truncated) = self.rows(&sql, &parameters, limit)?;
+        let truncated = engine_truncated || rows.len() > max_rows;
+        rows.truncate(max_rows);
+        if columns.first().is_some_and(|name| name == "_rid") {
+            columns.remove(0);
+            for row in &mut rows {
+                if !row.is_empty() { row.remove(0); }
+            }
+        }
+        Ok((columns, rows, truncated))
+    }
+
     /// Executes a validated pipeline into a separate data sheet.
     ///
     /// The source is never modified. The output is replaced only after DuckDB
