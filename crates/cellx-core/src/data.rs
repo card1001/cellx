@@ -191,58 +191,87 @@ impl DataStore {
         self.import_file_with_locale(path, table, "ko-KR")
     }
 
-    /// `_locale` is kept for the API: dates are detected from the file itself
-    /// (ISO, and the other common forms DuckDB recognises), not forced to the
-    /// UI language, so the same file imports the same way in every language.
-    pub fn import_file_with_locale(&mut self, path: &Path, table: &str, _locale: &str) -> Result<TableInfo> {
+    /// Dates are detected from the file itself (ISO and the other common
+    /// forms), not forced to the UI language, so a file imports the same way
+    /// in every language. A CSV that is not UTF-8 or UTF-16 is read in the
+    /// legacy encoding of `locale` (Korean: CP949/EUC-KR, Japanese:
+    /// Shift_JIS, Simplified Chinese: GBK, Traditional Chinese: Big5,
+    /// otherwise Windows-1252), the way Excel saves CSV files on Windows.
+    pub fn import_file_with_locale(&mut self, path: &Path, table: &str, locale: &str) -> Result<TableInfo> {
         if !is_valid_table_name(table) {
             return Err(CellxError::InvalidName(table.to_string()));
         }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        if ext == "parquet" {
+            return self.import_with_reader(path, table, "read_parquet(?)".to_string());
+        }
+        let csv_reader = |encoding: &str| {
+            let delimiter = if ext == "tsv" { ", delim = '\\t'" } else { "" };
+            format!(
+                "read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = '{encoding}', decimal_separator = '.'{delimiter})"
+            )
+        };
+
+        let mut head = Vec::with_capacity(64 * 1024);
+        File::open(path)?.take(64 * 1024).read_to_end(&mut head)?;
+        let utf32 = head.starts_with(&[0xff, 0xfe, 0x00, 0x00]) || head.starts_with(&[0x00, 0x00, 0xfe, 0xff]);
+        if utf32 {
+            return Err(CellxError::CsvEncoding("UTF-32".into()));
+        }
+        if head.starts_with(&[0xff, 0xfe]) || head.starts_with(&[0xfe, 0xff]) {
+            return self.import_with_reader(path, table, csv_reader("utf-16"));
+        }
+        let legacy = legacy_encoding(locale);
+        // A file that is not UTF-8 from the start is converted right away;
+        // one whose first 64 KB are UTF-8 is tried as UTF-8 first.
+        if !head.starts_with(&[0xef, 0xbb, 0xbf]) && !is_utf8_prefix(&head) {
+            return self.import_transcoded(path, table, legacy, csv_reader("utf-8"));
+        }
+        match self.import_with_reader(path, table, csv_reader("utf-8")) {
+            Err(CellxError::CsvEncoding(_)) => self.import_transcoded(path, table, legacy, csv_reader("utf-8")),
+            other => other,
+        }
+    }
+
+    fn import_with_reader(&mut self, path: &Path, table: &str, reader: String) -> Result<TableInfo> {
         let path_text = path
             .to_str()
             .ok_or_else(|| CellxError::InvalidName(path.display().to_string()))?;
-
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-        let mut encoding = "utf-8";
-        if ext != "parquet" {
-            let mut file = File::open(path)?;
-            let mut bom = [0_u8; 4];
-            let count = file.read(&mut bom)?;
-            let utf16 = count >= 2 && ((bom[0] == 0xff && bom[1] == 0xfe) || (bom[0] == 0xfe && bom[1] == 0xff));
-            let utf32 = count >= 4 && ((bom == [0xff, 0xfe, 0x00, 0x00]) || (bom == [0x00, 0x00, 0xfe, 0xff]));
-            if utf32 {
-                return Err(CellxError::CsvEncoding("UTF-32".into()));
-            }
-            if utf16 {
-                encoding = "utf-16";
-            }
-        }
-
-        let reader = if ext == "parquet" {
-            "read_parquet(?)".to_string()
-        } else {
-            let delimiter = if ext == "tsv" { ", delim = '\\t'" } else { "" };
-            format!(
-                "read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = '{}', decimal_separator = '.'{})",
-                encoding, delimiter
-            )
-        };
         let sql = format!(
             "CREATE OR REPLACE TABLE {t} AS SELECT row_number() OVER () AS _rid, * FROM {reader}",
             t = quote_ident(table)
         );
-        match self.conn.execute(&sql, [path_text]) {
-            Ok(_) => {}
-            Err(error) => {
-                let diagnostic = error.to_string().to_ascii_lowercase();
-                if diagnostic.contains("utf-8") || diagnostic.contains("utf8") || diagnostic.contains("unicode") {
-                    return Err(CellxError::CsvEncoding("non-UTF-8 input".into()));
-                }
-                return Err(error.into());
+        if let Err(error) = self.conn.execute(&sql, [path_text]) {
+            let diagnostic = error.to_string().to_ascii_lowercase();
+            if diagnostic.contains("utf-8") || diagnostic.contains("utf8") || diagnostic.contains("unicode") {
+                return Err(CellxError::CsvEncoding("non-UTF-8 input".into()));
             }
+            return Err(error.into());
         }
         self.touch(table);
         self.table_info(table)
+    }
+
+    /// Converts a CSV from a legacy encoding to a temporary UTF-8 file, a
+    /// megabyte at a time, and imports that. Bytes that are not valid in the
+    /// encoding make it an encoding error rather than silent replacement.
+    fn import_transcoded(
+        &mut self,
+        path: &Path,
+        table: &str,
+        encoding: &'static encoding_rs::Encoding,
+        reader: String,
+    ) -> Result<TableInfo> {
+        static TRANSCODE_ID: AtomicU64 = AtomicU64::new(1);
+        let id = TRANSCODE_ID.fetch_add(1, Ordering::Relaxed);
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("csv");
+        let temp = std::env::temp_dir().join(format!("cellx-import-{}-{id}.{ext}", std::process::id()));
+        let result = (|| -> Result<TableInfo> {
+            transcode_to_utf8(path, &temp, encoding)?;
+            self.import_with_reader(&temp, table, reader)
+        })();
+        let _ = fs::remove_file(&temp);
+        result
     }
 
     /// Creates a table from rows already in memory (used by tests and pasted data).
@@ -519,37 +548,38 @@ impl DataStore {
             return Ok(());
         }
 
-        static EXPORT_ID: AtomicU64 = AtomicU64::new(1);
-        let id = EXPORT_ID.fetch_add(1, Ordering::Relaxed);
-        let temp_path = path.with_file_name(format!(".cellx-export-{}-{id}.tmp", std::process::id()));
-        let temp_text = temp_path
-            .to_str()
-            .ok_or_else(|| CellxError::InvalidName(temp_path.display().to_string()))?
-            .replace('\'', "''");
-        let date_format = "%Y-%m-%d";
-        let timestamp_format = "%Y-%m-%d %H:%M:%S";
+        // The BOM and the header go in DuckDB's PREFIX (it cannot be combined
+        // with HEADER), so the file is written once, straight to its place.
+        let names = self.export_column_names(table)?;
+        let header = names.iter().map(|n| csv_field(n)).collect::<Vec<_>>().join(",");
+        // DuckDB writes PREFIX and SUFFIX around the rows; with no rows the
+        // file is just the header line, written here.
+        let empty = self.conn.query_row(
+            &format!("SELECT NOT EXISTS (SELECT 1 FROM {})", quote_ident(table)),
+            [],
+            |r| r.get::<_, bool>(0),
+        )?;
+        if empty {
+            fs::write(path, format!("\u{feff}{header}\n"))?;
+            return Ok(());
+        }
+        let prefix = format!("\u{feff}{header}\n").replace('\'', "''");
+        let path_sql = path_text.replace('\'', "''");
         let sql = format!(
-            "COPY (SELECT * EXCLUDE (_rid) FROM {t} ORDER BY _rid) TO '{temp_text}' (FORMAT csv, HEADER true, DELIMITER ',', DATEFORMAT '{date_format}', TIMESTAMPFORMAT '{timestamp_format}')",
+            "COPY (SELECT * EXCLUDE (_rid) FROM {t} ORDER BY _rid) TO '{path_sql}' (FORMAT csv, HEADER false, DELIMITER ',', DATEFORMAT '%Y-%m-%d', TIMESTAMPFORMAT '%Y-%m-%d %H:%M:%S', PREFIX '{prefix}', SUFFIX '\n')",
             t = quote_ident(table)
         );
         if let Err(error) = self.conn.execute_batch(&sql) {
-            let _ = fs::remove_file(&temp_path);
+            let _ = fs::remove_file(path);
             return Err(error.into());
         }
+        Ok(())
+    }
 
-        let write_result = (|| -> Result<()> {
-            let mut source = File::open(&temp_path)?;
-            let mut destination = File::create(path)?;
-            destination.write_all(&[0xef, 0xbb, 0xbf])?;
-            std::io::copy(&mut source, &mut destination)?;
-            destination.sync_all()?;
-            Ok(())
-        })();
-        let _ = fs::remove_file(&temp_path);
-        if write_result.is_err() {
-            let _ = fs::remove_file(path);
-        }
-        write_result
+    fn export_column_names(&self, table: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(&format!("SELECT * EXCLUDE (_rid) FROM {} LIMIT 0", quote_ident(table)))?;
+        stmt.execute([])?;
+        Ok(stmt.column_names())
     }
 
     /// Runs SQL written by CellX itself (never user input).
@@ -562,6 +592,72 @@ impl DataStore {
         self.conn.execute_batch("CHECKPOINT")?;
         Ok(())
     }
+}
+
+/// A CSV field, quoted when it holds a comma, a quote or a line break.
+fn csv_field(text: &str) -> String {
+    if text.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", text.replace('"', "\"\""))
+    } else {
+        text.to_string()
+    }
+}
+
+/// The encoding Excel uses for CSV files on Windows in each UI language.
+fn legacy_encoding(locale: &str) -> &'static encoding_rs::Encoding {
+    let tag = locale.to_ascii_lowercase();
+    if tag.starts_with("ko") {
+        encoding_rs::EUC_KR // CP949 (Unified Hangul Code), a superset of EUC-KR
+    } else if tag.starts_with("ja") {
+        encoding_rs::SHIFT_JIS
+    } else if tag == "zh-tw" || tag.starts_with("zh-hant") || tag == "zh-hk" {
+        encoding_rs::BIG5
+    } else if tag.starts_with("zh") {
+        encoding_rs::GBK
+    } else {
+        encoding_rs::WINDOWS_1252
+    }
+}
+
+/// Whether `bytes` is UTF-8, allowing a character cut off at the end.
+fn is_utf8_prefix(bytes: &[u8]) -> bool {
+    match std::str::from_utf8(bytes) {
+        Ok(_) => true,
+        Err(e) => e.error_len().is_none() && bytes.len() - e.valid_up_to() < 4,
+    }
+}
+
+fn transcode_to_utf8(from: &Path, to: &Path, encoding: &'static encoding_rs::Encoding) -> Result<()> {
+    let mut input = std::io::BufReader::with_capacity(1 << 20, File::open(from)?);
+    let mut output = std::io::BufWriter::with_capacity(1 << 20, File::create(to)?);
+    let mut decoder = encoding.new_decoder_without_bom_handling();
+    let mut inbuf = vec![0_u8; 1 << 20];
+    let mut outbuf = String::with_capacity(3 << 20);
+    loop {
+        let n = input.read(&mut inbuf)?;
+        let last = n == 0;
+        let mut src = &inbuf[..n];
+        loop {
+            outbuf.clear();
+            let (result, read) = decoder.decode_to_string_without_replacement(src, &mut outbuf, last);
+            output.write_all(outbuf.as_bytes())?;
+            src = &src[read..];
+            match result {
+                encoding_rs::DecoderResult::InputEmpty => break,
+                encoding_rs::DecoderResult::OutputFull => {
+                    outbuf.reserve(outbuf.capacity());
+                }
+                encoding_rs::DecoderResult::Malformed(_, _) => {
+                    return Err(CellxError::CsvEncoding(format!("UTF-8도 {}도 아닌 파일", encoding.name())));
+                }
+            }
+        }
+        if last {
+            break;
+        }
+    }
+    output.flush()?;
+    Ok(())
 }
 
 fn json_contains_table_function(v: &serde_json::Value) -> bool {
@@ -728,4 +824,95 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+
+    fn cp949(text: &str) -> Vec<u8> {
+        encoding_rs::EUC_KR.encode(text).0.into_owned()
+    }
+
+    #[test]
+    fn csv_import_reads_korean_excel_cp949_files() {
+        let path = std::env::temp_dir().join(format!("cellx-cp949-{}.csv", std::process::id()));
+        // 똠 and 펲 are in CP949 but not in plain EUC-KR.
+        fs::write(&path, cp949("지역,금액,메모\n서울,12,똠방각하\n부산,7,펲\n")).unwrap();
+        let mut store = DataStore::open_in_memory().unwrap();
+        let info = store.import_file_with_locale(&path, "cp949_data", "ko-KR").unwrap();
+        assert_eq!(info.rows, 2);
+        assert_eq!(info.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["지역", "금액", "메모"]);
+        let v = store.scalar("SELECT 메모 FROM cp949_data WHERE _rid = 1", &[]).unwrap();
+        assert_eq!(v, Scalar::Text("똠방각하".into()));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn csv_import_falls_back_when_korean_text_starts_late() {
+        // The first 64 KB are ASCII (valid UTF-8); the Korean text comes after.
+        let path = std::env::temp_dir().join(format!("cellx-cp949-late-{}.csv", std::process::id()));
+        let mut text = String::from("id,name\n");
+        for i in 0..10_000 {
+            text.push_str(&format!("{i},abc\n"));
+        }
+        text.push_str("10000,한글\n");
+        fs::write(&path, cp949(&text)).unwrap();
+        let mut store = DataStore::open_in_memory().unwrap();
+        let info = store.import_file_with_locale(&path, "late", "ko-KR").unwrap();
+        assert_eq!(info.rows, 10_001);
+        let v = store.scalar("SELECT name FROM late WHERE id = 10000", &[]).unwrap();
+        assert_eq!(v, Scalar::Text("한글".into()));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn csv_import_uses_the_encoding_of_the_ui_language() {
+        let path = std::env::temp_dir().join(format!("cellx-sjis-{}.csv", std::process::id()));
+        fs::write(&path, encoding_rs::SHIFT_JIS.encode("地域,金額\n東京,12\n").0).unwrap();
+        let mut store = DataStore::open_in_memory().unwrap();
+        let info = store.import_file_with_locale(&path, "sjis", "ja-JP").unwrap();
+        assert_eq!(info.columns[0].name, "地域");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn csv_export_quotes_header_names_and_handles_empty_tables() {
+        let mut store = DataStore::open_in_memory().unwrap();
+        store.create_table_from_sql("odd", "SELECT 1 AS \"a,b\", 'x' AS \"it's\" WHERE false").unwrap();
+        let path = std::env::temp_dir().join(format!("cellx-odd-{}.csv", std::process::id()));
+        store.export("odd", &path).unwrap();
+        let text = String::from_utf8(fs::read(&path).unwrap()).unwrap();
+        assert_eq!(text, "\u{feff}\"a,b\",it's\n");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    #[ignore]
+    fn measure_big_csv() {
+        let Ok(src) = std::env::var("CELLX_BIG_CSV") else { return };
+        let src = Path::new(&src);
+        let t = std::time::Instant::now();
+        let mut s = DataStore::open_in_memory().unwrap();
+        s.import_file_with_locale(src, "o", "ko-KR").unwrap();
+        eprintln!("MEASURE utf8 import {:?}", t.elapsed());
+        let out = src.with_file_name("o_out.csv");
+        let t = std::time::Instant::now();
+        s.export("o", &out).unwrap();
+        eprintln!("MEASURE export (one pass) {:?}", t.elapsed());
+        let tmp = src.with_file_name("o_tmp.csv");
+        let t = std::time::Instant::now();
+        s.conn.execute_batch(&format!("COPY (SELECT * EXCLUDE (_rid) FROM o ORDER BY _rid) TO '{}' (FORMAT csv, HEADER true)", tmp.display())).unwrap();
+        let mut d = File::create(&out).unwrap();
+        d.write_all(&[0xef, 0xbb, 0xbf]).unwrap();
+        std::io::copy(&mut File::open(&tmp).unwrap(), &mut d).unwrap();
+        d.sync_all().unwrap();
+        eprintln!("MEASURE export (temp + copy, before) {:?}", t.elapsed());
+        let _ = fs::remove_file(&tmp);
+        let _ = fs::remove_file(&out);
+        let cp = src.with_file_name("o_cp949.csv");
+        let text = fs::read_to_string(src).unwrap();
+        fs::write(&cp, encoding_rs::EUC_KR.encode(&text).0).unwrap();
+        drop(text);
+        let t = std::time::Instant::now();
+        let mut s2 = DataStore::open_in_memory().unwrap();
+        s2.import_file_with_locale(&cp, "o", "ko-KR").unwrap();
+        eprintln!("MEASURE cp949 import {:?}", t.elapsed());
+        let _ = fs::remove_file(&cp);
+    }
 }

@@ -1133,7 +1133,7 @@ export default function App() {
     if (!path || Array.isArray(path)) return;
     const base = path.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") ?? "data";
     const suggested = base.replace(/[^\p{L}\p{N}_]/gu, "_").replace(/^(\d)/, "_$1");
-    const name = await ask("데이터 시트 가져오기", `데이터 시트 이름 (수식에서 이름[열]로 참조합니다)\nCSV 파일은 UTF-8 또는 UTF-16 인코딩이어야 합니다.`, suggested);
+    const name = await ask("데이터 시트 가져오기", "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)", suggested);
     if (!name) return;
     const t = performance.now();
     const table = await run("가져오는 중", () => api.importData(path, name, locale));
