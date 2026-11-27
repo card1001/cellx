@@ -1136,7 +1136,7 @@ export default function App() {
     const name = await ask("데이터 시트 가져오기", "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)", suggested);
     if (!name) return;
     const t = performance.now();
-    const table = await run("가져오는 중", () => api.importData(path, name));
+    const table = await run("가져오는 중", () => api.importData(path, name, locale));
     if (!table) return;
     await refreshInfo();
     sources.current.delete(tabKey({ kind: "data", name: table.name }));
@@ -1156,7 +1156,7 @@ export default function App() {
       ],
     });
     if (!path) return;
-    const ok = await run("내보내는 중", () => api.exportTable(src.info.name, path));
+    const ok = await run("내보내는 중", () => api.exportTable(src.info.name, path, locale));
     if (ok !== undefined) say(`내보냈습니다: ${path}`);
   };
 
