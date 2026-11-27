@@ -4009,6 +4009,12 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   }, []);
   useEffect(() => {
     const stored = saved.find((item) => item.id === selectedId && item.pipeline.source_table === source);
+    if (!selectedId) {
+      setGroupColumnsText("");
+      setAggregateColumn("");
+      setAggregateFunction("sum");
+      setAggregateName("total");
+    }
     const selected = stored?.pipeline.steps.find((step) => step.type === "select_columns");
     setColumnsText(selected?.type === "select_columns"
       ? selected.columns.join(", ")
