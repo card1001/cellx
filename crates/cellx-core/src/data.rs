@@ -186,12 +186,15 @@ impl DataStore {
         self.versions.get(table).copied().unwrap_or(0)
     }
 
-    /// Imports a CSV, TSV or Parquet file using the current UI locale as the preferred date convention.
+    /// Imports a CSV, TSV or Parquet file.
     pub fn import_file(&mut self, path: &Path, table: &str) -> Result<TableInfo> {
         self.import_file_with_locale(path, table, "ko-KR")
     }
 
-    pub fn import_file_with_locale(&mut self, path: &Path, table: &str, locale: &str) -> Result<TableInfo> {
+    /// `_locale` is kept for the API: dates are detected from the file itself
+    /// (ISO, and the other common forms DuckDB recognises), not forced to the
+    /// UI language, so the same file imports the same way in every language.
+    pub fn import_file_with_locale(&mut self, path: &Path, table: &str, _locale: &str) -> Result<TableInfo> {
         if !is_valid_table_name(table) {
             return Err(CellxError::InvalidName(table.to_string()));
         }
@@ -218,11 +221,10 @@ impl DataStore {
         let reader = if ext == "parquet" {
             "read_parquet(?)".to_string()
         } else {
-            let date_format = csv_date_format(locale);
             let delimiter = if ext == "tsv" { ", delim = '\\t'" } else { "" };
             format!(
-                "read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = '{}', dateformat = '{}', decimal_separator = '.'{})",
-                encoding, date_format, delimiter
+                "read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = '{}', decimal_separator = '.'{})",
+                encoding, delimiter
             )
         };
         let sql = format!(
@@ -501,7 +503,9 @@ impl DataStore {
         self.export_with_locale(table, path, "ko-KR")
     }
 
-    pub fn export_with_locale(&self, table: &str, path: &Path, locale: &str) -> Result<()> {
+    /// Dates are written as ISO (2025-05-04) whatever `_locale` is: a file
+    /// exported in one language must import the same way in another.
+    pub fn export_with_locale(&self, table: &str, path: &Path, _locale: &str) -> Result<()> {
         let path_text = path
             .to_str()
             .ok_or_else(|| CellxError::InvalidName(path.display().to_string()))?;
@@ -522,8 +526,8 @@ impl DataStore {
             .to_str()
             .ok_or_else(|| CellxError::InvalidName(temp_path.display().to_string()))?
             .replace('\'', "''");
-        let date_format = csv_date_format(locale);
-        let timestamp_format = csv_timestamp_format(locale);
+        let date_format = "%Y-%m-%d";
+        let timestamp_format = "%Y-%m-%d %H:%M:%S";
         let sql = format!(
             "COPY (SELECT * EXCLUDE (_rid) FROM {t} ORDER BY _rid) TO '{temp_text}' (FORMAT csv, HEADER true, DELIMITER ',', DATEFORMAT '{date_format}', TIMESTAMPFORMAT '{timestamp_format}')",
             t = quote_ident(table)
@@ -557,26 +561,6 @@ impl DataStore {
     pub fn checkpoint(&self) -> Result<()> {
         self.conn.execute_batch("CHECKPOINT")?;
         Ok(())
-    }
-}
-
-
-fn csv_date_format(locale: &str) -> &'static str {
-    let tag = locale.to_ascii_lowercase();
-    if tag.starts_with("en") {
-        "%m/%d/%Y"
-    } else if tag.starts_with("ja") || tag == "zh-tw" || tag.starts_with("zh-hant") {
-        "%Y/%m/%d"
-    } else {
-        "%Y-%m-%d"
-    }
-}
-
-fn csv_timestamp_format(locale: &str) -> &'static str {
-    match csv_date_format(locale) {
-        "%m/%d/%Y" => "%m/%d/%Y %H:%M:%S",
-        "%Y/%m/%d" => "%Y/%m/%d %H:%M:%S",
-        _ => "%Y-%m-%d %H:%M:%S",
     }
 }
 
@@ -675,19 +659,26 @@ mod tests {
         assert!(empty.rows.is_empty());
     }
 
-
     #[test]
-    fn csv_locale_date_patterns_are_stable() {
-        assert_eq!(csv_date_format("ko-KR"), "%Y-%m-%d");
-        assert_eq!(csv_date_format("en-US"), "%m/%d/%Y");
-        assert_eq!(csv_date_format("ja-JP"), "%Y/%m/%d");
-        assert_eq!(csv_date_format("zh-CN"), "%Y-%m-%d");
-        assert_eq!(csv_date_format("zh-TW"), "%Y/%m/%d");
+    fn csv_dates_import_and_export_the_same_way_in_every_language() {
+        let path = std::env::temp_dir().join(format!("cellx-iso-dates-{}.csv", std::process::id()));
+        fs::write(&path, "id,d\n1,2025-05-04\n2,2025-12-31\n").unwrap();
+        for locale in ["ko-KR", "en-US", "ja-JP", "zh-CN", "zh-TW"] {
+            let mut s = DataStore::open_in_memory().unwrap();
+            let info = s.import_file_with_locale(&path, "t", locale).unwrap();
+            assert_eq!(info.columns[1].kind, ColumnKind::Date, "{locale}");
+            let out = std::env::temp_dir().join(format!("cellx-iso-out-{}-{locale}.csv", std::process::id()));
+            s.export_with_locale("t", &out, locale).unwrap();
+            let text = fs::read_to_string(&out).unwrap();
+            assert!(text.contains("2025-05-04"), "{locale}: {text}");
+            let _ = fs::remove_file(out);
+        }
+        let _ = fs::remove_file(path);
     }
 
     #[test]
     fn csv_export_writes_utf8_bom_and_can_be_reimported() {
-        let mut source = store_with_sales();
+        let source = store_with_sales();
         let path = std::env::temp_dir().join(format!("cellx-locale-export-{}.csv", std::process::id()));
         let _ = fs::remove_file(&path);
         source.export_with_locale("sales", &path, "en-US").unwrap();
@@ -701,7 +692,6 @@ mod tests {
         assert_eq!(count, Scalar::Number(4.0));
         let _ = fs::remove_file(path);
     }
-
 
     #[test]
     fn csv_import_supports_utf16_bom() {
@@ -726,7 +716,6 @@ mod tests {
         assert_eq!(error.code(), "CSV_ENCODING");
         let _ = fs::remove_file(path);
     }
-
 
     #[test]
     fn tsv_import_uses_tab_delimiter_and_utf8_bom() {
