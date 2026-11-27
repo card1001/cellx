@@ -225,7 +225,16 @@ impl DataStore {
             "CREATE OR REPLACE TABLE {t} AS SELECT row_number() OVER () AS _rid, * FROM {reader}",
             t = quote_ident(table)
         );
-        self.conn.execute(&sql, [path_text])?;
+        match self.conn.execute(&sql, [path_text]) {
+            Ok(_) => {}
+            Err(error) => {
+                let diagnostic = error.to_string().to_ascii_lowercase();
+                if diagnostic.contains("utf-8") || diagnostic.contains("utf8") || diagnostic.contains("unicode") {
+                    return Err(CellxError::CsvEncoding("non-UTF-8 input".into()));
+                }
+                return Err(error.into());
+            }
+        }
         self.touch(table);
         self.table_info(table)
     }
