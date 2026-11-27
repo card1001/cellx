@@ -14,6 +14,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::recovery::RecoveryState;
+use cellx_core::project::SavedPipeline;
 
 pub struct Book {
     pub(crate) wb: Workbook,
@@ -21,21 +22,22 @@ pub struct Book {
     pub(crate) dirty: bool,
     /// Counts changes, so autosave knows whether there is anything new.
     pub(crate) edits: u64,
+    pub(crate) pipelines: Vec<SavedPipeline>,
 }
 
 impl Book {
     pub fn new() -> cellx_core::Result<Self> {
-        Ok(Book { wb: Workbook::new()?, path: None, dirty: false, edits: 0 })
+        Ok(Book { wb: Workbook::new()?, path: None, dirty: false, edits: 0, pipelines: Vec::new() })
     }
 
     pub fn open(path: &Path) -> cellx_core::Result<Self> {
-        let mut wb = if is_project(path) {
-            project::open_project(path)?
+        let (mut wb, pipelines) = if is_project(path) {
+            project::open_project_with_pipelines(path)?
         } else {
-            Workbook::open_xlsx(path)?
+            (Workbook::open_xlsx(path)?, Vec::new())
         };
         wb.recalc()?;
-        Ok(Book { wb, path: Some(path.to_path_buf()), dirty: false, edits: 0 })
+        Ok(Book { wb, path: Some(path.to_path_buf()), dirty: false, edits: 0, pipelines })
     }
 }
 
@@ -180,7 +182,7 @@ pub async fn save_file(state: State<'_, AppState>, recovery: State<'_, RecoveryS
     let p = PathBuf::from(&path);
     let mut book = lock(&state)?;
     if is_project(&p) {
-        project::save_project(&mut book.wb, &p).map_err(err)?;
+        project::save_project_with_pipelines(&mut book.wb, &p, &book.pipelines).map_err(err)?;
     } else {
         book.wb.save_xlsx(&p).map_err(err)?;
     }

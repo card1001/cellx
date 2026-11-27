@@ -3,6 +3,7 @@
 
 mod commands;
 mod recovery;
+mod pipeline_commands;
 
 use std::sync::Mutex;
 
@@ -79,6 +80,11 @@ fn main() {
             commands::unmerge,
             commands::import_data,
             commands::query_to_table,
+            pipeline_commands::transform_pipelines,
+            pipeline_commands::save_transform_pipeline,
+            pipeline_commands::delete_transform_pipeline,
+            pipeline_commands::preview_transform,
+            pipeline_commands::execute_transform_pipeline,
             commands::data_page,
             commands::update_data_cell,
             commands::export_table,

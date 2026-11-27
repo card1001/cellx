@@ -460,6 +460,31 @@ export interface TableInfo {
   columns: ColumnInfo[];
 }
 
+export type TransformValue =
+  | { type: "text"; value: string }
+  | { type: "number"; value: number }
+  | { type: "boolean"; value: boolean };
+
+export type CompareOperator = "equal" | "not_equal" | "greater_than" | "greater_than_or_equal" | "less_than" | "less_than_or_equal";
+export type FilterExpr =
+  | { op: "compare"; column: string; operator: CompareOperator; value: TransformValue }
+  | { op: "is_null"; column: string; negated: boolean }
+  | { op: "and" | "or"; conditions: FilterExpr[] }
+  | { op: "not"; expression: FilterExpr };
+
+export type CastType = "text" | "integer" | "big_int" | "double" | "boolean" | "date" | "timestamp";
+export interface TransformSortKey { column: string; descending: boolean }
+export type TransformStep =
+  | { type: "select_columns"; columns: string[] }
+  | { type: "filter"; predicate: FilterExpr }
+  | { type: "rename_column"; from: string; to: string }
+  | { type: "cast_column"; column: string; target: CastType }
+  | { type: "sort"; keys: TransformSortKey[] }
+  | { type: "limit"; rows: number };
+export interface TransformPipeline { source_table: string; steps: TransformStep[] }
+export interface SavedPipeline { id: string; name: string; pipeline: TransformPipeline }
+export interface TransformPreview { columns: string[]; rows: Scalar[][]; truncated: boolean }
+
 export interface Page {
   columns: string[];
   row_ids: number[];
@@ -701,6 +726,12 @@ export const api = {
 
   importData: (path: string, name: string, locale: string) => invoke<TableInfo>("import_data", { path, name, locale }),
   queryToTable: (sql: string, name: string) => invoke<TableInfo>("query_to_table", { sql, name }),
+  transformPipelines: () => invoke<SavedPipeline[]>("transform_pipelines"),
+  saveTransformPipeline: (saved: SavedPipeline) => invoke<SavedPipeline[]>("save_transform_pipeline", { saved }),
+  deleteTransformPipeline: (id: string) => invoke<SavedPipeline[]>("delete_transform_pipeline", { id }),
+  previewTransform: (pipeline: TransformPipeline) => invoke<TransformPreview>("preview_transform", { pipeline }),
+  executeTransformPipeline: (id: string, outputTable: string) =>
+    invoke<TableInfo>("execute_transform_pipeline", { id, outputTable }),
   dataPage: (table: string, offset: number, limit: number, sort: Sort | null, filters: ColumnFilter[]) =>
     invoke<Page>("data_page", { table, offset, limit, sort, filters }),
   updateDataCell: (table: string, rid: number, column: string, text: string) =>

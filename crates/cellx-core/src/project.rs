@@ -21,6 +21,15 @@ use crate::data::DataStore;
 use crate::error::{CellxError, Result};
 use crate::extras::PivotDef;
 use crate::workbook::{BridgeCell, Workbook};
+use crate::transform::TransformPipeline;
+
+/// A named, project-persisted transformation recipe.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SavedPipeline {
+    pub id: String,
+    pub name: String,
+    pub pipeline: TransformPipeline,
+}
 
 pub const FORMAT_VERSION: u32 = 1;
 
@@ -53,6 +62,10 @@ pub fn new_work_dir() -> Result<PathBuf> {
 }
 
 pub fn save_project(wb: &mut Workbook, path: &Path) -> Result<()> {
+    save_project_with_pipelines(wb, path, &[])
+}
+
+pub fn save_project_with_pipelines(wb: &mut Workbook, path: &Path, pipelines: &[SavedPipeline]) -> Result<()> {
     if wb.data_path().is_none() {
         let dir = new_work_dir()?;
         wb.persist_data_to(&dir.join("data.duckdb"))?;
@@ -85,6 +98,9 @@ pub fn save_project(wb: &mut Workbook, path: &Path) -> Result<()> {
         zip_err(zip.start_file("pivots.json", opts))?;
         zip.write_all(&serde_json::to_vec_pretty(&wb.pivots()).map_err(json_err)?)?;
 
+        zip_err(zip.start_file("pipelines.json", opts))?;
+        zip.write_all(&serde_json::to_vec_pretty(pipelines).map_err(json_err)?)?;
+
         let bridges: Vec<StoredBridge> = wb
             .bridges()
             .iter()
@@ -108,6 +124,10 @@ pub fn save_project(wb: &mut Workbook, path: &Path) -> Result<()> {
 }
 
 pub fn open_project(path: &Path) -> Result<Workbook> {
+    Ok(open_project_with_pipelines(path)?.0)
+}
+
+pub fn open_project_with_pipelines(path: &Path) -> Result<(Workbook, Vec<SavedPipeline>)> {
     let file = File::open(path)?;
     let mut zip = zip_err(zip::ZipArchive::new(file))?;
 
@@ -151,7 +171,12 @@ pub fn open_project(path: &Path) -> Result<Workbook> {
         wb.set_pivots(pivots);
     }
     wb.recalc()?;
-    Ok(wb)
+    // Pipelines were added after the initial .cellx format; older projects remain valid.
+    let pipelines = match read_entry(&mut zip, "pipelines.json") {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(json_err)?,
+        Err(_) => Vec::new(),
+    };
+    Ok((wb, pipelines))
 }
 
 // Upper bounds for untrusted project archives. These limits are intentionally
