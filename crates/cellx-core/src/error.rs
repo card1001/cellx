@@ -118,7 +118,7 @@ mod tests {
     #[test]
     fn csv_encoding_error_is_localized() {
         let error = CellxError::CsvEncoding("UTF-16LE".into());
-        assert!(error.localized_message("en-US").contains("Use a UTF-8 encoded file"));
+        assert!(error.localized_message("en-US").contains("Use a UTF-8 or UTF-16 encoded file"));
         assert!(error.localized_message("ja-JP").contains("UTF-8"));
         assert!(error.localized_message("ko-KR").contains("UTF-8"));
     }
