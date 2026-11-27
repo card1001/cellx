@@ -11,23 +11,23 @@ describe("localized desktop layout CSS", () => {
   });
 
   it("keeps ribbon tabs scrollable rather than clipping translated labels", () => {
-    expect(css).toMatch(/\.rtabs\s*\{[^}]*overflow-x:\s*auto/s);
-    expect(css).toMatch(/\.rtab\s*\{[^}]*flex:\s*none/s);
+    expect(css).toContain(".rtabs { min-width: 0; overflow-x: auto;");
+    expect(css).toContain(".rtab { flex: none;");
   });
 
   it("allows long menu labels to wrap", () => {
-    expect(css).toMatch(/\.menu-item\s*\{[^}]*white-space:\s*normal/s);
-    expect(css).toMatch(/\.menu-label\s*\{[^}]*min-width:\s*0/s);
+    expect(css).toContain(".menu-item { white-space: normal;");
+    expect(css).toContain(".menu-label { min-width: 0;");
   });
 
   it("constrains dialogs to the viewport and permits vertical scrolling", () => {
-    expect(css).toMatch(/\.modal\s*\{[^}]*max-height:\s*88vh/s);
-    expect(css).toMatch(/\.modal-body\s*\{[^}]*overflow:\s*auto/s);
-    expect(css).toMatch(/\.fmt-grid\s*\{[^}]*minmax\(0,\s*1fr\)/s);
+    expect(css).toContain("max-height: 88vh;");
+    expect(css).toContain(".modal-body { min-width: 0; max-height: calc(88vh - 52px); overflow: auto;");
+    expect(css).toContain(".fmt-grid { grid-template-columns: minmax(112px, 180px) minmax(0, 1fr);");
   });
 
   it("allows narrow data bars and action rows to reflow", () => {
-    expect(css).toMatch(/\.data-bar\s*\{[^}]*flex-wrap:\s*wrap/s);
-    expect(css).toMatch(/\.actions\s*\{[^}]*flex-wrap:\s*wrap/s);
+    expect(css).toContain(".data-bar { min-height: 30px; height: auto; flex-wrap: wrap;");
+    expect(css).toContain(".actions { flex-wrap: wrap;");
   });
 });
