@@ -37,6 +37,14 @@ describe("locale selection", () => {
     expect(translateText("zh-CN", "내보냈습니다: data.csv")).toBe("已导出： data.csv");
   });
 
+  it("translates CSV import guidance in all supported locales", () => {
+    const source = "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)\\nCSV 파일은 UTF-8 인코딩이어야 합니다. 날짜 형식은 현재 UI 언어를 따릅니다.";
+    expect(translateText("en-US", source)).toContain("UTF-8");
+    expect(translateText("ja-JP", source)).toContain("UTF-8");
+    expect(translateText("zh-CN", source)).toContain("UTF-8");
+    expect(translateText("zh-TW", source)).toContain("UTF-8");
+  });
+
   it("translates additional command labels in all supported locales", () => {
     expect(translateText("en-US", "찾기...")).toBe("Find...");
     expect(translateText("ja-JP", "찾기...")).toBe("検索...");
