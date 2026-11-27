@@ -38,7 +38,7 @@ describe("locale selection", () => {
   });
 
   it("translates CSV import guidance in all supported locales", () => {
-    const source = "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)\\nCSV 파일은 UTF-8 인코딩이어야 합니다. 날짜 형식은 현재 UI 언어를 따릅니다.";
+    const source = "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)\nCSV 파일은 UTF-8 인코딩이어야 합니다. 날짜 형식은 현재 UI 언어를 따릅니다.";
     expect(translateText("en-US", source)).toContain("UTF-8");
     expect(translateText("ja-JP", source)).toContain("UTF-8");
     expect(translateText("zh-CN", source)).toContain("UTF-8");
