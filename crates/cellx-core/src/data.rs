@@ -15,6 +15,7 @@ use serde::Serialize;
 
 use crate::error::{CellxError, Result};
 use crate::value::{from_duckdb, Scalar};
+use crate::transform::{TransformPipeline, TransformPlan};
 
 /// Column kind as the bridge needs it to translate Excel criteria.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -318,6 +319,16 @@ impl DataStore {
             .find(|c| c.name.eq_ignore_ascii_case(column))
             .cloned()
             .ok_or_else(|| CellxError::UnknownColumn(format!("{table}[{column}]")))
+    }
+
+    /// Builds a validated transformation plan against the current source schema.
+    ///
+    /// Planning does not execute SQL or modify the source table. The caller can
+    /// inspect the generated SQL and bound parameters before scheduling execution.
+    pub fn plan_transform(&mut self, pipeline: &TransformPipeline) -> Result<TransformPlan> {
+        let info = self.table_info(&pipeline.source_table)?;
+        let columns = info.columns.iter().map(|column| column.name.clone()).collect::<Vec<_>>();
+        pipeline.compile(&columns)
     }
 
     /// Runs a query that returns one value.
