@@ -421,8 +421,8 @@ pub fn unmerge(state: State<'_, AppState>, sheet: u32, range: CellRange) -> CmdR
 // ---------------------------------------------------------------- data sheets
 
 #[tauri::command]
-pub async fn import_data(state: State<'_, AppState>, path: String, name: String) -> CmdResult<TableInfo> {
-    edit(&state, |wb| wb.import_data(Path::new(&path), &name))
+pub async fn import_data(state: State<'_, AppState>, path: String, name: String, locale: String) -> CmdResult<TableInfo> {
+    edit(&state, |wb| wb.import_data_with_locale(Path::new(&path), &name, &locale))
 }
 
 #[tauri::command]
@@ -448,8 +448,8 @@ pub async fn update_data_cell(state: State<'_, AppState>, table: String, rid: i6
 }
 
 #[tauri::command]
-pub async fn export_table(state: State<'_, AppState>, table: String, path: String) -> CmdResult<()> {
-    read(&state, |wb| wb.data().export(&table, Path::new(&path)))
+pub async fn export_table(state: State<'_, AppState>, table: String, path: String, locale: String) -> CmdResult<()> {
+    read(&state, |wb| wb.data().export_with_locale(&table, Path::new(&path), &locale))
 }
 
 #[tauri::command]
