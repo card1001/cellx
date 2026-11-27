@@ -152,12 +152,7 @@ pub fn open_project(path: &Path) -> Result<Workbook> {
 
 pub fn open_project_with_pipelines(path: &Path) -> Result<(Workbook, Vec<SavedPipeline>)> {
     let (wb, pipelines, _) = open_project_with_assets(path)?;
-    let connectors = if zip.file_names().any(|name| name == "connectors.json") {
-        serde_json::from_slice(&read_entry(&mut zip, "connectors.json")?).map_err(json_err)?
-    } else {
-        Vec::new()
-    };
-    Ok((wb, pipelines, connectors))
+    Ok((wb, pipelines))
 }
 
 pub fn open_project_with_assets(path: &Path) -> Result<(Workbook, Vec<SavedPipeline>, Vec<SavedConnector>)> {
@@ -210,7 +205,12 @@ pub fn open_project_with_assets(path: &Path) -> Result<(Workbook, Vec<SavedPipel
     } else {
         Vec::new()
     };
-    Ok((wb, pipelines))
+    let connectors = if zip.file_names().any(|name| name == "connectors.json") {
+        serde_json::from_slice(&read_entry(&mut zip, "connectors.json")?).map_err(json_err)?
+    } else {
+        Vec::new()
+    };
+    Ok((wb, pipelines, connectors))
 }
 
 // Upper bounds for untrusted project archives. These limits are intentionally

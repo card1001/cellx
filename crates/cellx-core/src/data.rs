@@ -351,7 +351,8 @@ impl DataStore {
             TransformValue::Number(value) => duckdb::types::Value::Double(*value),
             TransformValue::Boolean(value) => duckdb::types::Value::Boolean(*value),
         }).collect::<Vec<_>>();
-        let limit = max_rows.clamp(1, 500).saturating_add(1);
+        let visible_limit = max_rows.clamp(1, 500);
+        let limit = visible_limit.saturating_add(1);
         let sql = format!(
             "SELECT * FROM ({}) AS {} LIMIT {}",
             plan.sql,
@@ -359,8 +360,8 @@ impl DataStore {
             limit
         );
         let (mut columns, mut rows, engine_truncated) = self.rows(&sql, &parameters, limit)?;
-        let truncated = engine_truncated || rows.len() > max_rows;
-        rows.truncate(max_rows);
+        let truncated = engine_truncated || rows.len() > visible_limit;
+        rows.truncate(visible_limit);
         // _rid is retained for stable internal ordering, but hidden in previews.
         if columns.first().is_some_and(|name| name == "_rid") {
             columns.remove(0);
