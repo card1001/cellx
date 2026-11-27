@@ -15,7 +15,7 @@ use serde::Serialize;
 
 use crate::error::{CellxError, Result};
 use crate::value::{from_duckdb, Scalar};
-use crate::transform::{TransformPipeline, TransformPlan};
+use crate::transform::{TransformPipeline, TransformPlan, TransformValue};
 
 /// Column kind as the bridge needs it to translate Excel criteria.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -331,6 +331,44 @@ impl DataStore {
         pipeline.compile(&columns)
     }
 
+    /// Executes a validated pipeline into a separate data sheet.
+    ///
+    /// The source is never modified. The output is replaced only after DuckDB
+    /// successfully evaluates the parameterized CREATE TABLE AS statement.
+    pub fn execute_transform(
+        &mut self,
+        output_table: &str,
+        pipeline: &TransformPipeline,
+    ) -> Result<TableInfo> {
+        if !is_valid_table_name(output_table) {
+            return Err(CellxError::InvalidName(output_table.to_string()));
+        }
+        if output_table.eq_ignore_ascii_case(&pipeline.source_table) {
+            return Err(CellxError::Bridge(
+                "변환 결과를 원본 데이터 시트에 덮어쓸 수 없습니다".into(),
+            ));
+        }
+
+        let plan = self.plan_transform(pipeline)?;
+        let parameters = plan
+            .parameters
+            .iter()
+            .map(|value| match value {
+                TransformValue::Text(value) => duckdb::types::Value::Text(value.clone()),
+                TransformValue::Number(value) => duckdb::types::Value::Double(*value),
+                TransformValue::Boolean(value) => duckdb::types::Value::Boolean(*value),
+            })
+            .collect::<Vec<_>>();
+        let sql = format!(
+            "CREATE OR REPLACE TABLE {} AS {}",
+            quote_ident(output_table),
+            plan.sql
+        );
+        self.conn.execute(&sql, params_from_iter(parameters.iter()))?;
+        self.touch(output_table);
+        self.table_info(output_table)
+    }
+
     /// Runs a query that returns one value.
     pub fn scalar(&self, sql: &str, params: &[duckdb::types::Value]) -> Result<Scalar> {
         let mut stmt = self.conn.prepare(sql)?;
@@ -630,6 +668,61 @@ mod tests {
             .unwrap();
         assert_eq!(page.total, 2);
         assert_eq!(page.rows[0][1], Scalar::Number(300.0));
+    }
+
+    #[test]
+    fn transform_pipeline_creates_a_separate_result_table() {
+        use crate::transform::{
+            CompareOperator, FilterExpr, TransformPipeline, TransformStep, TransformValue, SortKey,
+        };
+
+        let mut store = store_with_sales();
+        let pipeline = TransformPipeline {
+            source_table: "sales".into(),
+            steps: vec![
+                TransformStep::Filter {
+                    predicate: FilterExpr::Compare {
+                        column: "status".into(),
+                        operator: CompareOperator::NotEqual,
+                        value: TransformValue::Text("취소".into()),
+                    },
+                },
+                TransformStep::SelectColumns {
+                    columns: vec!["region".into(), "amount".into()],
+                },
+                TransformStep::Sort {
+                    keys: vec![SortKey {
+                        column: "amount".into(),
+                        descending: true,
+                    }],
+                },
+            ],
+        };
+
+        let result = store.execute_transform("sales_clean", &pipeline).unwrap();
+        assert_eq!(result.rows, 3);
+        assert_eq!(
+            result.columns.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(),
+            vec!["region", "amount"]
+        );
+        assert_eq!(
+            store.scalar("SELECT amount FROM sales_clean LIMIT 1", &[]).unwrap(),
+            Scalar::Number(300.0)
+        );
+        assert_eq!(store.table_info("sales").unwrap().rows, 4);
+    }
+
+    #[test]
+    fn transform_pipeline_cannot_overwrite_its_source() {
+        use crate::transform::TransformPipeline;
+
+        let mut store = store_with_sales();
+        let pipeline = TransformPipeline {
+            source_table: "sales".into(),
+            steps: vec![],
+        };
+        assert!(store.execute_transform("SALES", &pipeline).is_err());
+        assert_eq!(store.table_info("sales").unwrap().rows, 4);
     }
 
     #[test]
