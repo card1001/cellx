@@ -3124,7 +3124,13 @@ export default function App() {
         {showSql && (
           <SqlPanel
             tables={info?.tables ?? []}
-            onExecuted={async (table) => {\n              await refreshInfo();\n              sources.current.delete(tabKey({ kind: "data", name: table.name }));\n              switchTab({ kind: "data", name: table.name });\n              say(`${table.name}: ${formatCount(table.rows)}행`);\n            }}\n            onCreate={async (sql, name) => {
+            onExecuted={async (table) => {
+              await refreshInfo();
+              sources.current.delete(tabKey({ kind: "data", name: table.name }));
+              switchTab({ kind: "data", name: table.name });
+              say(`${table.name}: ${formatCount(table.rows)}행`);
+            }}
+            onCreate={async (sql, name) => {
               const table = await run("쿼리 실행 중", () => api.queryToTable(sql, name));
               if (!table) return;
               await refreshInfo();
@@ -3989,9 +3995,20 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
     void api.transformPipelines().then(setSaved).catch((e) => setError(errorText(e)));
   }, []);
   useEffect(() => {
-    setColumnsText(current?.columns.map((c) => c.name).join(", ") ?? "");
-    setFilterColumn(current?.columns[0]?.name ?? "");
-  }, [source]);
+    const stored = saved.find((item) => item.id === selectedId && item.pipeline.source_table === source);
+    const selected = stored?.pipeline.steps.find((step) => step.type === "select_columns");
+    setColumnsText(selected?.type === "select_columns"
+      ? selected.columns.join(", ")
+      : current?.columns.map((c) => c.name).join(", ") ?? "");
+    const filter = stored?.pipeline.steps.find((step) => step.type === "filter");
+    if (filter?.type === "filter" && filter.predicate.op === "compare") {
+      setFilterColumn(filter.predicate.column);
+      setFilterValue(filter.predicate.value.type === "text" ? filter.predicate.value.value : "");
+    } else {
+      setFilterColumn(current?.columns[0]?.name ?? "");
+      setFilterValue("");
+    }
+  }, [source, selectedId, saved]);
   const buildPipeline = (): TransformPipeline => {
     if (!source) throw new Error("원본 데이터 시트를 선택하세요.");
     const steps: TransformPipeline["steps"] = [];
