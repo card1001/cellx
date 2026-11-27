@@ -200,12 +200,12 @@ pub fn open_project_with_assets(path: &Path) -> Result<(Workbook, Vec<SavedPipel
     }
     wb.recalc()?;
     // Pipelines were added after the initial .cellx format; older projects remain valid.
-    let pipelines = if zip.file_names().any(|name| name == "pipelines.json") {
+    let pipelines = if zip.file_names().any(|name| name.is_ok_and(|entry| entry == "pipelines.json")) {
         serde_json::from_slice(&read_entry(&mut zip, "pipelines.json")?).map_err(json_err)?
     } else {
         Vec::new()
     };
-    let connectors = if zip.file_names().any(|name| name == "connectors.json") {
+    let connectors = if zip.file_names().any(|name| name.is_ok_and(|entry| entry == "connectors.json")) {
         serde_json::from_slice(&read_entry(&mut zip, "connectors.json")?).map_err(json_err)?
     } else {
         Vec::new()
