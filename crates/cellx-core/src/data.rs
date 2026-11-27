@@ -217,7 +217,7 @@ impl DataStore {
             let date_format = csv_date_format(locale);
             let delimiter = if ext == "tsv" { ", delim = '\\t'" } else { "" };
             format!(
-                "read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = 'utf-8', dateformat = '{}'{})",
+                "read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = 'utf-8', dateformat = '{}', decimal_separator = '.'{})",
                 date_format, delimiter
             )
         };
@@ -705,6 +705,18 @@ mod tests {
         let mut store = DataStore::open_in_memory().unwrap();
         let error = store.import_file_with_locale(&path, "invalid_csv", "ko-KR").unwrap_err();
         assert_eq!(error.code(), "CSV_ENCODING");
+        let _ = fs::remove_file(path);
+    }
+
+
+    #[test]
+    fn tsv_import_uses_tab_delimiter_and_utf8_bom() {
+        let path = std::env::temp_dir().join(format!("cellx-tsv-{}.tsv", std::process::id()));
+        fs::write(&path, b"\xef\xbb\xbfregion\tamount\nSeoul\t12.5\nBusan\t7.25\n").unwrap();
+        let mut store = DataStore::open_in_memory().unwrap();
+        let info = store.import_file_with_locale(&path, "tsv_data", "ko-KR").unwrap();
+        assert_eq!(info.rows, 2);
+        assert_eq!(info.columns.len(), 2);
         let _ = fs::remove_file(path);
     }
 
