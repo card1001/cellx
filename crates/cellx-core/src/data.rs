@@ -661,4 +661,42 @@ mod tests {
         let empty = s.page("sales", 0, 0, None, &[]).unwrap();
         assert!(empty.rows.is_empty());
     }
+
+
+    #[test]
+    fn csv_locale_date_patterns_are_stable() {
+        assert_eq!(csv_date_format("ko-KR"), "%Y-%m-%d");
+        assert_eq!(csv_date_format("en-US"), "%m/%d/%Y");
+        assert_eq!(csv_date_format("ja-JP"), "%Y/%m/%d");
+        assert_eq!(csv_date_format("zh-CN"), "%Y-%m-%d");
+        assert_eq!(csv_date_format("zh-TW"), "%Y/%m/%d");
+    }
+
+    #[test]
+    fn csv_export_writes_utf8_bom_and_can_be_reimported() {
+        let mut source = store_with_sales();
+        let path = std::env::temp_dir().join(format!("cellx-locale-export-{}.csv", std::process::id()));
+        let _ = fs::remove_file(&path);
+        source.export_with_locale("sales", &path, "en-US").unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert!(bytes.starts_with(&[0xef, 0xbb, 0xbf]));
+
+        let mut target = DataStore::open_in_memory().unwrap();
+        let info = target.import_file_with_locale(&path, "roundtrip", "en-US").unwrap();
+        assert_eq!(info.rows, 4);
+        let count = target.scalar("SELECT count(*) FROM roundtrip", &[]).unwrap();
+        assert_eq!(count, Scalar::Number(4.0));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn csv_import_rejects_utf16_with_a_specific_error_code() {
+        let path = std::env::temp_dir().join(format!("cellx-utf16-{}.csv", std::process::id()));
+        fs::write(&path, [0xff, 0xfe, 0x61, 0x00]).unwrap();
+        let mut store = DataStore::open_in_memory().unwrap();
+        let error = store.import_file_with_locale(&path, "invalid_csv", "ko-KR").unwrap_err();
+        assert_eq!(error.code(), "CSV_ENCODING");
+        let _ = fs::remove_file(path);
+    }
+
 }
