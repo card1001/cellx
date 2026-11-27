@@ -384,9 +384,11 @@ impl DataStore {
         if !is_valid_table_name(output_table) {
             return Err(CellxError::InvalidName(output_table.to_string()));
         }
-        if output_table.eq_ignore_ascii_case(&pipeline.source_table) {
+        if output_table.eq_ignore_ascii_case(&pipeline.source_table)
+            || pipeline.required_join_tables().iter().any(|table| output_table.eq_ignore_ascii_case(table))
+        {
             return Err(CellxError::Bridge(
-                "변환 결과를 원본 데이터 시트에 덮어쓸 수 없습니다".into(),
+                "변환 결과를 원본 또는 조인 입력 데이터 시트에 덮어쓸 수 없습니다".into(),
             ));
         }
 
@@ -799,6 +801,8 @@ mod tests {
                 },
             ],
         };
+        assert!(store.execute_transform("customers", &pipeline).is_err());
+        assert_eq!(store.table_info("customers").unwrap().rows, 2);
         let result = store.execute_transform("regional_totals", &pipeline).unwrap();
         assert_eq!(result.rows, 3);
         assert_eq!(
