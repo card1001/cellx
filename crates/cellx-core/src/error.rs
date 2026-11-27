@@ -20,7 +20,7 @@ pub enum CellxError {
     InvalidName(String),
     #[error("허용되지 않는 SQL입니다: {0}")]
     UnsafeSql(String),
-    #[error("지원하지 않는 CSV 인코딩입니다: {0} (UTF-8 파일을 사용하세요)")]
+    #[error("지원하지 않는 CSV 인코딩입니다: {0} (UTF-8 또는 UTF-16 파일을 사용하세요)")]
     CsvEncoding(String),
     #[error("{0}")]
     Bridge(String),
@@ -65,7 +65,7 @@ impl CellxError {
             Self::UnsafeSql(detail) => format!("{}: {detail}", message(locale, "허용되지 않는 SQL입니다", "SQL is not allowed", "許可されていない SQL です", "不允许执行此 SQL", "不允許執行此 SQL")),
             Self::CsvEncoding(encoding) => format!("{}: {encoding}. {}",
                 message(locale, "지원하지 않는 CSV 인코딩입니다", "Unsupported CSV encoding", "サポートされていない CSV エンコーディングです", "不支持的 CSV 编码", "不支援的 CSV 編碼"),
-                message(locale, "UTF-8 파일을 사용하세요", "Use a UTF-8 encoded file", "UTF-8 で保存されたファイルを使用してください", "请使用 UTF-8 编码的文件", "請使用 UTF-8 編碼的檔案")),
+                message(locale, "UTF-8 파일을 사용하세요", "Use a UTF-8 or UTF-16 encoded file", "UTF-8 または UTF-16 で保存されたファイルを使用してください", "请使用 UTF-8 或 UTF-16 编码的文件", "請使用 UTF-8 或 UTF-16 編碼的檔案")),
             Self::Bridge(detail) => format!("{}: {detail}", message(locale, "수식 연결 오류", "Formula bridge error", "数式ブリッジ エラー", "公式桥接错误", "公式橋接錯誤")),
         }
     }
