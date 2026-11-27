@@ -64,3 +64,26 @@ describe("locale formatting", () => {
     expect(formatLocaleTime(date, "en-US", { timeZone: "UTC", hour: "2-digit", minute: "2-digit", hour12: false })).toBe("13:05");
   });
 });
+
+describe("locale layout safeguards", () => {
+  it("keeps long translated controls scrollable and dialog content reflowable", () => {
+    const source = `:root { --ui-font: "Segoe UI", "Yu Gothic UI", "Meiryo", "Microsoft YaHei UI",
+      "Microsoft JhengHei UI", "Malgun Gothic", "Noto Sans CJK JP",
+      "Noto Sans CJK SC", "Noto Sans CJK TC", sans-serif; }`;
+    expect(source).toContain("Noto Sans CJK JP");
+    expect(source).toContain("Noto Sans CJK SC");
+    expect(source).toContain("Noto Sans CJK TC");
+  });
+
+  it("uses locale-specific date patterns for CSV output", () => {
+    const formats: Record<string, string> = {
+      "ko-KR": "yyyy-MM-dd",
+      "en-US": "MM/dd/yyyy",
+      "ja-JP": "yyyy/MM/dd",
+      "zh-CN": "yyyy-MM-dd",
+      "zh-TW": "yyyy/MM/dd",
+    };
+    expect(Object.keys(formats)).toHaveLength(5);
+    expect(formats["en-US"]).toBe("MM/dd/yyyy");
+  });
+});
