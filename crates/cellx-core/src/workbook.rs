@@ -1615,7 +1615,11 @@ impl Workbook {
     // ------------------------------------------------------------ data sheets
 
     pub fn import_data(&mut self, path: &Path, table: &str) -> Result<TableInfo> {
-        let info = self.data.import_file(path, table)?;
+        self.import_data_with_locale(path, table, "ko-KR")
+    }
+
+    pub fn import_data_with_locale(&mut self, path: &Path, table: &str, locale: &str) -> Result<TableInfo> {
+        let info = self.data.import_file_with_locale(path, table, locale)?;
         self.reclassify_bridges()?;
         self.recalc()?;
         Ok(info)
