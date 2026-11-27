@@ -15,12 +15,12 @@ Run the desktop app at 1024×768, 1280×800, and 1920×1080. Repeat the checklis
 
 ## CSV locale checks
 
-- Import UTF-8 and UTF-8-BOM CSV files with comma delimiters.
+- Import UTF-8, UTF-8-BOM and UTF-16-BOM CSV files with auto-detected comma/semicolon delimiters.
 - Import TSV files with tab delimiters.
 - Confirm the selected UI locale is used as the preferred date convention.
 - Export CSV and confirm UTF-8 BOM, header row, locale-specific date format, and decimal point.
 - Export/import Parquet and confirm the locale has no effect on Parquet values.
-- Confirm UTF-16/UTF-32 BOM files fail with a clear encoding message; convert them to UTF-8 before import.
+- Confirm UTF-32 BOM files fail with a clear encoding message. UTF-8 and UTF-16 are supported; legacy encodings such as CP949 require conversion to UTF-8 before import.
 
 ## Automated coverage
 
