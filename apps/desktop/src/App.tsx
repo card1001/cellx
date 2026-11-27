@@ -4150,7 +4150,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   return (
     <section style={{ borderTop: "1px solid var(--border)", marginTop: 16, paddingTop: 12 }}>
       <h4>로컬 파일 연결</h4>
-      <p className="muted">CSV, TSV, Parquet 파일을 로컬에서 가져오고 필요할 때 다시 불러옵니다. 파일 경로는 이 PC의 경로로 저장되며 외부로 전송되지 않습니다.</p>
+      <p className="muted">CSV, TSV, Parquet 파일을 로컬에서 가져오고 필요할 때 다시 불러옵니다. 파일 경로는 .cellx 프로젝트에 이 PC의 로컬 경로로 저장됩니다. CellX가 자동 전송하지 않지만 프로젝트 파일을 공유하면 경로 문자열도 함께 전달될 수 있습니다.</p>
       <button disabled={busy} onClick={() => void addConnector()}>로컬 파일 연결 추가</button>
       {connectors.map((connector) => (
         <div key={connector.id} style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
