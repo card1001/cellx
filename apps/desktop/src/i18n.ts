@@ -686,6 +686,24 @@ Object.assign(traditionalChinese, {
   "표 이름:":"表格名稱：","범위로 변환":"轉換成範圍","요약 행":"摘要列","줄무늬 행":"帶狀列","필터 단추":"篩選按鈕",
 });
 
+
+Object.assign(english, {
+  "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)":"Data sheet name (reference it in formulas as name[column])",
+  "CSV 파일은 UTF-8 인코딩이어야 합니다. 날짜 형식은 현재 UI 언어를 따릅니다.":"CSV files must use UTF-8 encoding. Date formats follow the current UI language.",
+});
+Object.assign(japanese, {
+  "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)":"データシート名 (数式では name[column] として参照します)",
+  "CSV 파일은 UTF-8 인코딩이어야 합니다. 날짜 형식은 현재 UI 언어를 따릅니다.":"CSV ファイルは UTF-8 エンコードである必要があります。日付形式は現在の UI 言語に従います。",
+});
+Object.assign(simplifiedChinese, {
+  "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)":"数据工作表名称（在公式中以 name[column] 引用）",
+  "CSV 파일은 UTF-8 인코딩이어야 합니다. 날짜 형식은 현재 UI 언어를 따릅니다.":"CSV 文件必须使用 UTF-8 编码。日期格式遵循当前界面语言。",
+});
+Object.assign(traditionalChinese, {
+  "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)":"資料工作表名稱（在公式中以 name[column] 參照）",
+  "CSV 파일은 UTF-8 인코딩이어야 합니다. 날짜 형식은 현재 UI 언어를 따릅니다.":"CSV 檔案必須使用 UTF-8 編碼。日期格式依照目前介面語言。",
+});
+
 const dictionary: Record<Locale, Record<string, string>> = {
   "ko-KR": {},
   "en-US": english,
