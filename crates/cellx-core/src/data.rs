@@ -200,14 +200,18 @@ impl DataStore {
             .ok_or_else(|| CellxError::InvalidName(path.display().to_string()))?;
 
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        let mut encoding = "utf-8";
         if ext != "parquet" {
             let mut file = File::open(path)?;
             let mut bom = [0_u8; 4];
             let count = file.read(&mut bom)?;
             let utf16 = count >= 2 && ((bom[0] == 0xff && bom[1] == 0xfe) || (bom[0] == 0xfe && bom[1] == 0xff));
             let utf32 = count >= 4 && ((bom == [0xff, 0xfe, 0x00, 0x00]) || (bom == [0x00, 0x00, 0xfe, 0xff]));
-            if utf16 || utf32 {
-                return Err(CellxError::CsvEncoding(if utf32 { "UTF-32".into() } else { "UTF-16".into() }));
+            if utf32 {
+                return Err(CellxError::CsvEncoding("UTF-32".into()));
+            }
+            if utf16 {
+                encoding = "utf-16";
             }
         }
 
@@ -217,8 +221,8 @@ impl DataStore {
             let date_format = csv_date_format(locale);
             let delimiter = if ext == "tsv" { ", delim = '\\t'" } else { "" };
             format!(
-                "read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = 'utf-8', dateformat = '{}', decimal_separator = '.'{})",
-                date_format, delimiter
+                "read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = '{}', dateformat = '{}', decimal_separator = '.'{})",
+                encoding, date_format, delimiter
             )
         };
         let sql = format!(
@@ -521,7 +525,7 @@ impl DataStore {
         let date_format = csv_date_format(locale);
         let timestamp_format = csv_timestamp_format(locale);
         let sql = format!(
-            "COPY (SELECT * EXCLUDE (_rid) FROM {t} ORDER BY _rid) TO '{temp_text}' (FORMAT csv, HEADER true, DELIMITER ',', DATEFORMAT '{date_format}', TIMESTAMPFORMAT '{timestamp_format}', DECIMAL_SEPARATOR '.')",
+            "COPY (SELECT * EXCLUDE (_rid) FROM {t} ORDER BY _rid) TO '{temp_text}' (FORMAT csv, HEADER true, DELIMITER ',', DATEFORMAT '{date_format}', TIMESTAMPFORMAT '{timestamp_format}')",
             t = quote_ident(table)
         );
         if let Err(error) = self.conn.execute_batch(&sql) {
@@ -698,10 +702,25 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+
     #[test]
-    fn csv_import_rejects_utf16_with_a_specific_error_code() {
+    fn csv_import_supports_utf16_bom() {
         let path = std::env::temp_dir().join(format!("cellx-utf16-{}.csv", std::process::id()));
-        fs::write(&path, [0xff, 0xfe, 0x61, 0x00]).unwrap();
+        let mut bytes = vec![0xff, 0xfe];
+        for unit in "name,amount\nalpha,12\n".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(&path, bytes).unwrap();
+        let mut store = DataStore::open_in_memory().unwrap();
+        let info = store.import_file_with_locale(&path, "utf16_data", "ko-KR").unwrap();
+        assert_eq!(info.rows, 1);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn csv_import_rejects_utf32_with_a_specific_error_code() {
+        let path = std::env::temp_dir().join(format!("cellx-utf32-{}.csv", std::process::id()));
+        fs::write(&path, [0xff, 0xfe, 0x00, 0x00, 0x61, 0x00, 0x00, 0x00]).unwrap();
         let mut store = DataStore::open_in_memory().unwrap();
         let error = store.import_file_with_locale(&path, "invalid_csv", "ko-KR").unwrap_err();
         assert_eq!(error.code(), "CSV_ENCODING");
