@@ -4,8 +4,11 @@
 //! identity after sorting or filtering.
 
 use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use duckdb::{params_from_iter, Connection, InterruptHandle};
 use serde::Serialize;
@@ -183,23 +186,40 @@ impl DataStore {
         self.versions.get(table).copied().unwrap_or(0)
     }
 
-    /// Imports a CSV, TSV or Parquet file as a data sheet.
+    /// Imports a CSV, TSV or Parquet file using the current UI locale as the preferred date convention.
     pub fn import_file(&mut self, path: &Path, table: &str) -> Result<TableInfo> {
+        self.import_file_with_locale(path, table, "ko-KR")
+    }
+
+    pub fn import_file_with_locale(&mut self, path: &Path, table: &str, locale: &str) -> Result<TableInfo> {
         if !is_valid_table_name(table) {
             return Err(CellxError::InvalidName(table.to_string()));
         }
         let path_text = path
             .to_str()
             .ok_or_else(|| CellxError::InvalidName(path.display().to_string()))?;
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let reader = match ext.as_str() {
-            "parquet" => "read_parquet(?)",
-            // A large sample keeps type inference stable without scanning the whole file twice.
-            _ => "read_csv(?, sample_size = 20480, ignore_errors = false)",
+
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        if ext != "parquet" {
+            let mut file = File::open(path)?;
+            let mut bom = [0_u8; 4];
+            let count = file.read(&mut bom)?;
+            let utf16 = count >= 2 && ((bom[0] == 0xff && bom[1] == 0xfe) || (bom[0] == 0xfe && bom[1] == 0xff));
+            let utf32 = count >= 4 && ((bom == [0xff, 0xfe, 0x00, 0x00]) || (bom == [0x00, 0x00, 0xfe, 0xff]));
+            if utf16 || utf32 {
+                return Err(CellxError::CsvEncoding(if utf32 { "UTF-32".into() } else { "UTF-16".into() }));
+            }
+        }
+
+        let reader = if ext == "parquet" {
+            "read_parquet(?)".to_string()
+        } else {
+            let date_format = csv_date_format(locale);
+            let delimiter = if ext == "tsv" { ", delim = '\\t'" } else { "" };
+            format!(
+                "read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = 'utf-8', dateformat = '{}'{})",
+                date_format, delimiter
+            )
         };
         let sql = format!(
             "CREATE OR REPLACE TABLE {t} AS SELECT row_number() OVER () AS _rid, * FROM {reader}",
@@ -463,21 +483,56 @@ impl DataStore {
         Ok(())
     }
 
-    /// Writes a query result (or a whole table) to CSV or Parquet.
+    /// Writes a data sheet to CSV or Parquet. CSV output is UTF-8 with BOM for desktop spreadsheet compatibility.
     pub fn export(&self, table: &str, path: &Path) -> Result<()> {
+        self.export_with_locale(table, path, "ko-KR")
+    }
+
+    pub fn export_with_locale(&self, table: &str, path: &Path, locale: &str) -> Result<()> {
         let path_text = path
             .to_str()
-            .ok_or_else(|| CellxError::InvalidName(path.display().to_string()))?
+            .ok_or_else(|| CellxError::InvalidName(path.display().to_string()))?;
+        let is_parquet = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("parquet"));
+        if is_parquet {
+            let escaped = path_text.replace('\'', "''");
+            self.conn.execute_batch(&format!(
+                "COPY (SELECT * EXCLUDE (_rid) FROM {t} ORDER BY _rid) TO '{escaped}' (FORMAT parquet)",
+                t = quote_ident(table)
+            ))?;
+            return Ok(());
+        }
+
+        static EXPORT_ID: AtomicU64 = AtomicU64::new(1);
+        let id = EXPORT_ID.fetch_add(1, Ordering::Relaxed);
+        let temp_path = path.with_file_name(format!(".cellx-export-{}-{id}.tmp", std::process::id()));
+        let temp_text = temp_path
+            .to_str()
+            .ok_or_else(|| CellxError::InvalidName(temp_path.display().to_string()))?
             .replace('\'', "''");
-        let format = match path.extension().and_then(|e| e.to_str()) {
-            Some(e) if e.eq_ignore_ascii_case("parquet") => "FORMAT parquet",
-            _ => "FORMAT csv, HEADER true",
-        };
-        self.conn.execute_batch(&format!(
-            "COPY (SELECT * EXCLUDE (_rid) FROM {t} ORDER BY _rid) TO '{path_text}' ({format})",
+        let date_format = csv_date_format(locale);
+        let timestamp_format = csv_timestamp_format(locale);
+        let sql = format!(
+            "COPY (SELECT * EXCLUDE (_rid) FROM {t} ORDER BY _rid) TO '{temp_text}' (FORMAT csv, HEADER true, DELIMITER ',', DATEFORMAT '{date_format}', TIMESTAMPFORMAT '{timestamp_format}', DECIMAL_SEPARATOR '.')",
             t = quote_ident(table)
-        ))?;
-        Ok(())
+        );
+        if let Err(error) = self.conn.execute_batch(&sql) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error.into());
+        }
+
+        let write_result = (|| -> Result<()> {
+            let mut source = File::open(&temp_path)?;
+            let mut destination = File::create(path)?;
+            destination.write_all(&[0xef, 0xbb, 0xbf])?;
+            std::io::copy(&mut source, &mut destination)?;
+            destination.sync_all()?;
+            Ok(())
+        })();
+        let _ = fs::remove_file(&temp_path);
+        if write_result.is_err() {
+            let _ = fs::remove_file(path);
+        }
+        write_result
     }
 
     /// Runs SQL written by CellX itself (never user input).
@@ -489,6 +544,26 @@ impl DataStore {
     pub fn checkpoint(&self) -> Result<()> {
         self.conn.execute_batch("CHECKPOINT")?;
         Ok(())
+    }
+}
+
+
+fn csv_date_format(locale: &str) -> &'static str {
+    let tag = locale.to_ascii_lowercase();
+    if tag.starts_with("en") {
+        "%m/%d/%Y"
+    } else if tag.starts_with("ja") || tag == "zh-tw" || tag.starts_with("zh-hant") {
+        "%Y/%m/%d"
+    } else {
+        "%Y-%m-%d"
+    }
+}
+
+fn csv_timestamp_format(locale: &str) -> &'static str {
+    match csv_date_format(locale) {
+        "%m/%d/%Y" => "%m/%d/%Y %H:%M:%S",
+        "%Y/%m/%d" => "%Y/%m/%d %H:%M:%S",
+        _ => "%Y-%m-%d %H:%M:%S",
     }
 }
 
