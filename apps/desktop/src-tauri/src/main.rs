@@ -34,6 +34,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::book_info,
+            commands::set_locale,
             recovery::autosave,
             recovery::recovery_list,
             recovery::recovery_open,

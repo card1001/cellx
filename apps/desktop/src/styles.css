@@ -410,3 +410,42 @@ input.tiny { width: 28px !important; min-width: 0 !important; height: 20px; marg
 .scenario-buttons { display: flex; flex-direction: column; gap: 6px; }
 .scenario-buttons button { min-width: 90px; }
 .scenario-values { max-height: 260px; overflow: auto; }
+
+
+/* ---------------------------------------------------------------- locale-aware layout safeguards
+   CJK translations are often wider than Korean labels. Keep navigation scrollable
+   and dialogs/menu content reflowable instead of clipping translated strings. */
+:root {
+  --ui-font: "Segoe UI", "Yu Gothic UI", "Meiryo", "Microsoft YaHei UI",
+    "Microsoft JhengHei UI", "Malgun Gothic", "Noto Sans CJK JP",
+    "Noto Sans CJK SC", "Noto Sans CJK TC", sans-serif;
+}
+.titlebar .doc-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rtabs { min-width: 0; overflow-x: auto; overflow-y: hidden; flex-wrap: nowrap; scrollbar-width: thin; }
+.rtab { flex: none; min-width: max-content; padding-inline: 8px; white-space: nowrap; }
+.rbody { min-width: 0; }
+.rgroup { min-width: 0; }
+.rgroup-label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.rb.big { min-width: 58px; max-width: 92px; overflow-wrap: anywhere; word-break: normal; }
+.dropdown-panel { max-width: min(90vw, 560px); }
+.menu { min-width: min(180px, 82vw); max-width: 82vw; }
+.menu-item { white-space: normal; overflow-wrap: anywhere; min-width: 0; }
+.menu-label { min-width: 0; }
+.modal {
+  width: min(92vw, 760px);
+  min-width: min(360px, 92vw);
+  max-height: 88vh;
+  overflow: auto;
+}
+.modal.wide { min-width: min(560px, 92vw); }
+.modal-body { min-width: 0; max-height: calc(88vh - 52px); overflow: auto; }
+.fmt-grid { grid-template-columns: minmax(112px, 180px) minmax(0, 1fr); }
+.actions { flex-wrap: wrap; }
+.tabs-head { min-width: 0; overflow-x: auto; flex-wrap: nowrap; }
+.tabs-head button { flex: none; white-space: nowrap; }
+.scenario-main { min-width: 0; flex-wrap: wrap; }
+.scenario-buttons { flex-direction: row; flex-wrap: wrap; }
+.data-bar { min-height: 30px; height: auto; flex-wrap: wrap; padding-block: 4px; }
+.data-bar input { max-width: min(240px, 42vw); }
+.statusbar { min-width: 0; }
+.statusbar .msg { min-width: 0; }

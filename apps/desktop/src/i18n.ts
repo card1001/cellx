@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 export const LOCALES = ["ko-KR", "en-US", "ja-JP", "zh-CN", "zh-TW"] as const;
 export type Locale = (typeof LOCALES)[number];
@@ -685,6 +686,36 @@ Object.assign(traditionalChinese, {
   "표 이름:":"表格名稱：","범위로 변환":"轉換成範圍","요약 행":"摘要列","줄무늬 행":"帶狀列","필터 단추":"篩選按鈕",
 });
 
+
+Object.assign(english, {
+  "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)":"Data sheet name (reference it in formulas as name[column])",
+  "CSV 파일은 UTF-8 또는 UTF-16 인코딩이어야 합니다.":"CSV files must use UTF-8 or UTF-16 encoding.",
+});
+Object.assign(japanese, {
+  "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)":"データシート名 (数式では name[column] として参照します)",
+  "CSV 파일은 UTF-8 또는 UTF-16 인코딩이어야 합니다.":"CSV ファイルは UTF-8 または UTF-16 エンコードである必要があります。",
+});
+Object.assign(simplifiedChinese, {
+  "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)":"数据工作表名称（在公式中以 name[column] 引用）",
+  "CSV 파일은 UTF-8 또는 UTF-16 인코딩이어야 합니다.":"CSV 文件必须使用 UTF-8 或 UTF-16 编码。",
+});
+Object.assign(traditionalChinese, {
+  "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)":"資料工作表名稱（在公式中以 name[column] 參照）",
+  "CSV 파일은 UTF-8 또는 UTF-16 인코딩이어야 합니다.":"CSV 檔案必須使用 UTF-8 或 UTF-16 編碼。",
+});
+
+Object.assign(english, {
+  "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)\nCSV 파일은 UTF-8 또는 UTF-16 인코딩이어야 합니다.": "Data sheet name (reference it in formulas as name[column])\nCSV files must use UTF-8 or UTF-16 encoding.",
+});
+Object.assign(japanese, {
+  "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)\nCSV 파일은 UTF-8 또는 UTF-16 인코딩이어야 합니다.": "データシート名 (数式では name[column] として参照します)\nCSV ファイルは UTF-8 または UTF-16 エンコードである必要があります。",
+});
+Object.assign(simplifiedChinese, {
+  "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)\nCSV 파일은 UTF-8 또는 UTF-16 인코딩이어야 합니다.": "数据工作表名称（在公式中以 name[column] 引用）\nCSV 文件必须使用 UTF-8 或 UTF-16 编码。",
+});
+Object.assign(traditionalChinese, {
+  "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)\nCSV 파일은 UTF-8 또는 UTF-16 인코딩이어야 합니다.": "資料工作表名稱（在公式中以 name[column] 參照）\nCSV 檔案必須使用 UTF-8 或 UTF-16 編碼。",
+});
 const dictionary: Record<Locale, Record<string, string>> = {
   "ko-KR": {},
   "en-US": english,
@@ -764,6 +795,9 @@ export function useI18n() {
       // Language selection still works for this session when storage is unavailable.
     }
     document.documentElement.lang = locale;
+    void invoke("set_locale", { locale }).catch(() => {
+      // The UI can still be used in a browser preview without the Tauri host.
+    });
   }, [locale]);
 
   return {

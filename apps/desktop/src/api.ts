@@ -699,13 +699,13 @@ export const api = {
   merge: (sheet: number, range: Range, center: boolean) => invoke<RecalcStats>("merge", { sheet, range, center }),
   unmerge: (sheet: number, range: Range) => invoke<RecalcStats>("unmerge", { sheet, range }),
 
-  importData: (path: string, name: string) => invoke<TableInfo>("import_data", { path, name }),
+  importData: (path: string, name: string, locale: string) => invoke<TableInfo>("import_data", { path, name, locale }),
   queryToTable: (sql: string, name: string) => invoke<TableInfo>("query_to_table", { sql, name }),
   dataPage: (table: string, offset: number, limit: number, sort: Sort | null, filters: ColumnFilter[]) =>
     invoke<Page>("data_page", { table, offset, limit, sort, filters }),
   updateDataCell: (table: string, rid: number, column: string, text: string) =>
     invoke<RecalcStats>("update_data_cell", { table, rid, column, text }),
-  exportTable: (table: string, path: string) => invoke<void>("export_table", { table, path }),
+  exportTable: (table: string, path: string, locale: string) => invoke<void>("export_table", { table, path, locale }),
   dropTable: (table: string) => invoke<BookInfo>("drop_table", { table }),
 };
 

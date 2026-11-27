@@ -37,6 +37,14 @@ describe("locale selection", () => {
     expect(translateText("zh-CN", "내보냈습니다: data.csv")).toBe("已导出： data.csv");
   });
 
+  it("translates CSV import guidance in all supported locales", () => {
+    const source = "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)\nCSV 파일은 UTF-8 인코딩이어야 합니다. 날짜 형식은 현재 UI 언어를 따릅니다.";
+    expect(translateText("en-US", source)).toContain("UTF-8");
+    expect(translateText("ja-JP", source)).toContain("UTF-8");
+    expect(translateText("zh-CN", source)).toContain("UTF-8");
+    expect(translateText("zh-TW", source)).toContain("UTF-8");
+  });
+
   it("translates additional command labels in all supported locales", () => {
     expect(translateText("en-US", "찾기...")).toBe("Find...");
     expect(translateText("ja-JP", "찾기...")).toBe("検索...");
@@ -58,9 +66,17 @@ describe("locale formatting", () => {
     expect(formatLocaleNumber(1234.5, "zh-CN")).toBe("1,234.5");
   });
 
+  it("formats dates using the selected locale", () => {
+    const date = new Date("2026-11-27T00:00:00Z");
+    expect(formatLocaleDate(date, "ja-JP", { timeZone: "UTC", year: "numeric", month: "2-digit", day: "2-digit" })).toBe("2026/11/27");
+    expect(formatLocaleDate(date, "zh-CN", { timeZone: "UTC", year: "numeric", month: "2-digit", day: "2-digit" })).toBe("2026/11/27");
+    expect(formatLocaleDate(date, "zh-TW", { timeZone: "UTC", year: "numeric", month: "2-digit", day: "2-digit" })).toBe("2026/11/27");
+  });
+
   it("formats date and time using the selected locale", () => {
     const date = new Date("2026-11-27T13:05:00Z");
     expect(formatLocaleDate(date, "en-US", { timeZone: "UTC", year: "numeric", month: "2-digit", day: "2-digit" })).toBe("11/27/2026");
     expect(formatLocaleTime(date, "en-US", { timeZone: "UTC", hour: "2-digit", minute: "2-digit", hour12: false })).toBe("13:05");
   });
 });
+

@@ -4,8 +4,11 @@
 //! identity after sorting or filtering.
 
 use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use duckdb::{params_from_iter, Connection, InterruptHandle};
 use serde::Serialize;
@@ -183,29 +186,61 @@ impl DataStore {
         self.versions.get(table).copied().unwrap_or(0)
     }
 
-    /// Imports a CSV, TSV or Parquet file as a data sheet.
+    /// Imports a CSV, TSV or Parquet file.
     pub fn import_file(&mut self, path: &Path, table: &str) -> Result<TableInfo> {
+        self.import_file_with_locale(path, table, "ko-KR")
+    }
+
+    /// `_locale` is kept for the API: dates are detected from the file itself
+    /// (ISO, and the other common forms DuckDB recognises), not forced to the
+    /// UI language, so the same file imports the same way in every language.
+    pub fn import_file_with_locale(&mut self, path: &Path, table: &str, _locale: &str) -> Result<TableInfo> {
         if !is_valid_table_name(table) {
             return Err(CellxError::InvalidName(table.to_string()));
         }
         let path_text = path
             .to_str()
             .ok_or_else(|| CellxError::InvalidName(path.display().to_string()))?;
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        let reader = match ext.as_str() {
-            "parquet" => "read_parquet(?)",
-            // A large sample keeps type inference stable without scanning the whole file twice.
-            _ => "read_csv(?, sample_size = 20480, ignore_errors = false)",
+
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        let mut encoding = "utf-8";
+        if ext != "parquet" {
+            let mut file = File::open(path)?;
+            let mut bom = [0_u8; 4];
+            let count = file.read(&mut bom)?;
+            let utf16 = count >= 2 && ((bom[0] == 0xff && bom[1] == 0xfe) || (bom[0] == 0xfe && bom[1] == 0xff));
+            let utf32 = count >= 4 && ((bom == [0xff, 0xfe, 0x00, 0x00]) || (bom == [0x00, 0x00, 0xfe, 0xff]));
+            if utf32 {
+                return Err(CellxError::CsvEncoding("UTF-32".into()));
+            }
+            if utf16 {
+                encoding = "utf-16";
+            }
+        }
+
+        let reader = if ext == "parquet" {
+            "read_parquet(?)".to_string()
+        } else {
+            let delimiter = if ext == "tsv" { ", delim = '\\t'" } else { "" };
+            format!(
+                "read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = '{}', decimal_separator = '.'{})",
+                encoding, delimiter
+            )
         };
         let sql = format!(
             "CREATE OR REPLACE TABLE {t} AS SELECT row_number() OVER () AS _rid, * FROM {reader}",
             t = quote_ident(table)
         );
-        self.conn.execute(&sql, [path_text])?;
+        match self.conn.execute(&sql, [path_text]) {
+            Ok(_) => {}
+            Err(error) => {
+                let diagnostic = error.to_string().to_ascii_lowercase();
+                if diagnostic.contains("utf-8") || diagnostic.contains("utf8") || diagnostic.contains("unicode") {
+                    return Err(CellxError::CsvEncoding("non-UTF-8 input".into()));
+                }
+                return Err(error.into());
+            }
+        }
         self.touch(table);
         self.table_info(table)
     }
@@ -463,21 +498,58 @@ impl DataStore {
         Ok(())
     }
 
-    /// Writes a query result (or a whole table) to CSV or Parquet.
+    /// Writes a data sheet to CSV or Parquet. CSV output is UTF-8 with BOM for desktop spreadsheet compatibility.
     pub fn export(&self, table: &str, path: &Path) -> Result<()> {
+        self.export_with_locale(table, path, "ko-KR")
+    }
+
+    /// Dates are written as ISO (2025-05-04) whatever `_locale` is: a file
+    /// exported in one language must import the same way in another.
+    pub fn export_with_locale(&self, table: &str, path: &Path, _locale: &str) -> Result<()> {
         let path_text = path
             .to_str()
-            .ok_or_else(|| CellxError::InvalidName(path.display().to_string()))?
+            .ok_or_else(|| CellxError::InvalidName(path.display().to_string()))?;
+        let is_parquet = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("parquet"));
+        if is_parquet {
+            let escaped = path_text.replace('\'', "''");
+            self.conn.execute_batch(&format!(
+                "COPY (SELECT * EXCLUDE (_rid) FROM {t} ORDER BY _rid) TO '{escaped}' (FORMAT parquet)",
+                t = quote_ident(table)
+            ))?;
+            return Ok(());
+        }
+
+        static EXPORT_ID: AtomicU64 = AtomicU64::new(1);
+        let id = EXPORT_ID.fetch_add(1, Ordering::Relaxed);
+        let temp_path = path.with_file_name(format!(".cellx-export-{}-{id}.tmp", std::process::id()));
+        let temp_text = temp_path
+            .to_str()
+            .ok_or_else(|| CellxError::InvalidName(temp_path.display().to_string()))?
             .replace('\'', "''");
-        let format = match path.extension().and_then(|e| e.to_str()) {
-            Some(e) if e.eq_ignore_ascii_case("parquet") => "FORMAT parquet",
-            _ => "FORMAT csv, HEADER true",
-        };
-        self.conn.execute_batch(&format!(
-            "COPY (SELECT * EXCLUDE (_rid) FROM {t} ORDER BY _rid) TO '{path_text}' ({format})",
+        let date_format = "%Y-%m-%d";
+        let timestamp_format = "%Y-%m-%d %H:%M:%S";
+        let sql = format!(
+            "COPY (SELECT * EXCLUDE (_rid) FROM {t} ORDER BY _rid) TO '{temp_text}' (FORMAT csv, HEADER true, DELIMITER ',', DATEFORMAT '{date_format}', TIMESTAMPFORMAT '{timestamp_format}')",
             t = quote_ident(table)
-        ))?;
-        Ok(())
+        );
+        if let Err(error) = self.conn.execute_batch(&sql) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error.into());
+        }
+
+        let write_result = (|| -> Result<()> {
+            let mut source = File::open(&temp_path)?;
+            let mut destination = File::create(path)?;
+            destination.write_all(&[0xef, 0xbb, 0xbf])?;
+            std::io::copy(&mut source, &mut destination)?;
+            destination.sync_all()?;
+            Ok(())
+        })();
+        let _ = fs::remove_file(&temp_path);
+        if write_result.is_err() {
+            let _ = fs::remove_file(path);
+        }
+        write_result
     }
 
     /// Runs SQL written by CellX itself (never user input).
@@ -586,4 +658,74 @@ mod tests {
         let empty = s.page("sales", 0, 0, None, &[]).unwrap();
         assert!(empty.rows.is_empty());
     }
+
+    #[test]
+    fn csv_dates_import_and_export_the_same_way_in_every_language() {
+        let path = std::env::temp_dir().join(format!("cellx-iso-dates-{}.csv", std::process::id()));
+        fs::write(&path, "id,d\n1,2025-05-04\n2,2025-12-31\n").unwrap();
+        for locale in ["ko-KR", "en-US", "ja-JP", "zh-CN", "zh-TW"] {
+            let mut s = DataStore::open_in_memory().unwrap();
+            let info = s.import_file_with_locale(&path, "t", locale).unwrap();
+            assert_eq!(info.columns[1].kind, ColumnKind::Date, "{locale}");
+            let out = std::env::temp_dir().join(format!("cellx-iso-out-{}-{locale}.csv", std::process::id()));
+            s.export_with_locale("t", &out, locale).unwrap();
+            let text = fs::read_to_string(&out).unwrap();
+            assert!(text.contains("2025-05-04"), "{locale}: {text}");
+            let _ = fs::remove_file(out);
+        }
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn csv_export_writes_utf8_bom_and_can_be_reimported() {
+        let source = store_with_sales();
+        let path = std::env::temp_dir().join(format!("cellx-locale-export-{}.csv", std::process::id()));
+        let _ = fs::remove_file(&path);
+        source.export_with_locale("sales", &path, "en-US").unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert!(bytes.starts_with(&[0xef, 0xbb, 0xbf]));
+
+        let mut target = DataStore::open_in_memory().unwrap();
+        let info = target.import_file_with_locale(&path, "roundtrip", "en-US").unwrap();
+        assert_eq!(info.rows, 4);
+        let count = target.scalar("SELECT count(*) FROM roundtrip", &[]).unwrap();
+        assert_eq!(count, Scalar::Number(4.0));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn csv_import_supports_utf16_bom() {
+        let path = std::env::temp_dir().join(format!("cellx-utf16-{}.csv", std::process::id()));
+        let mut bytes = vec![0xff, 0xfe];
+        for unit in "name,amount\nalpha,12\n".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(&path, bytes).unwrap();
+        let mut store = DataStore::open_in_memory().unwrap();
+        let info = store.import_file_with_locale(&path, "utf16_data", "ko-KR").unwrap();
+        assert_eq!(info.rows, 1);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn csv_import_rejects_utf32_with_a_specific_error_code() {
+        let path = std::env::temp_dir().join(format!("cellx-utf32-{}.csv", std::process::id()));
+        fs::write(&path, [0xff, 0xfe, 0x00, 0x00, 0x61, 0x00, 0x00, 0x00]).unwrap();
+        let mut store = DataStore::open_in_memory().unwrap();
+        let error = store.import_file_with_locale(&path, "invalid_csv", "ko-KR").unwrap_err();
+        assert_eq!(error.code(), "CSV_ENCODING");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn tsv_import_uses_tab_delimiter_and_utf8_bom() {
+        let path = std::env::temp_dir().join(format!("cellx-tsv-{}.tsv", std::process::id()));
+        fs::write(&path, b"\xef\xbb\xbfregion\tamount\nSeoul\t12.5\nBusan\t7.25\n").unwrap();
+        let mut store = DataStore::open_in_memory().unwrap();
+        let info = store.import_file_with_locale(&path, "tsv_data", "ko-KR").unwrap();
+        assert_eq!(info.rows, 2);
+        assert_eq!(info.columns.len(), 2);
+        let _ = fs::remove_file(path);
+    }
+
 }
