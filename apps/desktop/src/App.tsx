@@ -33,6 +33,7 @@ import {
   type TransformPipeline,
   type SavedPipeline,
   type TransformPreview,
+  type AggregateFunction,
 } from "./api";
 import { colorScaleRule, dataBarRule, highlightRule, type HighlightKind, ICON_SETS, iconSetRule, ratingRule } from "./cf";
 import { CHART_KINDS, ChartLayer } from "./components/Chart";
@@ -3976,6 +3977,13 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   const [columnsText, setColumnsText] = useState(props.tables[0]?.columns.map((c) => c.name).join(", ") ?? "");
   const [filterColumn, setFilterColumn] = useState("");
   const [filterValue, setFilterValue] = useState("");
+  const [joinTable, setJoinTable] = useState("");
+  const [joinLeft, setJoinLeft] = useState("");
+  const [joinRight, setJoinRight] = useState("");
+  const [groupColumnsText, setGroupColumnsText] = useState("");
+  const [aggregateColumn, setAggregateColumn] = useState("");
+  const [aggregateName, setAggregateName] = useState("total");
+  const [aggregateFunction, setAggregateFunction] = useState<AggregateFunction>("sum");
   const [name, setName] = useState("정제 파이프라인");
   const [output, setOutput] = useState("clean_result");
   const [saved, setSaved] = useState<SavedPipeline[]>([]);
@@ -3984,6 +3992,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const current = props.tables.find((t) => t.name === source);
+  const joinedTable = props.tables.find((t) => t.name === joinTable);
   useEffect(() => {
     if (!props.tables.some((t) => t.name === source)) {
       const next = props.tables[0];
@@ -4018,8 +4027,16 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
         predicate: { op: "compare", column: filterColumn, operator: "equal", value: { type: "text", value: filterValue } },
       });
     }
-    const selected = columnsText.split(",").map((v) => v.trim()).filter(Boolean);
-    if (selected.length) steps.push({ type: "select_columns", columns: selected });
+    const groups = groupColumnsText.split(",").map((v) => v.trim()).filter(Boolean);
+    const aggregates = (aggregateColumn.trim() || aggregateFunction === "count") && aggregateName.trim()
+      ? [{ function: aggregateFunction, column: aggregateColumn.trim() || null, as_name: aggregateName.trim() }]
+      : [];
+    if (groups.length || aggregates.length) {
+      steps.push({ type: "group_by", columns: groups, aggregates });
+    } else {
+      const selected = columnsText.split(",").map((v) => v.trim()).filter(Boolean);
+      if (selected.length) steps.push({ type: "select_columns", columns: selected });
+    }
     return { source_table: source, steps };
   };
   const runBusy = async (work: () => Promise<void>) => {
@@ -4055,6 +4072,24 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
     } else {
       setFilterValue("");
     }
+    const join = item.pipeline.steps.find((step) => step.type === "join");
+    if (join?.type === "join") {
+      setJoinTable(join.table); setJoinLeft(join.left_column); setJoinRight(join.right_column);
+    } else {
+      setJoinTable(""); setJoinLeft(""); setJoinRight("");
+    }
+    const group = item.pipeline.steps.find((step) => step.type === "group_by");
+    if (group?.type === "group_by") {
+      setGroupColumnsText(group.columns.join(", "));
+      const aggregate = group.aggregates[0];
+      if (aggregate) {
+        setAggregateFunction(aggregate.function);
+        setAggregateColumn(aggregate.column ?? "");
+        setAggregateName(aggregate.as_name);
+      }
+    } else {
+      setGroupColumnsText(""); setAggregateColumn("");
+    }
     setPreview(null);
   };
   return (
@@ -4085,6 +4120,53 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
       <label>필터 값
         <input value={filterValue} onChange={(e) => setFilterValue(e.target.value)} placeholder="비우면 필터 미적용" />
       </label>
+      <details>
+        <summary>테이블 조인</summary>
+        <label>조인할 데이터 시트
+          <select value={joinTable} onChange={(e) => {
+            const table = e.target.value;
+            setJoinTable(table);
+            setJoinLeft(current?.columns[0]?.name ?? "");
+            setJoinRight(props.tables.find((t) => t.name === table)?.columns[0]?.name ?? "");
+          }}>
+            <option value="">조인 안 함</option>
+            {props.tables.filter((t) => t.name !== source).map((t) => <option key={t.name} value={t.name}>{t.name}</option>)}
+          </select>
+        </label>
+        {joinTable && <>
+          <label>원본 조인 열
+            <select value={joinLeft} onChange={(e) => setJoinLeft(e.target.value)}>
+              {(current?.columns ?? []).map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+            </select>
+          </label>
+          <label>대상 조인 열
+            <select value={joinRight} onChange={(e) => setJoinRight(e.target.value)}>
+              {(joinedTable?.columns ?? []).map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+            </select>
+          </label>
+        </>}
+      </details>
+      <details>
+        <summary>그룹 및 집계</summary>
+        <label>그룹 기준 열 (쉼표 구분)
+          <input value={groupColumnsText} onChange={(e) => setGroupColumnsText(e.target.value)} placeholder="지역, 상품군" />
+        </label>
+        <label>집계 함수
+          <select value={aggregateFunction} onChange={(e) => setAggregateFunction(e.target.value as AggregateFunction)}>
+            <option value="sum">SUM</option><option value="count">COUNT</option><option value="average">AVERAGE</option>
+            <option value="min">MIN</option><option value="max">MAX</option>
+          </select>
+        </label>
+        <label>집계 대상 열
+          <select value={aggregateColumn} onChange={(e) => setAggregateColumn(e.target.value)}>
+            <option value="">COUNT(*) 또는 미사용</option>
+            {[...(current?.columns ?? []), ...(joinedTable?.columns ?? [])].map((c, i) => <option key={i} value={c.name}>{c.name}</option>)}
+          </select>
+        </label>
+        <label>집계 결과 열 이름
+          <input value={aggregateName} onChange={(e) => setAggregateName(e.target.value)} />
+        </label>
+      </details>
       <label>결과 데이터 시트 이름
         <input value={output} onChange={(e) => setOutput(e.target.value)} />
       </label>

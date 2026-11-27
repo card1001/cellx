@@ -328,7 +328,15 @@ impl DataStore {
     pub fn plan_transform(&mut self, pipeline: &TransformPipeline) -> Result<TransformPlan> {
         let info = self.table_info(&pipeline.source_table)?;
         let columns = info.columns.iter().map(|column| column.name.clone()).collect::<Vec<_>>();
-        pipeline.compile(&columns)
+        let mut joined_schemas = HashMap::new();
+        for table in pipeline.required_join_tables() {
+            let joined = self.table_info(&table)?;
+            joined_schemas.insert(
+                joined.name,
+                joined.columns.iter().map(|column| column.name.clone()).collect(),
+            );
+        }
+        pipeline.compile_with_schemas(&columns, &joined_schemas)
     }
 
     /// Returns a bounded preview without materializing or modifying a table.
@@ -754,6 +762,65 @@ mod tests {
             steps: vec![],
         };
         assert!(store.execute_transform("SALES", &pipeline).is_err());
+        assert_eq!(store.table_info("sales").unwrap().rows, 4);
+    }
+
+    #[test]
+    fn join_and_group_by_materialize_expected_aggregates() {
+        use crate::transform::{AggregateFunction, AggregateSpec, JoinKind, TransformPipeline, TransformStep};
+
+        let mut store = DataStore::open_in_memory().unwrap();
+        store.create_table_from_sql(
+            "orders",
+            "SELECT * FROM (VALUES (1, 10.0::DOUBLE), (1, 20.0), (2, 15.0), (3, 7.0)) AS t(customer_id, amount)",
+        ).unwrap();
+        store.create_table_from_sql(
+            "customers",
+            "SELECT * FROM (VALUES (1, '서울'), (2, '부산')) AS t(id, region)",
+        ).unwrap();
+        let pipeline = TransformPipeline {
+            source_table: "orders".into(),
+            steps: vec![
+                TransformStep::Join {
+                    table: "customers".into(),
+                    left_column: "customer_id".into(),
+                    right_column: "id".into(),
+                    kind: JoinKind::Left,
+                    suffix: "customer".into(),
+                },
+                TransformStep::GroupBy {
+                    columns: vec!["region".into()],
+                    aggregates: vec![AggregateSpec {
+                        function: AggregateFunction::Sum,
+                        column: Some("amount".into()),
+                        as_name: "total".into(),
+                    }],
+                },
+            ],
+        };
+        let result = store.execute_transform("regional_totals", &pipeline).unwrap();
+        assert_eq!(result.rows, 3);
+        assert_eq!(
+            store.scalar("SELECT total FROM regional_totals WHERE region = '서울'", &[]).unwrap(),
+            Scalar::Number(30.0)
+        );
+        assert_eq!(store.table_info("orders").unwrap().rows, 4);
+    }
+
+    #[test]
+    fn transform_preview_is_bounded_and_does_not_create_a_table() {
+        use crate::transform::{TransformPipeline, TransformStep};
+
+        let mut store = store_with_sales();
+        let pipeline = TransformPipeline {
+            source_table: "sales".into(),
+            steps: vec![TransformStep::Limit { rows: 1000 }],
+        };
+        let (columns, rows, truncated) = store.preview_transform(&pipeline, 2).unwrap();
+        assert_eq!(columns.len(), 4);
+        assert_eq!(rows.len(), 2);
+        assert!(truncated);
+        assert!(!store.has_table("preview"));
         assert_eq!(store.table_info("sales").unwrap().rows, 4);
     }
 

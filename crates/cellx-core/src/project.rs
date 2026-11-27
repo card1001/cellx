@@ -172,9 +172,10 @@ pub fn open_project_with_pipelines(path: &Path) -> Result<(Workbook, Vec<SavedPi
     }
     wb.recalc()?;
     // Pipelines were added after the initial .cellx format; older projects remain valid.
-    let pipelines = match read_entry(&mut zip, "pipelines.json") {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(json_err)?,
-        Err(_) => Vec::new(),
+    let pipelines = if zip.file_names().any(|name| name == "pipelines.json") {
+        serde_json::from_slice(&read_entry(&mut zip, "pipelines.json")?).map_err(json_err)?
+    } else {
+        Vec::new()
     };
     Ok((wb, pipelines))
 }
@@ -264,9 +265,18 @@ mod tests {
         wb.set_input(0, 1, 2, "=A1*10").unwrap();
         let dir = new_work_dir().unwrap();
         let path = dir.join("book.cellx");
-        save_project(&mut wb, &path).unwrap();
+        let saved_pipeline = SavedPipeline {
+            id: "pipeline-1".into(),
+            name: "Clean sales".into(),
+            pipeline: TransformPipeline {
+                source_table: "sales".into(),
+                steps: vec![],
+            },
+        };
+        save_project_with_pipelines(&mut wb, &path, &[saved_pipeline.clone()]).unwrap();
 
-        let mut reopened = open_project(&path).unwrap();
+        let (mut reopened, pipelines) = open_project_with_pipelines(&path).unwrap();
+        assert_eq!(pipelines, vec![saved_pipeline]);
         assert_eq!(reopened.value(0, 1, 2).unwrap(), Scalar::Number(40.0));
         assert_eq!(reopened.input(0, 1, 1).unwrap(), "=SUM(sales[v])");
         // The data sheet came back and the bridge still works against it.

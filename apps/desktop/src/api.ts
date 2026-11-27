@@ -474,13 +474,18 @@ export type FilterExpr =
 
 export type CastType = "text" | "integer" | "big_int" | "double" | "boolean" | "date" | "timestamp";
 export interface TransformSortKey { column: string; descending: boolean }
+export type JoinKind = "inner" | "left";
+export type AggregateFunction = "count" | "sum" | "average" | "min" | "max";
+export interface AggregateSpec { function: AggregateFunction; column: string | null; as_name: string }
 export type TransformStep =
   | { type: "select_columns"; columns: string[] }
   | { type: "filter"; predicate: FilterExpr }
   | { type: "rename_column"; from: string; to: string }
   | { type: "cast_column"; column: string; target: CastType }
   | { type: "sort"; keys: TransformSortKey[] }
-  | { type: "limit"; rows: number };
+  | { type: "limit"; rows: number }
+  | { type: "join"; table: string; left_column: string; right_column: string; kind: JoinKind; suffix: string }
+  | { type: "group_by"; columns: string[]; aggregates: AggregateSpec[] };
 export interface TransformPipeline { source_table: string; steps: TransformStep[] }
 export interface SavedPipeline { id: string; name: string; pipeline: TransformPipeline }
 export interface TransformPreview { columns: string[]; rows: Scalar[][]; truncated: boolean }

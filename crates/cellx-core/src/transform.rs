@@ -4,6 +4,8 @@
 //! SQL fragments. The resulting plan can be reviewed before execution and reused
 //! by the desktop UI, workflow runtime, and local AI tools.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::data::{is_valid_table_name, quote_ident};
@@ -25,6 +27,8 @@ pub enum TransformStep {
     CastColumn { column: String, target: CastType },
     Sort { keys: Vec<SortKey> },
     Limit { rows: u64 },
+    Join { table: String, left_column: String, right_column: String, kind: JoinKind, suffix: String },
+    GroupBy { columns: Vec<String>, aggregates: Vec<AggregateSpec> },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -115,6 +119,43 @@ pub struct SortKey {
     pub descending: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinKind {
+    Inner,
+    Left,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AggregateFunction {
+    Count,
+    Sum,
+    Average,
+    Min,
+    Max,
+}
+
+impl AggregateFunction {
+    fn sql(self) -> &'static str {
+        match self {
+            Self::Count => "COUNT",
+            Self::Sum => "SUM",
+            Self::Average => "AVG",
+            Self::Min => "MIN",
+            Self::Max => "MAX",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AggregateSpec {
+    pub function: AggregateFunction,
+    /// None is allowed only for COUNT(*).
+    pub column: Option<String>,
+    pub as_name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TransformPlan {
     /// SQL uses positional parameters and contains no user-supplied value literals.
@@ -127,8 +168,25 @@ pub struct TransformPlan {
 const MAX_PIPELINE_LIMIT: u64 = 100_000_000;
 
 impl TransformPipeline {
-    /// Validate the recipe against the source table schema and compile a safe plan.
+    /// Tables referenced by Join steps; callers resolve these against the live data catalog.
+    pub fn required_join_tables(&self) -> Vec<String> {
+        self.steps.iter().filter_map(|step| match step {
+            TransformStep::Join { table, .. } => Some(table.clone()),
+            _ => None,
+        }).collect()
+    }
+
+    /// Validate the recipe against the source schema and compile a safe plan.
     pub fn compile(&self, source_columns: &[String]) -> Result<TransformPlan> {
+        self.compile_with_schemas(source_columns, &HashMap::new())
+    }
+
+    /// Compile with schemas for every table referenced by a Join step.
+    pub fn compile_with_schemas(
+        &self,
+        source_columns: &[String],
+        joined_schemas: &HashMap<String, Vec<String>>,
+    ) -> Result<TransformPlan> {
         if !is_valid_table_name(&self.source_table) {
             return Err(CellxError::InvalidName(self.source_table.clone()));
         }
@@ -211,6 +269,105 @@ impl TransformPipeline {
                         "SELECT * FROM ({sql}) AS {} LIMIT {rows}",
                         quote_ident("_cellx_step")
                     );
+                }
+                TransformStep::Join { table, left_column, right_column, kind, suffix } => {
+                    if !is_valid_table_name(table) {
+                        return Err(CellxError::InvalidName(table.clone()));
+                    }
+                    let right_columns = joined_schemas.iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case(table))
+                        .map(|(_, columns)| columns)
+                        .ok_or_else(|| CellxError::UnknownTable(table.clone()))?;
+                    let left_index = find_column(&columns, left_column)?;
+                    let right_index = find_column(right_columns, right_column)?;
+                    let left_name = columns[left_index].clone();
+                    let right_name = right_columns[right_index].clone();
+                    let suffix = if suffix.trim().is_empty() { table.as_str() } else { suffix.as_str() };
+                    if suffix.len() > 32 {
+                        return Err(CellxError::InvalidName(suffix.to_string()));
+                    }
+                    let mut joined = columns.clone();
+                    let mut projection = vec![format!(
+                        "row_number() OVER (ORDER BY {}.{}, {}.{}) AS {}",
+                        quote_ident("_cellx_left"), quote_ident("_rid"),
+                        quote_ident("_cellx_right"), quote_ident("_rid"),
+                        quote_ident("_rid")
+                    )];
+                    for column in &columns {
+                        projection.push(format!(
+                            "{}.{} AS {}",
+                            quote_ident("_cellx_left"), quote_ident(column), quote_ident(column)
+                        ));
+                    }
+                    for column in right_columns.iter().filter(|name| name.as_str() != "_rid") {
+                        let mut output_name = column.clone();
+                        if joined.iter().any(|existing| existing.eq_ignore_ascii_case(&output_name)) {
+                            output_name = format!("{column}_{suffix}");
+                        }
+                        if joined.iter().any(|existing| existing.eq_ignore_ascii_case(&output_name)) {
+                            return Err(CellxError::Bridge(format!("조인 결과 열 이름이 중복됩니다: {output_name}")));
+                        }
+                        projection.push(format!(
+                            "{}.{} AS {}",
+                            quote_ident("_cellx_right"), quote_ident(column), quote_ident(&output_name)
+                        ));
+                        joined.push(output_name);
+                    }
+                    let join_sql = match kind { JoinKind::Inner => "INNER JOIN", JoinKind::Left => "LEFT JOIN" };
+                    sql = format!(
+                        "SELECT {} FROM ({sql}) AS {} {join_sql} {} AS {} ON {}.{} = {}.{}",
+                        projection.join(", "),
+                        quote_ident("_cellx_left"),
+                        quote_ident(table),
+                        quote_ident("_cellx_right"),
+                        quote_ident("_cellx_left"), quote_ident(&left_name),
+                        quote_ident("_cellx_right"), quote_ident(&right_name)
+                    );
+                    columns = joined;
+                }
+                TransformStep::GroupBy { columns: groups, aggregates } => {
+                    if groups.is_empty() && aggregates.is_empty() {
+                        return Err(CellxError::Bridge("그룹 기준 또는 집계 항목이 필요합니다".into()));
+                    }
+                    if !groups.is_empty() { validate_column_list(groups, &columns)?; }
+                    let mut output = groups.clone();
+                    let mut projection = Vec::with_capacity(groups.len() + aggregates.len() + 1);
+                    projection.push(format!("row_number() OVER () AS {}", quote_ident("_rid")));
+                    for group in groups {
+                        projection.push(quote_ident(&columns[find_column(&columns, group)?]));
+                    }
+                    for aggregate in aggregates {
+                        if aggregate.as_name.trim().is_empty() {
+                            return Err(CellxError::InvalidName(aggregate.as_name.clone()));
+                        }
+                        if output.iter().any(|name| name.eq_ignore_ascii_case(&aggregate.as_name)) {
+                            return Err(CellxError::Bridge(format!("집계 결과 열 이름이 중복됩니다: {}", aggregate.as_name)));
+                        }
+                        let expression = match (&aggregate.function, &aggregate.column) {
+                            (AggregateFunction::Count, None) => "COUNT(*)".to_string(),
+                            (_, Some(column)) => {
+                                let actual = &columns[find_column(&columns, column)?];
+                                format!("{}({})", aggregate.function.sql(), quote_ident(actual))
+                            }
+                            _ => return Err(CellxError::Bridge("COUNT(*) 외 집계에는 대상 열이 필요합니다".into())),
+                        };
+                        projection.push(format!("{expression} AS {}", quote_ident(&aggregate.as_name)));
+                        output.push(aggregate.as_name.clone());
+                    }
+                    let group_columns = groups.iter()
+                        .map(|name| find_column(&columns, name).map(|index| quote_ident(&columns[index])))
+                        .collect::<Result<Vec<_>>>()?;
+                    let group_sql = if group_columns.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" GROUP BY {}", group_columns.join(", "))
+                    };
+                    sql = format!(
+                        "SELECT {} FROM ({sql}) AS {}{group_sql}",
+                        projection.join(", "),
+                        quote_ident("_cellx_group")
+                    );
+                    columns = output;
                 }
             }
         }
