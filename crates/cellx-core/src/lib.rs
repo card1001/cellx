@@ -4,6 +4,7 @@
 //!   DuckDB for large data sheets.
 //! * [`bridge`] — turns `SUMIFS(sales[amount], …)` and friends into SQL.
 //! * [`data::DataStore`] — the DuckDB side: imports, paging, safe user SQL.
+//! * [`transform`] — typed, validated data-transformation recipes and SQL plans.
 //! * [`project`] — the `.cellx` project file.
 
 pub mod bridge;
@@ -26,6 +27,7 @@ pub mod shapes;
 pub mod sheets;
 pub mod slicers;
 pub mod sparklines;
+pub mod transform;
 pub mod value;
 pub mod whatif;
 pub mod workbook;
