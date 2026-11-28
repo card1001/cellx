@@ -1104,7 +1104,7 @@ impl DataStore {
             };
             row_ids.push(rid);
             data.push(row);
-            next_cursor = Some(SortCursor { value: cursor_value, rid, query_id });
+            next_cursor = Some(SortCursor { value: cursor_value, rid, query_id: query_id.clone() });
         }
         if !has_more { next_cursor = None; }
         Ok(KeysetPage {
