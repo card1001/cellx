@@ -29,26 +29,21 @@ fn file_fingerprint(path: &Path) -> CmdResult<String> {
     loop {
         let read = file.read(&mut buffer)
             .map_err(|e| format!("로컬 파일을 읽을 수 없습니다: {e}"))?;
-        if read == 0 {
-            break;
-        }
+        if read == 0 { break; }
         hasher.update(&buffer[..read]);
     }
 
-    // Do not persist a digest of a file that changed while it was being read.
+    // Refuse a digest if the source changed while it was being read.
     let after = file.metadata()
         .map_err(|e| format!("로컬 파일 정보를 다시 읽을 수 없습니다: {e}"))?;
-    let after_modified = after.modified().ok();
-    if before.len() != after.len() || before.modified().ok() != after_modified {
+    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
         return Err("파일을 읽는 동안 원본 파일이 변경되었습니다. 다시 시도해 주세요.".into());
     }
 
-    let digest = hasher.finalize()
-        .iter()
+    let digest = hasher.finalize().iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    // Keep the size and timestamp for diagnostics; the SHA-256 digest is the
-    // authoritative identity. Legacy size:mtime fingerprints safely appear changed.
+    // Legacy size:mtime fingerprints safely appear changed and are refreshed once.
     Ok(format!("sha256:{}:{modified}:{digest}", before.len()))
 }
 
@@ -100,17 +95,14 @@ pub fn save_data_connector(state: State<'_, AppState>, mut connector: SavedConne
     let schema = book.wb.data().inspect_file_schema(Path::new(&connector.path))
         .map_err(|e| e.to_string())?;
     connector.schema = schema.iter().map(|column| (column.name.clone(), column.sql_type.clone())).collect();
-    let before_import = file_fingerprint(Path::new(&connector.path))?;
+    // Store the pre-import digest. If the file changes during import, the next
+    // status poll detects the mismatch instead of silently blessing new content.
+    connector.fingerprint = file_fingerprint(Path::new(&connector.path))?;
     let table = book.wb.import_data_with_locale(
         Path::new(&connector.path),
         &connector.table_name,
         &connector.locale,
     ).map_err(|e| e.to_string())?;
-    let after_import = file_fingerprint(Path::new(&connector.path))?;
-    if before_import != after_import {
-        return Err("가져오는 동안 원본 파일이 변경되었습니다. 데이터 연결을 다시 새로 고쳐 주세요.".into());
-    }
-    connector.fingerprint = after_import;
     if let Some(existing) = book.connectors.iter_mut().find(|item| item.id == connector.id) {
         *existing = connector;
     } else {
@@ -137,18 +129,14 @@ pub fn refresh_data_connector(state: State<'_, AppState>, id: String, accept_sch
             connector.schema.len(), current_schema.len()
         ));
     }
-    let before_import = file_fingerprint(Path::new(&connector.path))?;
+    let fingerprint = file_fingerprint(Path::new(&connector.path))?;
     let table = book.wb.import_data_with_locale(
         Path::new(&connector.path),
         &connector.table_name,
         &connector.locale,
     ).map_err(|e| e.to_string())?;
-    let after_import = file_fingerprint(Path::new(&connector.path))?;
-    if before_import != after_import {
-        return Err("가져오는 동안 원본 파일이 변경되었습니다. 데이터 연결을 다시 새로 고쳐 주세요.".into());
-    }
     connector.schema = current_schema;
-    connector.fingerprint = after_import;
+    connector.fingerprint = fingerprint;
     if let Some(saved) = book.connectors.iter_mut().find(|item| item.id == connector.id) {
         *saved = connector;
     }
