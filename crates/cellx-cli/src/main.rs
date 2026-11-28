@@ -4,6 +4,7 @@
 //! cellx compat <파일 또는 폴더>...      Excel 저장값과 CellX 계산값 비교
 //! cellx gen-data --rows 1000000 -o x.csv  합성 주문 데이터 생성
 //! cellx bench-data x.csv                  데이터 시트 + 수식→SQL 성능 측정
+//! cellx bench-data-gen --rows 100000000 --db x.duckdb   같은 측정을 DuckDB 안에서 만든 데이터로
 //! cellx bench-calc --rows 25000           계산 엔진 성능 측정
 //! cellx bench-sheet --rows 100000         큰 시트 작업(저장·열기·정렬·필터…) 측정
 //! cellx eval <파일.xlsx> <셀>             파일을 열어 한 셀의 값 확인
@@ -60,6 +61,16 @@ enum Command {
         #[arg(long, default_value_t = 5)]
         runs: usize,
     },
+    /// 주문 데이터를 DuckDB 파일 안에서 바로 만들어 측정합니다 (CSV로 두기 어려운 1억 행 등).
+    BenchDataGen {
+        #[arg(long, default_value_t = 10_000_000)]
+        rows: u64,
+        /// 데이터 파일 경로 (측정 후 지워도 됩니다)
+        #[arg(long)]
+        db: PathBuf,
+        #[arg(long, default_value_t = 5)]
+        runs: usize,
+    },
     /// 일반 수식으로 채운 시트에서 계산 엔진 성능을 측정합니다.
     BenchCalc {
         #[arg(long, default_value_t = 25_000)]
@@ -106,6 +117,7 @@ fn main() -> Result<()> {
             println!("{} 행, {:.1} MB → {}", rows, size as f64 / 1e6, out.display());
         }
         Command::BenchData { csv, runs } => bench::bench_data(&csv, runs)?,
+        Command::BenchDataGen { rows, db, runs } => bench::bench_data_generated(rows, &db, runs)?,
         Command::BenchCalc { rows } => bench::bench_calc(rows)?,
         Command::BenchSheet { rows, dir } => bench::bench_sheet(rows, &dir)?,
         Command::MakeDemo { csv, out } => bench::make_demo(&csv, &out)?,

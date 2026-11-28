@@ -116,6 +116,22 @@ pub struct ColumnFilter {
 /// Hard cap for one grid request; callers cannot force unbounded result allocation.
 const MAX_PAGE_SIZE: u64 = 5_000;
 
+/// Pages of a sorted or filtered grid that end within this many rows are
+/// read with ORDER BY … LIMIT, which DuckDB answers with a cheap top-N.
+/// Deeper pages use a saved row order (see `PageView`).
+const TOP_N_ROWS: u64 = 20_000;
+
+/// The row order of one sort and filter of one table, saved in a temporary
+/// table (`pos` → `_rid`) the first time the grid scrolls past `TOP_N_ROWS`.
+/// Without it every page deep in a sorted 10-million-row sheet re-sorts the
+/// whole table (1.4 s a page; 24 s at 100 million rows).
+struct PageView {
+    key: String,
+    total: u64,
+}
+
+const PAGE_VIEW_TABLE: &str = "_cellx_page_view";
+
 pub struct DataStore {
     conn: Connection,
     schema_cache: HashMap<String, TableInfo>,
@@ -126,6 +142,10 @@ pub struct DataStore {
     version_clock: u64,
     /// Progress and cancellation of the long job running on this store.
     monitor: Arc<JobMonitor>,
+    /// The saved row order of the grid's current sort and filter, if any.
+    page_view: Option<PageView>,
+    /// Matching-row count of the grid's current filter, by the same key.
+    page_count: Option<(String, u64)>,
 }
 
 pub fn quote_ident(name: &str) -> String {
@@ -164,6 +184,8 @@ impl DataStore {
         let monitor = Arc::new(JobMonitor::new(conn.interrupt_handle(), conn.progress_handle()));
         let mut store = DataStore {
             monitor,
+            page_view: None,
+            page_count: None,
             conn,
             schema_cache: HashMap::new(),
             versions: HashMap::new(),
@@ -775,17 +797,55 @@ impl DataStore {
         };
         let cols: Vec<String> = info.columns.iter().map(|c| quote_ident(&c.name)).collect();
         let t = quote_ident(table);
-        let total = match self.scalar(
-            &format!("SELECT count(*) FROM {t} {where_clause}"),
-            &params,
-        )? {
-            Scalar::Number(n) => n as u64,
-            _ => 0,
-        };
-        let sql = format!(
-            "SELECT _rid, {cols} FROM {t} {where_clause} {order} LIMIT {limit} OFFSET {offset}",
-            cols = cols.join(", "),
+        let plain = sort.is_none() && where_sql.is_empty();
+        // Everything that decides which rows match and in what order.
+        let key = format!(
+            "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{:?}",
+            info.name,
+            self.version(&info.name),
+            where_clause,
+            order,
+            params
         );
+        let total = if plain {
+            info.rows
+        } else if let Some((_, n)) = self.page_count.as_ref().filter(|(k, _)| *k == key) {
+            *n
+        } else {
+            let n = match self.scalar(&format!("SELECT count(*) FROM {t} {where_clause}"), &params)? {
+                Scalar::Number(n) => n as u64,
+                _ => 0,
+            };
+            self.page_count = Some((key.clone(), n));
+            n
+        };
+        let deep = !plain && offset.saturating_add(limit) > TOP_N_ROWS;
+        let sql = if deep {
+            if self.page_view.as_ref().map(|v| v.key.as_str()) != Some(key.as_str()) {
+                self.page_view = None;
+                let view = quote_ident(PAGE_VIEW_TABLE);
+                // Insertion order is kept, so the temp table's rowid is the position.
+                self.conn.execute(
+                    &format!("CREATE OR REPLACE TEMP TABLE {view} AS SELECT _rid FROM {t} {where_clause} {order}"),
+                    params_from_iter(params.iter()),
+                )?;
+                self.page_view = Some(PageView { key: key.clone(), total });
+            }
+            let total = self.page_view.as_ref().map(|v| v.total).unwrap_or(total);
+            let end = offset.saturating_add(limit).min(total);
+            params.clear();
+            format!(
+                "SELECT t._rid, {cols} FROM (SELECT rowid AS pos, _rid FROM {view} WHERE rowid >= {offset} AND rowid < {end}) v \
+                 JOIN {t} t ON t._rid = v._rid ORDER BY v.pos",
+                cols = cols.iter().map(|c| format!("t.{c}")).collect::<Vec<_>>().join(", "),
+                view = quote_ident(PAGE_VIEW_TABLE),
+            )
+        } else {
+            format!(
+                "SELECT _rid, {cols} FROM {t} {where_clause} {order} LIMIT {limit} OFFSET {offset}",
+                cols = cols.join(", "),
+            )
+        };
         let (_, rows, _) = self.rows(&sql, &params, limit as usize)?;
         let mut row_ids = Vec::with_capacity(rows.len());
         let mut data = Vec::with_capacity(rows.len());
@@ -1408,6 +1468,53 @@ mod tests {
         let seen = watcher.join().unwrap();
         println!("rows {} in {:?}; progress samples {:?}", info.rows, start.elapsed(), seen);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn deep_pages_of_a_sorted_filtered_grid_match_a_direct_sort() {
+        let mut store = DataStore::open_in_memory().unwrap();
+        store
+            .create_table_from_sql(
+                "t",
+                "SELECT i AS id, (i * 7919) % 1000 AS v, CASE WHEN i % 3 = 0 THEN 'a' ELSE 'b' END AS g FROM range(60000) r(i)",
+            )
+            .unwrap();
+        let sort = Sort { column: "v".into(), descending: true };
+        let filters = [ColumnFilter { column: "g".into(), criterion: "b".into() }];
+        let ids = |p: &Page| p.rows.iter().map(|r| r[0].clone()).collect::<Vec<_>>();
+        let expected = |store: &DataStore, offset: u64| {
+            let (_, rows, _) = store
+                .rows(
+                    &format!("SELECT id FROM t WHERE g = 'b' ORDER BY v DESC NULLS LAST, _rid LIMIT 50 OFFSET {offset}"),
+                    &[],
+                    50,
+                )
+                .unwrap();
+            rows.into_iter().map(|mut r| r.remove(0)).collect::<Vec<_>>()
+        };
+        for offset in [0, 19_990, 25_000, 39_950] {
+            let page = store.page("t", offset, 50, Some(&sort), &filters).unwrap();
+            assert_eq!(page.total, 40_000);
+            assert_eq!(ids(&page), expected(&store, offset), "offset {offset}");
+        }
+        // The last page is short.
+        assert_eq!(store.page("t", 39_990, 50, Some(&sort), &filters).unwrap().rows.len(), 10);
+
+        // An edit changes the order: the saved order is rebuilt.
+        let first = store.page("t", 30_000, 1, Some(&sort), &filters).unwrap();
+        let rid = first.row_ids[0];
+        store.update_cell("t", rid, "v", "5000").unwrap();
+        let top = store.page("t", 0, 1, Some(&sort), &filters).unwrap();
+        assert_eq!(top.row_ids[0], rid);
+        let deep = store.page("t", 30_000, 50, Some(&sort), &filters).unwrap();
+        assert_eq!(ids(&deep), expected(&store, 30_000));
+        // Another sort direction is another order.
+        let asc = Sort { column: "v".into(), descending: false };
+        let deep = store.page("t", 25_000, 5, Some(&asc), &[]).unwrap();
+        let (_, rows, _) = store
+            .rows("SELECT id FROM t ORDER BY v ASC NULLS LAST, _rid LIMIT 5 OFFSET 25000", &[], 5)
+            .unwrap();
+        assert_eq!(ids(&deep), rows.into_iter().map(|mut r| r.remove(0)).collect::<Vec<_>>());
     }
 
     fn store_with_sales() -> DataStore {

@@ -125,6 +125,87 @@ pub fn bench_data(csv: &Path, runs: usize) -> Result<()> {
         import_ms,
         info.rows as f64 / (import_ms / 1000.0) / 1e4
     );
+    bench_formulas(&mut wb, runs)
+}
+
+/// Like `bench_data`, but the orders are generated inside a DuckDB file
+/// (`db`), with the same columns and distributions as `generate`, so row
+/// counts far beyond what fits on disk as CSV can be measured.
+pub fn bench_data_generated(rows: u64, db: &Path, runs: usize) -> Result<()> {
+    let mut wb = Workbook::new()?;
+    println!("DuckDB {}", wb.data().duckdb_version()?);
+    let _ = std::fs::remove_file(db);
+    let _ = std::fs::remove_file(db.with_extension("duckdb.wal"));
+    wb.persist_data_to(db)?;
+    let list = |items: &[&str]| {
+        items.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(", ")
+    };
+    // hash(i, k) gives each column its own pseudo-random stream.
+    let sql = format!(
+        "SELECT id, customer_id, product_id, order_date, category, region, quantity, unit_price, \
+                CASE WHEN hash(id, 9) % 100 = 0 THEN NULL ELSE quantity * unit_price END AS amount, status \
+         FROM (SELECT i AS id, \
+                      CAST(1 + hash(i, 1) % {cust} AS BIGINT) AS customer_id, \
+                      CAST(1 + hash(i, 2) % 5000 AS BIGINT) AS product_id, \
+                      DATE '2024-01-01' + CAST(hash(i, 3) % 900 AS INTEGER) AS order_date, \
+                      [{cats}][CAST(1 + hash(i, 4) % {ncat} AS BIGINT)] AS category, \
+                      [{regs}][CAST(1 + hash(i, 5) % {nreg} AS BIGINT)] AS region, \
+                      CAST(1 + hash(i, 6) % 20 AS BIGINT) AS quantity, \
+                      CAST(1000 + hash(i, 7) % 199 * 1000 AS BIGINT) AS unit_price, \
+                      CASE WHEN hash(i, 8) % 100 < 90 THEN '정상' WHEN hash(i, 8) % 100 < 97 THEN '취소' ELSE '환불' END AS status \
+               FROM range(1, {end}) t(i))",
+        cust = rows / 10 + 1,
+        cats = list(CATEGORIES),
+        ncat = CATEGORIES.len(),
+        regs = list(REGIONS),
+        nreg = REGIONS.len(),
+        end = rows + 1,
+    );
+    let t = Instant::now();
+    let info = wb.data().create_table_from_sql("orders", &sql)?;
+    let ms = t.elapsed().as_secs_f64() * 1000.0;
+    wb.data().checkpoint()?;
+    let size = std::fs::metadata(db).map(|m| m.len()).unwrap_or(0);
+    println!(
+        "생성: {} 행, {:.0} ms, 데이터 파일 {:.1} MB",
+        info.rows,
+        ms,
+        size as f64 / 1e6
+    );
+    bench_formulas(&mut wb, runs)
+}
+
+/// What the data-sheet grid asks for while scrolling, sorting and filtering.
+fn bench_grid(wb: &mut Workbook, runs: usize) -> Result<()> {
+    use cellx_core::data::{ColumnFilter, Sort};
+    let total = wb.data_page("orders", 0, 1, None, &[])?.total;
+    let f = |c: &str, v: &str| ColumnFilter { column: c.into(), criterion: v.into() };
+    let cases: Vec<(&str, u64, Option<Sort>, Vec<ColumnFilter>)> = vec![
+        ("첫 화면 (100행)", 0, None, vec![]),
+        ("가운데로 스크롤", total / 2, None, vec![]),
+        ("금액 내림차순 정렬", 0, Some(Sort { column: "amount".into(), descending: true }), vec![]),
+        ("정렬 후 가운데", total / 2, Some(Sort { column: "amount".into(), descending: true }), vec![]),
+        ("필터 지역=서울", 0, None, vec![f("region", "서울")]),
+        ("필터 2개 + 정렬", 0, Some(Sort { column: "order_date".into(), descending: false }),
+            vec![f("region", "서울"), f("category", "*가전")]),
+    ];
+    println!("\n{:<24} {:>12} {:>12} {:>14}", "격자 작업", "첫 요청 ms", "중앙값 ms", "일치 행");
+    for (label, offset, sort, filters) in cases {
+        let mut times = Vec::with_capacity(runs);
+        let mut matched = 0;
+        for _ in 0..runs.max(1) {
+            let t = Instant::now();
+            let page = wb.data_page("orders", offset, 100, sort.as_ref(), &filters)?;
+            times.push(t.elapsed().as_secs_f64() * 1000.0);
+            matched = page.total;
+        }
+        println!("{:<24} {:>12.1} {:>12.1} {:>14}", label, times[0], median(times.clone()), matched);
+    }
+    Ok(())
+}
+
+fn bench_formulas(wb: &mut Workbook, runs: usize) -> Result<()> {
+    bench_grid(wb, runs)?;
     println!("\n{:<24} {:>12} {:>12} {:>12} {:>14}  결과", "수식", "첫 계산 ms", "중앙값 ms", "P95 ms", "캐시 적중 ms");
     for (i, (label, formula)) in DATA_FORMULAS.iter().enumerate() {
         let row = i as i32 + 1;
