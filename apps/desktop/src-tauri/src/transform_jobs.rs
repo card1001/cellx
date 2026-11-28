@@ -77,8 +77,9 @@ pub fn start_transform_job(
         let mut records = jobs_map.lock().map_err(|_| "작업 상태를 잠글 수 없습니다".to_string())?;
         // Bound in-memory job history for long-running desktop sessions.
         if records.len() >= 100 {
-            if let Some(retained) = records.keys().next().cloned() {
-                records.remove(&retained);
+            // IDs begin with a millisecond timestamp, so lexical order is chronological.
+            if let Some(oldest) = records.keys().min().cloned() {
+                records.remove(&oldest);
             }
         }
         records.insert(id.clone(), JobControl {
@@ -155,6 +156,16 @@ pub fn start_transform_job(
     }
 
     Ok(snapshot)
+}
+
+#[tauri::command]
+pub fn list_transform_jobs(
+    jobs: State<'_, JobState>,
+) -> Result<Vec<TransformJobSnapshot>, String> {
+    let records = jobs.0.lock().map_err(|_| "작업 상태를 잠글 수 없습니다".to_string())?;
+    let mut snapshots = records.values().map(|record| record.snapshot.clone()).collect::<Vec<_>>();
+    snapshots.sort_by(|a, b| b.id.cmp(&a.id));
+    Ok(snapshots)
 }
 
 #[tauri::command]
