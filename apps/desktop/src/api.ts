@@ -504,6 +504,13 @@ export interface TableProfile {
   row_count: number;
   columns: ColumnProfile[];
 }
+export interface TransformJobSnapshot {
+  id: string;
+  status: "queued" | "running" | "cancelling" | "completed" | "cancelled" | "failed";
+  phase: string;
+  result: TableInfo | null;
+  error: string | null;
+}
 
 
 export interface Page {
@@ -754,6 +761,10 @@ export const api = {
   previewTransform: (pipeline: TransformPipeline) => invoke<TransformPreview>("preview_transform", { pipeline }),
   executeTransformPipeline: (id: string, outputTable: string) =>
     invoke<TableInfo>("execute_transform_pipeline", { id, outputTable }),
+  startTransformJob: (pipelineId: string, outputTable: string) =>
+    invoke<TransformJobSnapshot>("start_transform_job", { pipelineId, outputTable }),
+  getTransformJob: (id: string) => invoke<TransformJobSnapshot>("get_transform_job", { id }),
+  cancelTransformJob: (id: string) => invoke<TransformJobSnapshot>("cancel_transform_job", { id }),
   dataConnectors: () => invoke<SavedConnector[]>("data_connectors"),
   saveDataConnector: (connector: SavedConnector) => invoke<TableInfo>("save_data_connector", { connector }),
   refreshDataConnector: (id: string) => invoke<TableInfo>("refresh_data_connector", { id }),
