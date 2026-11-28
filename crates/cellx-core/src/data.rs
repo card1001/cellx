@@ -898,7 +898,7 @@ mod tests {
     #[test]
     fn inspect_csv_schema_does_not_import_or_mutate_a_table() {
         let path = std::env::temp_dir().join(format!("cellx-inspect-schema-{}.csv", std::process::id()));
-        fs::write(&path, "region,amount\\nSeoul,12.5\\nBusan,7.25\\n").unwrap();
+        fs::write(&path, "region,amount\nSeoul,12.5\nBusan,7.25\n").unwrap();
         let store = DataStore::open_in_memory().unwrap();
         let schema = store.inspect_file_schema(&path).unwrap();
         assert_eq!(schema.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), vec!["region", "amount"]);
@@ -912,7 +912,7 @@ mod tests {
     fn inspect_utf16_csv_schema_uses_the_import_encoding() {
         let path = std::env::temp_dir().join(format!("cellx-inspect-utf16-{}.csv", std::process::id()));
         let mut bytes = vec![0xff, 0xfe];
-        for unit in "name,amount\\nalpha,12\\n".encode_utf16() {
+        for unit in "name,amount\nalpha,12\n".encode_utf16() {
             bytes.extend_from_slice(&unit.to_le_bytes());
         }
         fs::write(&path, bytes).unwrap();
