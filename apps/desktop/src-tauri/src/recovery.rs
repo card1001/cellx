@@ -73,7 +73,13 @@ impl Recovery {
             return Ok(false);
         }
         let target = self.file(&self.id, "cellx");
-        project::save_project(&mut book.wb, &target).map_err(|e| e.to_string())?;
+        project::save_project_with_execution_history(
+            &mut book.wb,
+            &target,
+            &book.pipelines.clone(),
+            &book.connectors.clone(),
+            &book.transform_runs.clone(),
+        ).map_err(|e| e.to_string())?;
         let original = book.path.as_ref().map(|p| p.display().to_string());
         let name = book
             .path
