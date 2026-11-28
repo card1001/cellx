@@ -1,7 +1,7 @@
 import { getActiveLocale, tr } from "./i18n";
 import { DataJobProgress } from "./components/DataJobProgress";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Profiler, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   SPREADSHEET_EXTENSIONS,
@@ -89,6 +89,8 @@ import { DataSource, SheetSource } from "./grid/sources";
 import { START, tabKey, type Session, type Tab } from "./appTypes";
 import type { Dialog } from "./appDialogs";
 import { editorWidth, formatCount, formatNumber } from "./appUtils";
+import { useAppCommands } from "./hooks/useAppCommands";
+import { useDialogController } from "./hooks/useDialogController";
 
 const ARROWS: Record<string, Direction> = { ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right" };
 const DELTA: Record<Direction, [number, number]> = { Up: [-1, 0], Down: [1, 0], Left: [0, -1], Right: [0, 1] };
@@ -97,6 +99,8 @@ const FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72
 
 export default function App() {
   const { locale, setLocale, t } = useI18n();
+  const { message, setMessage, busy, dataJob, say, fail, run, runDataJob } = useAppCommands(tr);
+  const { dialog, setDialog, ask } = useDialogController(tr);
   const [info, setInfo] = useState<BookInfo | null>(null);
   const [functions, setFunctions] = useState<string[]>([]);
   const [tab, setTabState] = useState<Tab>({ kind: "sheet", index: 0 });
@@ -105,13 +109,10 @@ export default function App() {
   const [detail, setDetail] = useState<CellDetail | null>(null);
   const [stats, setStats] = useState<RecalcStats | null>(null);
   const [selStats, setSelStats] = useState<SelectionStats | null>(null);
-  const [message, setMessage] = useState<{ text: string; error?: boolean } | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  // A long data-sheet command (import, export, query) is running: shows the progress window.
-  const [dataJob, setDataJob] = useState(false);
+  // Command feedback and data-job lifecycle are owned by useAppCommands.
   const [zoom, setZoom] = useState(1);
   const [showSql, setShowSql] = useState(false);
-  const [dialog, setDialog] = useState<Dialog>(null);
+  // Dialog state and prompt lifecycle are owned by useDialogController.
   const [findOpen, setFindOpen] = useState(false);
   const [findTab, setFindTab] = useState<"찾기" | "바꾸기">("찾기");
   const [filter, setFilter] = useState<AutoFilter | null>(null);
@@ -168,6 +169,10 @@ export default function App() {
   const [editMemo, setEditMemo] = useState<Pos | null>(null);
   const [showMemos, setShowMemos] = useState(false);
   const [, force] = useState(0);
+  const gridPerf = useRef({ renderMs: 0, commits: 0 });
+  const onGridRender = useCallback((_id: string, _phase: string, actualDuration: number) => {
+    gridPerf.current = { renderMs: actualDuration, commits: gridPerf.current.commits + 1 };
+  }, []);
 
   const sources = useRef(new Map<string, SheetSource | DataSource>());
   const selections = useRef(new Map<string, Selection>());
@@ -197,34 +202,7 @@ export default function App() {
     setSelectionState(s);
   };
 
-  const say = (text: string, error = false) => setMessage({ text: tr(text), error });
-  const fail = (e: unknown) => say(errorText(e), true);
   const focusGrid = () => requestAnimationFrame(() => cellInput.current?.focus({ preventScroll: true }));
-
-  const ask = (title: string, label: string, value = "") =>
-    new Promise<string | null>((resolve) => setDialog({ kind: "prompt", title: tr(title), label: tr(label), value, resolve }));
-
-  const run = async <T,>(label: string, fn: () => Promise<T>): Promise<T | undefined> => {
-    setBusy(tr(label));
-    try {
-      return await fn();
-    } catch (e) {
-      fail(e);
-      return undefined;
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  /** `run` for data-sheet commands that report progress and can be cancelled. */
-  const runDataJob = async <T,>(label: string, fn: () => Promise<T>): Promise<T | undefined> => {
-    setDataJob(true);
-    try {
-      return await run(label, fn);
-    } finally {
-      setDataJob(false);
-    }
-  };
 
   // ---------------------------------------------------------------- sources
   const sheetIndex = tab.kind === "sheet" ? tab.index : -1;
