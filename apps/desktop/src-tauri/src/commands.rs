@@ -518,6 +518,18 @@ pub async fn data_page_after_rid(
 }
 
 #[tauri::command]
+pub async fn data_page_after_sort(
+    state: State<'_, AppState>,
+    table: String,
+    cursor: Option<cellx_core::data::SortCursor>,
+    limit: u64,
+    sort: Sort,
+    filters: Vec<ColumnFilter>,
+) -> CmdResult<cellx_core::data::KeysetPage> {
+    read(&state, |wb| wb.data_page_after_sort(&table, cursor.as_ref(), limit.min(5000), &sort, &filters))
+}
+
+#[tauri::command]
 pub async fn update_data_cell(state: State<'_, AppState>, table: String, rid: i64, column: String, text: String) -> CmdResult<RecalcStats> {
     edit(&state, |wb| wb.update_data_cell(&table, rid, &column, &text))
 }
