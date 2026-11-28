@@ -2,7 +2,9 @@
 // remove duplicates, data validation, find & replace, names, hyperlinks, goal seek.
 import { tr } from "../i18n";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { TEXT_ENCODINGS } from "../api";
 import type {
+  FilePreview,
   ProtectOptions,
   ErrorStyle,
   FilterOp,
@@ -1316,6 +1318,120 @@ export function MessageBox(props: { title?: string; message: string; onClose(): 
           </button>
         </div>
       </div>
+    </Modal>
+  );
+}
+
+// ---------------------------------------------------------------- 데이터 가져오기 / 내보내기
+
+/** 데이터 시트 가져오기: name, text encoding (detected unless chosen) and a preview. */
+export function ImportDataDialog(props: {
+  path: string;
+  suggested: string;
+  csv: boolean;
+  preview(encoding: string | null): Promise<FilePreview>;
+  onDone(r: { name: string; encoding: string | null } | null): void;
+}) {
+  const [name, setName] = useState(props.suggested);
+  const [encoding, setEncoding] = useState("auto");
+  const [preview, setPreview] = useState<FilePreview | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!props.csv) return;
+    let live = true;
+    props
+      .preview(encoding === "auto" ? null : encoding)
+      .then((p) => {
+        if (!live) return;
+        setPreview(p);
+        setError(null);
+      })
+      .catch((e) => live && setError(String(e)));
+    return () => {
+      live = false;
+    };
+  }, [encoding, props.csv, props.path]);
+  const detected = TEXT_ENCODINGS.find((e) => e.value === preview?.encoding)?.label ?? preview?.encoding;
+  return (
+    <Modal title={tr("데이터 시트 가져오기")} onClose={() => props.onDone(null)} wide={props.csv}>
+      <form
+        className="modal-body"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (name.trim()) props.onDone({ name: name.trim(), encoding: encoding === "auto" ? null : encoding });
+        }}
+      >
+        <label>
+          {tr("데이터 시트 이름 (수식에서 이름[열]로 참조합니다)")}
+          <input autoFocus value={name} onChange={(e) => setName(e.target.value)} />
+        </label>
+        {props.csv && (
+          <>
+            <label>
+              {tr("파일 인코딩")}
+              <select value={encoding} onChange={(e) => setEncoding(e.target.value)}>
+                <option value="auto">
+                  {tr("자동 감지")}
+                  {encoding === "auto" && detected ? ` (${detected})` : ""}
+                </option>
+                {TEXT_ENCODINGS.map((e) => (
+                  <option key={e.value} value={e.value}>
+                    {e.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="import-preview" aria-label={tr("미리 보기")}>
+              {error ? <span className="error">{error}</span> : (preview?.lines ?? []).map((l, i) => <div key={i}>{l || " "}</div>)}
+            </div>
+            <p className="hint">{tr("글자가 깨져 보이면 다른 인코딩을 고르세요.")}</p>
+          </>
+        )}
+        <div className="actions">
+          <button type="submit" className="primary" disabled={!name.trim()}>
+            {tr("가져오기")}
+          </button>
+          <button type="button" onClick={() => props.onDone(null)}>
+            {tr("취소")}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+/** CSV 내보내기: the text encoding (UTF-8 with BOM unless an older program needs another). */
+export function ExportEncodingDialog(props: { onDone(encoding: string | null | undefined): void }) {
+  const [encoding, setEncoding] = useState("utf-8");
+  return (
+    <Modal title={tr("CSV로 내보내기")} onClose={() => props.onDone(undefined)}>
+      <form
+        className="modal-body"
+        onSubmit={(e) => {
+          e.preventDefault();
+          props.onDone(encoding === "utf-8" ? null : encoding);
+        }}
+      >
+        <label>
+          {tr("파일 인코딩")}
+          <select autoFocus value={encoding} onChange={(e) => setEncoding(e.target.value)}>
+            {TEXT_ENCODINGS.filter((e) => e.value !== "utf-16").map((e) => (
+              <option key={e.value} value={e.value}>
+                {e.value === "utf-8" ? `${e.label} (${tr("권장")})` : e.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className="hint">{tr("UTF-8은 Excel을 포함한 대부분의 프로그램에서 열립니다. 오래된 프로그램이 한글을 읽지 못할 때만 CP949를 고르세요.")}</p>
+        <div className="actions">
+          <button type="submit" className="primary">
+            {tr("내보내기")}
+          </button>
+          <button type="button" onClick={() => props.onDone(undefined)}>
+            {tr("취소")}
+          </button>
+        </div>
+      </form>
     </Modal>
   );
 }
