@@ -8,11 +8,13 @@ CellX's desktop UI is being decomposed incrementally. The current `App.tsx` rema
 - `components/*`: feature-specific presentation and dialogs.
 - `grid/*`: grid model, rendering, and data sources.
 - `appTypes.ts`: navigation tab identity and in-progress cell-edit session contracts.
+- `appDialogs.ts`: discriminated union for the app-level dialog state; presentation remains in feature components.
+- `appUtils.ts`: shared editor-width and locale-aware number formatting helpers.
 - `i18n/*`: locale selection and message formatting.
 
 ## Refactoring sequence
 
-1. Extract stable shared types and pure state helpers without changing behavior.
+1. Extract stable shared types, dialog state contracts, and shared formatting/editor helpers without changing behavior.
 2. Move dialog state and dialog orchestration behind a dedicated hook.
 3. Move workbook commands and persistence flows behind feature hooks.
 4. Split data-sheet, formula-editing, and worksheet interactions into feature controllers.
