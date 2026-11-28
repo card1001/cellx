@@ -41,6 +41,10 @@ struct JobControl {
 #[derive(Default)]
 pub struct JobState(pub Arc<Mutex<HashMap<String, JobControl>>>);
 
+fn is_active_status(status: &str) -> bool {
+    matches!(status, "queued" | "running")
+}
+
 fn update_job(
     jobs: &Arc<Mutex<HashMap<String, JobControl>>>,
     id: &str,
@@ -107,15 +111,13 @@ pub fn start_transform_job(
         let mut records = jobs_map.lock().map_err(|_| "작업 상태를 잠글 수 없습니다".to_string())?;
         // Prevent duplicate writes to the same output and unbounded thread
         // creation. The workbook lock serializes DuckDB work, so this is a
-        // bounded FIFO-like waiting set rather than parallel database execution.
-        let active = records.values().filter(|record|
-            matches!(record.snapshot.status.as_str(), "queued" | "running")
-        ).count();
+        // bounded waiting set rather than parallel database execution.
+        let active = records.values().filter(|record| is_active_status(&record.snapshot.status)).count();
         if active >= MAX_ACTIVE_JOBS {
             return Err(format!("대기 또는 실행 중인 작업은 최대 {}개까지 허용됩니다", MAX_ACTIVE_JOBS));
         }
         if records.values().any(|record|
-            matches!(record.snapshot.status.as_str(), "queued" | "running")
+            is_active_status(&record.snapshot.status)
                 && record.snapshot.output_table.eq_ignore_ascii_case(&output_table)
         ) {
             return Err("같은 결과 테이블을 대상으로 실행 중인 작업이 있습니다. 기존 작업이 끝난 뒤 다시 시도해 주세요.".into());
@@ -124,7 +126,7 @@ pub fn start_transform_job(
         // Keep active records. Evict the oldest terminal record only.
         if records.len() >= MAX_RETAINED_JOBS {
             let oldest_terminal = records.iter()
-                .filter(|(_, record)| !matches!(record.snapshot.status.as_str(), "queued" | "running"))
+                .filter(|(_, record)| !is_active_status(&record.snapshot.status))
                 .min_by_key(|(_, record)| record.snapshot.started_at_ms)
                 .map(|(id, _)| id.clone());
             if let Some(oldest) = oldest_terminal {
@@ -321,4 +323,18 @@ pub fn cancel_transform_job(
         (record.interrupt)();
     }
     Ok(record.snapshot.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_jobs_are_not_treated_as_active() {
+        assert!(is_active_status("queued"));
+        assert!(is_active_status("running"));
+        assert!(!is_active_status("completed"));
+        assert!(!is_active_status("failed"));
+        assert!(!is_active_status("cancelled"));
+    }
 }
