@@ -76,6 +76,25 @@ export interface EvalStep {
   value: string;
 }
 
+export interface FormulaNode {
+  id: string;
+  sheet: number;
+  row: number;
+  col: number;
+  formula: string;
+}
+
+export interface FormulaEdge {
+  from: string;
+  to: string;
+}
+
+export interface FormulaDependencyGraph {
+  nodes: FormulaNode[];
+  edges: FormulaEdge[];
+  truncated: boolean;
+}
+
 export type ShapeKind =
   | "rect"
   | "roundRect"
@@ -630,6 +649,7 @@ export const api = {
   deleteCustomView: (name: string) => invoke<void>("delete_custom_view", { name }),
   showCustomView: (name: string) => invoke<number>("show_custom_view", { name }),
   formulaSteps: (sheet: number, row: number, col: number) => invoke<EvalStep[]>("formula_steps", { sheet, row, col }),
+  formulaDependencyGraph: () => invoke<FormulaDependencyGraph>("formula_dependency_graph"),
   cellDetail: (sheet: number, row: number, col: number) => invoke<CellDetail>("cell_detail", { sheet, row, col }),
   selectionStats: (sheet: number, range: Range) => invoke<SelectionStats>("selection_stats", { sheet, range }),
   navigateEdge: (sheet: number, row: number, col: number, dir: Direction) =>
