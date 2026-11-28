@@ -6,6 +6,7 @@ import {
   type ColumnKind,
   type Memo,
   type Page,
+  type SortCursor,
   type Scalar,
   type SheetLayout,
   type Sort,
@@ -290,6 +291,7 @@ export class DataSource extends Emitter implements GridSource {
   private inflight = new Map<number, number>();
   private pagePromises = new Map<number, Promise<void>>();
   private pageCursors = new Map<number, number>();
+  private sortedCursors = new Map<number, SortCursor>();
   private pageAccess = new Map<number, number>();
   private visiblePages = new Set<number>();
   private accessClock = 0;
@@ -395,9 +397,19 @@ export class DataSource extends Emitter implements GridSource {
       if (!isCurrentPageRequest(this.generation, gen, this.inflight.get(p), token)) return;
       const started = performance.now();
       const cursor = p > 0 ? this.pageCursors.get(p - 1) : undefined;
-      const page = !this.sort && (p === 0 || cursor !== undefined)
-        ? await api.dataPageAfterRid(this.info.name, p === 0 ? null : cursor!, PAGE, this.filters)
-        : await api.dataPage(this.info.name, p * PAGE, PAGE, this.sort, this.filters);
+      let page: Page;
+      if (!this.sort && (p === 0 || cursor !== undefined)) {
+        page = await api.dataPageAfterRid(this.info.name, p === 0 ? null : cursor!, PAGE, this.filters);
+      } else if (this.sort && (p === 0 || this.sortedCursors.has(p - 1))) {
+        const result = await api.dataPageAfterSort(
+          this.info.name, p === 0 ? null : this.sortedCursors.get(p - 1)!, PAGE, this.sort, this.filters,
+        );
+        page = result.page;
+        if (result.next_cursor) this.sortedCursors.set(p, result.next_cursor);
+        else this.sortedCursors.delete(p);
+      } else {
+        page = await api.dataPage(this.info.name, p * PAGE, PAGE, this.sort, this.filters);
+      }
       if (!isCurrentPageRequest(this.generation, gen, this.inflight.get(p), token)) return;
       this.lastQueryMs = performance.now() - started;
       this.applyPage(p, page);
@@ -457,6 +469,7 @@ export class DataSource extends Emitter implements GridSource {
     this.inflight.clear();
     this.pagePromises.clear();
     this.pageCursors.clear();
+    this.sortedCursors.clear();
     this.pageAccess.clear();
     this.visiblePages.clear();
     this.lastQueryMs = 0;
