@@ -39,7 +39,7 @@ afterEach(() => vi.clearAllMocks());
 describe("DataSource page request concurrency", () => {
   it("deduplicates concurrent requests for the same page", async () => {
     const pending = deferred<Page>();
-    vi.mocked(api.dataPage).mockReturnValue(pending.promise);
+    vi.mocked(api.dataPageAfterRid).mockReturnValue(pending.promise);
     const source = new DataSource(info, ["Arial", 10]);
 
     source.request(1, 1, 100);
