@@ -3198,8 +3198,9 @@ export default function App() {
         <span className="spacer" />
         {source instanceof DataSource && (() => {
           const cache = source.getPerformanceSnapshot();
-          return <span title="캐시 크기는 직렬화된 페이지 데이터 기반 추정치이며 실제 JavaScript 힙 사용량과 다를 수 있습니다.">
-            {formatCount(source.total)}행 · 조회 {source.lastQueryMs.toFixed(0)} ms · 캐시 {cache.cachedPages}/{cache.maxCachedPages}p · {formatCount(cache.cachedRows)}행 · 약 {(cache.estimatedBytes / 1024).toFixed(0)} KB
+          const heapBytes = (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize;
+          return <span title="JS 힙은 WebView가 제공할 때만 표시됩니다. 캐시 KB는 직렬화된 페이지 데이터 추정치이며 WASM/native 메모리는 포함하지 않습니다.">
+            {formatCount(source.total)}행 · 조회 {source.lastQueryMs.toFixed(0)} ms · 캐시 {cache.cachedPages}/{cache.maxCachedPages}p · {formatCount(cache.cachedRows)}행 · 캐시 약 {(cache.estimatedBytes / 1024).toFixed(0)} KB{heapBytes ? ` · JS 힙 ${(heapBytes / 1024 / 1024).toFixed(1)} MB` : ""}
           </span>;
         })()}
         <span title="React Profiler actualDuration">그리드 렌더 {gridPerf.current.renderMs.toFixed(1)} ms · {gridPerf.current.commits}회</span>
