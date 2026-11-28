@@ -274,10 +274,19 @@ impl DataStore {
         let sql = if ext == "parquet" {
             "DESCRIBE SELECT * FROM read_parquet(?)".to_string()
         } else {
+            let mut file = File::open(path)?;
+            let mut bom = [0_u8; 4];
+            let count = file.read(&mut bom)?;
+            let utf32 = count >= 4 && (bom == [0xff, 0xfe, 0x00, 0x00] || bom == [0x00, 0x00, 0xfe, 0xff]);
+            if utf32 {
+                return Err(CellxError::CsvEncoding("UTF-32".into()));
+            }
+            let utf16 = count >= 2 && ((bom[0] == 0xff && bom[1] == 0xfe) || (bom[0] == 0xfe && bom[1] == 0xff));
+            let encoding = if utf16 { "utf-16" } else { "utf-8" };
             let delimiter = if ext == "tsv" { ", delim = '\\t'" } else { "" };
             format!(
-                "DESCRIBE SELECT * FROM read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = 'utf-8', decimal_separator = '.'{})",
-                delimiter
+                "DESCRIBE SELECT * FROM read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = '{}', decimal_separator = '.'{})",
+                encoding, delimiter
             )
         };
         let mut stmt = self.conn.prepare(&sql)?;
