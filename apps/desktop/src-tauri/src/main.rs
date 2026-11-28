@@ -116,6 +116,7 @@ fn main() {
             commands::add_picture_data,
             commands::update_picture,
             commands::delete_picture,
+            commands::formula_dependency_graph,
             commands::trace_precedents,
             commands::trace_dependents,
             commands::formula_steps,
