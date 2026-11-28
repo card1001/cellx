@@ -23,7 +23,83 @@ pub struct EvalStep {
     pub value: String,
 }
 
+/// One formula cell in a bounded dependency-graph snapshot.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct FormulaNode {
+    pub id: String,
+    pub sheet: u32,
+    pub row: i32,
+    pub col: i32,
+    pub formula: String,
+}
+
+/// A directed edge from a formula precedent to the formula that consumes it.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct FormulaEdge {
+    pub from: String,
+    pub to: String,
+}
+
+/// A bounded snapshot backed by the calculation engine's dependency index.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct FormulaDependencyGraph {
+    pub nodes: Vec<FormulaNode>,
+    pub edges: Vec<FormulaEdge>,
+    pub truncated: bool,
+}
+
 impl Workbook {
+    /// Returns a bounded formula dependency graph using IronCalc's parsed
+    /// dependency index. Range precedents are expanded only up to the edge cap.
+    pub fn formula_dependency_graph(&self) -> Result<FormulaDependencyGraph> {
+        use std::collections::{HashMap, HashSet};
+
+        const MAX_NODES: usize = 5_000;
+        const MAX_EDGES: usize = 20_000;
+        let mut nodes = Vec::new();
+        let mut formula_cells = HashSet::new();
+        let cells = self.model().get_all_cells();
+
+        for cell in cells {
+            if nodes.len() >= MAX_NODES { break; }
+            if let Some(formula) = self.model().get_cell_formula(cell.index, cell.row, cell.column)? {
+                formula_cells.insert((cell.index, cell.row, cell.column));
+                nodes.push(FormulaNode {
+                    id: format!("{}!{}:{}", cell.index, cell.row, cell.column),
+                    sheet: cell.index,
+                    row: cell.row,
+                    col: cell.column,
+                    formula,
+                });
+            }
+        }
+
+        let node_ids = nodes.iter().map(|node| ((node.sheet, node.row, node.col), node.id.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut edges = Vec::new();
+        let mut truncated = nodes.len() >= MAX_NODES;
+
+        'formula: for node in &nodes {
+            for area in self.model().cell_precedents(node.sheet, node.row, node.col) {
+                for row in area.row1..=area.row2 {
+                    for col in area.column1..=area.column2 {
+                        if let Some(from) = node_ids.get(&(area.sheet, row, col)) {
+                            if edges.len() >= MAX_EDGES {
+                                truncated = true;
+                                break 'formula;
+                            }
+                            edges.push(FormulaEdge { from: from.clone(), to: node.id.clone() });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Formula cells beyond the node cap may still exist in the workbook.
+        if formula_cells.len() >= MAX_NODES { truncated = true; }
+        Ok(FormulaDependencyGraph { nodes, edges, truncated })
+    }
+
     /// The viewport with formulas shown in place of their values (수식 표시,
     /// Ctrl+`): formula cells show their input, left-aligned as text.
     pub fn viewport_formulas(&self, sheet: u32, row0: i32, col0: i32, row1: i32, col1: i32) -> Result<crate::workbook::Viewport> {
