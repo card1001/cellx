@@ -22,6 +22,7 @@ roxmltree = "0.20"
 quick-xml = "0.42"
 base64 = "0.23"
 sha2 = "0.10"
+encoding_rs = "0.8"
 
 [profile.dev.package."*"]
 opt-level = 2

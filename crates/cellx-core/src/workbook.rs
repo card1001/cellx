@@ -1619,7 +1619,11 @@ impl Workbook {
     }
 
     pub fn import_data_with_locale(&mut self, path: &Path, table: &str, locale: &str) -> Result<TableInfo> {
-        let info = self.data.import_file_with_locale(path, table, locale)?;
+        self.import_data_with_encoding(path, table, locale, None)
+    }
+
+    pub fn import_data_with_encoding(&mut self, path: &Path, table: &str, locale: &str, encoding: Option<&str>) -> Result<TableInfo> {
+        let info = self.data.import_file_with_encoding(path, table, locale, encoding)?;
         self.reclassify_bridges()?;
         self.recalc()?;
         Ok(info)

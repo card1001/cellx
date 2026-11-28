@@ -424,8 +424,24 @@ pub fn unmerge(state: State<'_, AppState>, sheet: u32, range: CellRange) -> CmdR
 // ---------------------------------------------------------------- data sheets
 
 #[tauri::command]
-pub async fn import_data(state: State<'_, AppState>, path: String, name: String, locale: String) -> CmdResult<TableInfo> {
-    edit(&state, |wb| wb.import_data_with_locale(Path::new(&path), &name, &locale))
+pub async fn import_data(
+    state: State<'_, AppState>,
+    path: String,
+    name: String,
+    locale: String,
+    encoding: Option<String>,
+) -> CmdResult<TableInfo> {
+    edit(&state, |wb| wb.import_data_with_encoding(Path::new(&path), &name, &locale, encoding.as_deref()))
+}
+
+/// The first lines of a data file as the chosen (or detected) encoding reads them.
+#[tauri::command]
+pub async fn preview_data_file(
+    path: String,
+    locale: String,
+    encoding: Option<String>,
+) -> CmdResult<cellx_core::data::FilePreview> {
+    cellx_core::data::DataStore::preview_file(Path::new(&path), &locale, encoding.as_deref(), 12).map_err(err)
 }
 
 #[tauri::command]
@@ -451,8 +467,15 @@ pub async fn update_data_cell(state: State<'_, AppState>, table: String, rid: i6
 }
 
 #[tauri::command]
-pub async fn export_table(state: State<'_, AppState>, table: String, path: String, locale: String) -> CmdResult<()> {
-    read(&state, |wb| wb.data().export_with_locale(&table, Path::new(&path), &locale))
+pub async fn export_table(
+    state: State<'_, AppState>,
+    table: String,
+    path: String,
+    locale: String,
+    encoding: Option<String>,
+) -> CmdResult<()> {
+    let _ = locale;
+    read(&state, |wb| wb.data().export_with_encoding(&table, Path::new(&path), encoding.as_deref()))
 }
 
 #[tauri::command]

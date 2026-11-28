@@ -427,6 +427,23 @@ export interface CellDetail {
   style: CurrentStyle;
 }
 
+/** The start of a data file, read with `encoding` (auto-detected unless chosen). */
+export interface FilePreview {
+  encoding: string;
+  lines: string[];
+}
+
+/** Text encodings for CSV import and export. */
+export const TEXT_ENCODINGS: { value: string; label: string }[] = [
+  { value: "utf-8", label: "UTF-8" },
+  { value: "utf-16", label: "UTF-16" },
+  { value: "cp949", label: "한국어 (CP949 / EUC-KR)" },
+  { value: "shift_jis", label: "日本語 (Shift_JIS)" },
+  { value: "gbk", label: "简体中文 (GBK / GB18030)" },
+  { value: "big5", label: "繁體中文 (Big5)" },
+  { value: "windows-1252", label: "Western (Windows-1252)" },
+];
+
 export interface RecalcStats {
   passes: number;
   bridge_calls: number;
@@ -757,7 +774,10 @@ export const api = {
   merge: (sheet: number, range: Range, center: boolean) => invoke<RecalcStats>("merge", { sheet, range, center }),
   unmerge: (sheet: number, range: Range) => invoke<RecalcStats>("unmerge", { sheet, range }),
 
-  importData: (path: string, name: string, locale: string) => invoke<TableInfo>("import_data", { path, name, locale }),
+  importData: (path: string, name: string, locale: string, encoding: string | null = null) =>
+    invoke<TableInfo>("import_data", { path, name, locale, encoding }),
+  previewDataFile: (path: string, locale: string, encoding: string | null) =>
+    invoke<FilePreview>("preview_data_file", { path, locale, encoding }),
   queryToTable: (sql: string, name: string) => invoke<TableInfo>("query_to_table", { sql, name }),
   profileDataTable: (table: string) => invoke<TableProfile>("profile_data_table", { table }),
   transformPipelines: () => invoke<SavedPipeline[]>("transform_pipelines"),
@@ -781,7 +801,8 @@ export const api = {
     invoke<Page>("data_page", { table, offset, limit, sort, filters }),
   updateDataCell: (table: string, rid: number, column: string, text: string) =>
     invoke<RecalcStats>("update_data_cell", { table, rid, column, text }),
-  exportTable: (table: string, path: string, locale: string) => invoke<void>("export_table", { table, path, locale }),
+  exportTable: (table: string, path: string, locale: string, encoding: string | null = null) =>
+    invoke<void>("export_table", { table, path, locale, encoding }),
   dropTable: (table: string) => invoke<BookInfo>("drop_table", { table }),
 };
 

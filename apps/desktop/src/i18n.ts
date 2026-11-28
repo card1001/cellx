@@ -716,6 +716,18 @@ Object.assign(simplifiedChinese, {
 Object.assign(traditionalChinese, {
   "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)\nCSV 파일은 UTF-8 또는 UTF-16 인코딩이어야 합니다.": "資料工作表名稱（在公式中以 name[column] 參照）\nCSV 檔案必須使用 UTF-8 或 UTF-16 編碼。",
 });
+Object.assign(english, {
+  "파일 인코딩":"File encoding","자동 감지":"Detect automatically","미리 보기":"Preview","글자가 깨져 보이면 다른 인코딩을 고르세요.":"If the text looks garbled, choose another encoding.","가져오기":"Import","CSV로 내보내기":"Export as CSV","권장":"recommended","내보내기":"Export","UTF-8은 Excel을 포함한 대부분의 프로그램에서 열립니다. 오래된 프로그램이 한글을 읽지 못할 때만 CP949를 고르세요.":"UTF-8 opens in most programs, Excel included. Choose a legacy encoding only for older programs that cannot read UTF-8."
+});
+Object.assign(japanese, {
+  "파일 인코딩":"ファイルのエンコード","자동 감지":"自動検出","미리 보기":"プレビュー","글자가 깨져 보이면 다른 인코딩을 고르세요.":"文字化けしている場合は、別のエンコードを選択してください。","가져오기":"インポート","CSV로 내보내기":"CSV にエクスポート","권장":"推奨","내보내기":"エクスポート","UTF-8은 Excel을 포함한 대부분의 프로그램에서 열립니다. 오래된 프로그램이 한글을 읽지 못할 때만 CP949를 고르세요.":"UTF-8 は Excel を含むほとんどのプログラムで開けます。UTF-8 を読めない古いプログラム向けの場合のみ Shift_JIS などを選択してください。"
+});
+Object.assign(simplifiedChinese, {
+  "파일 인코딩":"文件编码","자동 감지":"自动检测","미리 보기":"预览","글자가 깨져 보이면 다른 인코딩을 고르세요.":"如果文字显示为乱码，请选择其他编码。","가져오기":"导入","CSV로 내보내기":"导出为 CSV","권장":"推荐","내보내기":"导出","UTF-8은 Excel을 포함한 대부분의 프로그램에서 열립니다. 오래된 프로그램이 한글을 읽지 못할 때만 CP949를 고르세요.":"UTF-8 可在包括 Excel 在内的大多数程序中打开。仅当旧程序无法读取 UTF-8 时才选择 GBK 等编码。"
+});
+Object.assign(traditionalChinese, {
+  "파일 인코딩":"檔案編碼","자동 감지":"自動偵測","미리 보기":"預覽","글자가 깨져 보이면 다른 인코딩을 고르세요.":"如果文字顯示為亂碼，請選擇其他編碼。","가져오기":"匯入","CSV로 내보내기":"匯出為 CSV","권장":"建議","내보내기":"匯出","UTF-8은 Excel을 포함한 대부분의 프로그램에서 열립니다. 오래된 프로그램이 한글을 읽지 못할 때만 CP949를 고르세요.":"UTF-8 可在包括 Excel 在內的大多數程式中開啟。僅在舊程式無法讀取 UTF-8 時才選擇 Big5 等編碼。"
+});
 const dictionary: Record<Locale, Record<string, string>> = {
   "ko-KR": {},
   "en-US": english,

@@ -65,7 +65,7 @@ pub fn save_data_connector(state: State<'_, AppState>, mut connector: SavedConne
     }
     let mut book = state.0.lock().map_err(|_| "내부 상태를 잠글 수 없습니다".to_string())?;
     // Inspect the source before import and persist a baseline for future drift checks.
-    let schema = book.wb.data().inspect_file_schema(Path::new(&connector.path))
+    let schema = book.wb.data().inspect_file_schema(Path::new(&connector.path), &connector.locale)
         .map_err(|e| e.to_string())?;
     connector.schema = schema.iter().map(|column| (column.name.clone(), column.sql_type.clone())).collect();
     connector.fingerprint = file_fingerprint(Path::new(&connector.path))?;
@@ -92,7 +92,7 @@ pub fn refresh_data_connector(state: State<'_, AppState>, id: String, accept_sch
     let mut connector = book.connectors.iter().find(|item| item.id == id)
         .ok_or_else(|| "저장된 데이터 연결을 찾을 수 없습니다".to_string())?
         .clone();
-    let schema = book.wb.data().inspect_file_schema(Path::new(&connector.path))
+    let schema = book.wb.data().inspect_file_schema(Path::new(&connector.path), &connector.locale)
         .map_err(|e| e.to_string())?;
     let current_schema = schema.iter().map(|column| (column.name.clone(), column.sql_type.clone())).collect::<Vec<_>>();
     if !connector.schema.is_empty() && connector.schema != current_schema && !accept_schema_change {

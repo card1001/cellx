@@ -142,6 +142,7 @@ fn main() {
             commands::scenario_summary,
             commands::protect_book,
             commands::set_date1904,
+            commands::preview_data_file,
             commands::unprotect_book,
             commands::custom_views,
             commands::add_custom_view,

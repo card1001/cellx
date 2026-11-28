@@ -71,6 +71,8 @@ import {
   PasswordDialog,
   ProtectDialog,
   SubtotalDialog,
+  ImportDataDialog,
+  ExportEncodingDialog,
 } from "./components/DataDialogs";
 import { type FormatResult, FormatCellsDialog, PromptDialog } from "./components/Dialogs";
 import { type PrintJob, paginate, PrintPreviewDialog, PrintView } from "./components/Print";
@@ -130,6 +132,8 @@ type Dialog =
   | { kind: "print" }
   | { kind: "subtotal"; range: Range }
   | { kind: "createTable"; range: Range; header: boolean; style: string }
+  | { kind: "importData"; path: string; suggested: string; csv: boolean; resolve(v: { name: string; encoding: string | null } | null): void }
+  | { kind: "exportEncoding"; resolve(v: string | null | undefined): void }
   | { kind: "protect" }
   | { kind: "unprotect" }
   | null;
@@ -1141,10 +1145,14 @@ export default function App() {
     if (!path || Array.isArray(path)) return;
     const base = path.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") ?? "data";
     const suggested = base.replace(/[^\p{L}\p{N}_]/gu, "_").replace(/^(\d)/, "_$1");
-    const name = await ask("데이터 시트 가져오기", `데이터 시트 이름 (수식에서 이름[열]로 참조합니다)\nCSV 파일은 UTF-8 또는 UTF-16 인코딩이어야 합니다.`, suggested);
-    if (!name) return;
+    const csv = !/\.parquet$/i.test(path);
+    const choice = await new Promise<{ name: string; encoding: string | null } | null>((resolve) =>
+      setDialog({ kind: "importData", path, suggested, csv, resolve }),
+    );
+    if (!choice) return;
+    const { name, encoding } = choice;
     const t = performance.now();
-    const table = await run("가져오는 중", () => api.importData(path, name, locale));
+    const table = await run("가져오는 중", () => api.importData(path, name, locale, encoding));
     if (!table) return;
     await refreshInfo();
     sources.current.delete(tabKey({ kind: "data", name: table.name }));
@@ -1164,7 +1172,13 @@ export default function App() {
       ],
     });
     if (!path) return;
-    const ok = await run("내보내는 중", () => api.exportTable(src.info.name, path, locale));
+    let encoding: string | null = null;
+    if (!/\.parquet$/i.test(path)) {
+      const picked = await new Promise<string | null | undefined>((resolve) => setDialog({ kind: "exportEncoding", resolve }));
+      if (picked === undefined) return;
+      encoding = picked;
+    }
+    const ok = await run("내보내는 중", () => api.exportTable(src.info.name, path, locale, encoding));
     if (ok !== undefined) say(`내보냈습니다: ${path}`);
   };
 
@@ -3285,6 +3299,28 @@ export default function App() {
       </footer>
 
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
+      {dialog?.kind === "importData" && (
+        <ImportDataDialog
+          path={dialog.path}
+          suggested={dialog.suggested}
+          csv={dialog.csv}
+          preview={(encoding) => api.previewDataFile(dialog.path, locale, encoding)}
+          onDone={(v) => {
+            dialog.resolve(v);
+            setDialog(null);
+            focusGrid();
+          }}
+        />
+      )}
+      {dialog?.kind === "exportEncoding" && (
+        <ExportEncodingDialog
+          onDone={(v) => {
+            dialog.resolve(v);
+            setDialog(null);
+            focusGrid();
+          }}
+        />
+      )}
       {dialog?.kind === "prompt" && (
         <PromptDialog
           title={dialog.title}
