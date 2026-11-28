@@ -45,7 +45,7 @@ describe("DataSource page request concurrency", () => {
     source.request(1, 1, 100);
     source.request(1, 1, 100);
 
-    expect(api.dataPage).toHaveBeenCalledTimes(1);
+    expect(api.dataPageAfterRid).toHaveBeenCalledTimes(1);
     pending.resolve(page("single"));
     await vi.waitFor(() => expect(source.cell(1, 1)?.text).toBe("single"));
   });
@@ -53,9 +53,8 @@ describe("DataSource page request concurrency", () => {
   it("does not let an old view response overwrite the newer view", async () => {
     const oldRequest = deferred<Page>();
     const newRequest = deferred<Page>();
-    vi.mocked(api.dataPage)
-      .mockReturnValueOnce(oldRequest.promise)
-      .mockReturnValueOnce(newRequest.promise);
+    vi.mocked(api.dataPageAfterRid).mockReturnValueOnce(oldRequest.promise);
+    vi.mocked(api.dataPage).mockReturnValueOnce(newRequest.promise);
     const source = new DataSource(info, ["Arial", 10]);
 
     source.request(1, 1, 100);
@@ -72,7 +71,7 @@ describe("DataSource page request concurrency", () => {
   it("does not allow an older request finalizer to clear a newer in-flight token", async () => {
     const first = deferred<Page>();
     const second = deferred<Page>();
-    vi.mocked(api.dataPage)
+    vi.mocked(api.dataPageAfterRid)
       .mockReturnValueOnce(first.promise)
       .mockReturnValueOnce(second.promise);
     const source = new DataSource(info, ["Arial", 10]);
