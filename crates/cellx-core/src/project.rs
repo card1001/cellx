@@ -63,6 +63,8 @@ pub struct SavedTransformRun {
     pub output_table: String,
     pub status: String,
     pub phase: String,
+    #[serde(default)]
+    pub incremental: bool,
     pub result_rows: Option<u64>,
     pub error: Option<String>,
     pub started_at_ms: u64,
@@ -373,6 +375,7 @@ mod tests {
             output_table: "clean_sales".into(),
             status: "completed".into(),
             phase: "완료".into(),
+            incremental: true,
             result_rows: Some(2),
             error: None,
             started_at_ms: 1_700_000_000_000,
