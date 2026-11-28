@@ -4357,7 +4357,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
         추가된 행만 증분 실행
       </label>
       {incrementalMode && <p className="muted">
-        첫 실행은 전체 결과를 생성하고 이후에는 새로 추가된 행만 처리합니다. 기존 행의 수정·삭제, 조인·집계·정렬·행 제한은 반영하지 않으므로 해당 변경이 있으면 전체 실행을 사용하세요.
+        첫 실행은 전체 결과를 생성하고 이후에는 새로 추가된 행만 처리합니다. 기존 행의 수정·삭제, 파일 재가져오기·새로 고침, 조인·집계·정렬·행 제한은 반영하지 않으므로 해당 변경이 있으면 전체 실행을 사용하세요.
       </p>}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         <button disabled={busy || !source} onClick={() => void profileNow()}>데이터 프로파일</button>
