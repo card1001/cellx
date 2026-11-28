@@ -264,6 +264,37 @@ impl DataStore {
         self.table_info(table)
     }
 
+    /// Inspects a local CSV, TSV, or Parquet file without importing or mutating a data sheet.
+    /// The schema is read directly from DuckDB's file readers using a bound path parameter.
+    pub fn inspect_file_schema(&self, path: &Path) -> Result<Vec<ColumnInfo>> {
+        let path_text = path
+            .to_str()
+            .ok_or_else(|| CellxError::InvalidName(path.display().to_string()))?;
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        let sql = if ext == "parquet" {
+            "DESCRIBE SELECT * FROM read_parquet(?)".to_string()
+        } else {
+            let delimiter = if ext == "tsv" { ", delim = '\\t'" } else { "" };
+            format!(
+                "DESCRIBE SELECT * FROM read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = 'utf-8', decimal_separator = '.'{})",
+                delimiter
+            )
+        };
+        let mut stmt = self.conn.prepare(&sql)?;
+        let columns = stmt
+            .query_map([path_text], |row| {
+                let name: String = row.get(0)?;
+                let sql_type: String = row.get(1)?;
+                Ok(ColumnInfo {
+                    kind: ColumnKind::from_duckdb_type(&sql_type),
+                    name,
+                    sql_type,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(columns)
+    }
+
     /// Creates a table from rows already in memory (used by tests and pasted data).
     pub fn create_table_from_sql(&mut self, table: &str, select_sql: &str) -> Result<TableInfo> {
         if !is_valid_table_name(table) {
