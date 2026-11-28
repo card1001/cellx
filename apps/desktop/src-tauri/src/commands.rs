@@ -183,7 +183,9 @@ pub async fn save_file(state: State<'_, AppState>, recovery: State<'_, RecoveryS
     let p = PathBuf::from(&path);
     let mut book = lock(&state)?;
     if is_project(&p) {
-        project::save_project_with_assets(&mut book.wb, &p, &book.pipelines, &book.connectors).map_err(err)?;
+        let pipelines = book.pipelines.clone();
+        let connectors = book.connectors.clone();
+        project::save_project_with_assets(&mut book.wb, &p, &pipelines, &connectors).map_err(err)?;
     } else {
         book.wb.save_xlsx(&p).map_err(err)?;
     }
