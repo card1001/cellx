@@ -359,11 +359,29 @@ mod tests {
             schema: vec![("region".into(), "VARCHAR".into()), ("amount".into(), "DOUBLE".into())],
             fingerprint: "123:456".into(),
         };
-        save_project_with_assets(&mut wb, &path, &[saved_pipeline.clone()], &[saved_connector.clone()]).unwrap();
+        let saved_run = SavedTransformRun {
+            id: "transform-1".into(),
+            pipeline_id: "pipeline-1".into(),
+            output_table: "clean_sales".into(),
+            status: "completed".into(),
+            phase: "완료".into(),
+            result_rows: Some(2),
+            error: None,
+            started_at_ms: 1_700_000_000_000,
+            finished_at_ms: Some(1_700_000_001_000),
+        };
+        save_project_with_execution_history(
+            &mut wb,
+            &path,
+            &[saved_pipeline.clone()],
+            &[saved_connector.clone()],
+            &[saved_run.clone()],
+        ).unwrap();
 
-        let (mut reopened, pipelines, connectors) = open_project_with_assets(&path).unwrap();
+        let (mut reopened, pipelines, connectors, runs) = open_project_with_execution_history(&path).unwrap();
         assert_eq!(pipelines, vec![saved_pipeline]);
         assert_eq!(connectors, vec![saved_connector]);
+        assert_eq!(runs, vec![saved_run]);
         assert_eq!(reopened.value(0, 1, 2).unwrap(), Scalar::Number(40.0));
         assert_eq!(reopened.input(0, 1, 1).unwrap(), "=SUM(sales[v])");
         // The data sheet came back and the bridge still works against it.
