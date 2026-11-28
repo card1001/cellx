@@ -46,7 +46,7 @@ import { ShapeFormatDialog, ShapeLayer } from "./components/Shape";
 import { BookProtectDialog, CustomViewsDialog, DataTableDialog, ScenarioDialog } from "./components/WhatIf";
 import { SlicerInsertDialog, SlicerLayer, SlicerSettingsDialog } from "./components/Slicer";
 import { SparklineCreateDialog, SparklineLayer, SparklineStyleDialog } from "./components/Sparkline";
-import { arrowKey, EvaluateDialog, TraceLayer, type TraceArrow } from "./components/Trace";
+import { arrowKey, EvaluateDialog, FormulaGraphDialog, TraceLayer, type TraceArrow } from "./components/Trace";
 import { RecoveryDialog, SaveChangesDialog, type SaveChoice } from "./components/FileDialogs";
 import { useI18n, type Locale } from "./i18n";
 import { HeaderFooterDialog, MoveCopyDialog, UnhideDialog } from "./components/SheetDialogs";
@@ -101,6 +101,7 @@ type Dialog =
   | { kind: "hyperlink"; text: string; current: { target: string; internal: boolean } | null }
   | { kind: "goalSeek" }
   | { kind: "evaluate"; sheet: number; row: number; col: number }
+  | { kind: "formulaGraph" }
   | { kind: "shapeFormat"; shape: Shape }
   | { kind: "sparkCreate"; spark: SparkKind; data: string; location: string }
   | { kind: "sparkStyle"; group: SparklineGroup }
@@ -2500,6 +2501,7 @@ export default function App() {
       if (!d?.input.startsWith("=")) return say("수식이 있는 셀을 선택하세요", true);
       setDialog({ kind: "evaluate", sheet: t.index, row: f.r, col: f.c });
     },
+    formulaGraph: () => setDialog({ kind: "formulaGraph" }),
     nameManager: async () => setDialog({ kind: "names", list: await api.names().catch(() => []), startNew: false }),
     defineName: async () => setDialog({ kind: "names", list: await api.names().catch(() => []), startNew: true }),
     print: () => void openPrint(),
@@ -3612,6 +3614,14 @@ export default function App() {
           sheetName={sheetName(dialog.sheet)}
           row={dialog.row}
           col={dialog.col}
+          onClose={() => {
+            setDialog(null);
+            focusGrid();
+          }}
+        />
+      )}
+      {dialog?.kind === "formulaGraph" && (
+        <FormulaGraphDialog
           onClose={() => {
             setDialog(null);
             focusGrid();
