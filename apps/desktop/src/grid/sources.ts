@@ -422,7 +422,9 @@ export class DataSource extends Emitter implements GridSource {
       }
     } finally {
       this.keysetLoading = false;
-      if (gen === this.generation && this.keysetRequested.size) void this.drainKeysetPages(gen);
+      // A previous generation may still have been awaiting DuckDB when the
+      // view changed. Resume the newest generation only after it releases.
+      if (this.keysetRequested.size) void this.drainKeysetPages(this.generation);
     }
   }
 
@@ -437,7 +439,6 @@ export class DataSource extends Emitter implements GridSource {
     this.pages.clear();
     this.inflight.clear();
     this.keysetRequested.clear();
-    this.keysetLoading = false;
     this.keysetNextPage = 0;
     this.keysetCursor = null;
     this.request(1, 1, PAGE);
