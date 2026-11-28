@@ -40,6 +40,12 @@ pub struct SavedConnector {
     pub path: String,
     pub table_name: String,
     pub locale: String,
+    /// Schema snapshot captured from the source file, used to prevent accidental refresh drift.
+    #[serde(default)]
+    pub schema: Vec<(String, String)>,
+    /// Metadata fingerprint (file size + modification time); not a content hash.
+    #[serde(default)]
+    pub fingerprint: String,
 }
 
 pub const FORMAT_VERSION: u32 = 1;
@@ -312,6 +318,8 @@ mod tests {
             path: "/local/sales.csv".into(),
             table_name: "sales".into(),
             locale: "ko-KR".into(),
+            schema: vec![("region".into(), "VARCHAR".into()), ("amount".into(), "DOUBLE".into())],
+            fingerprint: "123:456".into(),
         };
         save_project_with_assets(&mut wb, &path, &[saved_pipeline.clone()], &[saved_connector.clone()]).unwrap();
 
