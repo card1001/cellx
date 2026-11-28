@@ -199,12 +199,7 @@ pub fn open_project_with_pipelines(path: &Path) -> Result<(Workbook, Vec<SavedPi
 
 pub fn open_project_with_assets(path: &Path) -> Result<(Workbook, Vec<SavedPipeline>, Vec<SavedConnector>)> {
     let (wb, pipelines, connectors, _) = open_project_with_execution_history(path)?;
-    let transform_runs = if zip.file_names().any(|name| name.is_ok_and(|entry| entry == "transform_runs.json")) {
-        serde_json::from_slice(&read_entry(&mut zip, "transform_runs.json")?).map_err(json_err)?
-    } else {
-        Vec::new()
-    };
-    Ok((wb, pipelines, connectors, transform_runs))
+    Ok((wb, pipelines, connectors))
 }
 
 pub fn open_project_with_execution_history(path: &Path) -> Result<(Workbook, Vec<SavedPipeline>, Vec<SavedConnector>, Vec<SavedTransformRun>)> {
@@ -251,7 +246,7 @@ pub fn open_project_with_execution_history(path: &Path) -> Result<(Workbook, Vec
         wb.set_pivots(pivots);
     }
     wb.recalc()?;
-    // Pipelines were added after the initial .cellx format; older projects remain valid.
+    // Older projects may not contain pipelines, connectors, or run history.
     let pipelines = if zip.file_names().any(|name| name.is_ok_and(|entry| entry == "pipelines.json")) {
         serde_json::from_slice(&read_entry(&mut zip, "pipelines.json")?).map_err(json_err)?
     } else {
@@ -262,7 +257,12 @@ pub fn open_project_with_execution_history(path: &Path) -> Result<(Workbook, Vec
     } else {
         Vec::new()
     };
-    Ok((wb, pipelines, connectors))
+    let transform_runs = if zip.file_names().any(|name| name.is_ok_and(|entry| entry == "transform_runs.json")) {
+        serde_json::from_slice(&read_entry(&mut zip, "transform_runs.json")?).map_err(json_err)?
+    } else {
+        Vec::new()
+    };
+    Ok((wb, pipelines, connectors, transform_runs))
 }
 
 // Upper bounds for untrusted project archives. These limits are intentionally
