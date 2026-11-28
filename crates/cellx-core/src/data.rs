@@ -68,6 +68,24 @@ pub struct TableInfo {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ColumnProfile {
+    pub name: String,
+    pub sql_type: String,
+    pub null_count: u64,
+    pub empty_count: u64,
+    pub distinct_count: u64,
+    pub min: Option<Scalar>,
+    pub max: Option<Scalar>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TableProfile {
+    pub table: String,
+    pub row_count: u64,
+    pub columns: Vec<ColumnProfile>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct Page {
     pub columns: Vec<String>,
     /// Row ids (`_rid`) of the returned rows, for editing and selection.
@@ -320,6 +338,46 @@ impl DataStore {
             .cloned()
             .ok_or_else(|| CellxError::UnknownColumn(format!("{table}[{column}]")))
     }
+
+    /// Computes bounded, column-level data quality statistics without loading table rows.
+    /// All identifiers come from the inspected schema and are quoted before SQL construction.
+    pub fn profile(&mut self, table: &str) -> Result<TableProfile> {
+        let info = self.table_info(table)?;
+        let mut columns = Vec::with_capacity(info.columns.len());
+        for column in &info.columns {
+            let ident = quote_ident(&column.name);
+            let empty_expr = if column.kind == ColumnKind::Text {
+                format!("count(*) FILTER (WHERE {ident} = '')")
+            } else {
+                "CAST(0 AS BIGINT)".to_string()
+            };
+            let sql = format!(
+                "SELECT count(*) FILTER (WHERE {ident} IS NULL), \
+                 {empty_expr}, count(DISTINCT {ident}), min({ident}), max({ident}) \
+                 FROM {}",
+                quote_ident(table)
+            );
+            let (_, rows, _) = self.rows(&sql, &[], 1)?;
+            let row = rows.into_iter().next().ok_or_else(|| {
+                CellxError::Bridge(format!("{} 열 프로파일을 계산하지 못했습니다", column.name))
+            })?;
+            let count = |value: &Scalar| match value {
+                Scalar::Number(n) if n.is_finite() && *n >= 0.0 => *n as u64,
+                _ => 0,
+            };
+            columns.push(ColumnProfile {
+                name: column.name.clone(),
+                sql_type: column.sql_type.clone(),
+                null_count: count(&row[0]),
+                empty_count: count(&row[1]),
+                distinct_count: count(&row[2]),
+                min: if row[3] == Scalar::Empty { None } else { Some(row[3].clone()) },
+                max: if row[4] == Scalar::Empty { None } else { Some(row[4].clone()) },
+            });
+        }
+        Ok(TableProfile { table: info.name, row_count: info.rows, columns })
+    }
+
 
     /// Builds a validated transformation plan against the current source schema.
     ///
@@ -695,6 +753,21 @@ mod tests {
         assert_eq!(info.rows, 4);
         assert_eq!(info.columns[1].kind, ColumnKind::Number);
         assert_eq!(info.columns[2].kind, ColumnKind::Date);
+    }
+
+    #[test]
+    fn profile_reports_null_empty_distinct_and_range_statistics() {
+        let mut store = store_with_sales();
+        let profile = store.profile("sales").unwrap();
+        assert_eq!(profile.row_count, 4);
+        let amount = profile.columns.iter().find(|c| c.name == "amount").unwrap();
+        assert_eq!(amount.null_count, 1);
+        assert_eq!(amount.distinct_count, 3);
+        assert_eq!(amount.min, Some(Scalar::Number(100.0)));
+        assert_eq!(amount.max, Some(Scalar::Number(300.0)));
+        let region = profile.columns.iter().find(|c| c.name == "region").unwrap();
+        assert_eq!(region.distinct_count, 3);
+        assert_eq!(region.empty_count, 0);
     }
 
     #[test]
