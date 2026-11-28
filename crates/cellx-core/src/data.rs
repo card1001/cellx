@@ -15,6 +15,7 @@ use serde::Serialize;
 
 use crate::error::{CellxError, Result};
 use crate::value::{from_duckdb, Scalar};
+use crate::job::{JobMonitor, JobPhase};
 use crate::transform::{TransformPipeline, TransformPlan, TransformValue};
 
 /// Column kind as the bridge needs it to translate Excel criteria.
@@ -120,6 +121,8 @@ pub struct DataStore {
     /// Monotonic generation across table creation, replacement and deletion.
     /// Prevents a dropped/recreated table from reusing an old cache version.
     version_clock: u64,
+    /// Progress and cancellation of the long job running on this store.
+    monitor: Arc<JobMonitor>,
 }
 
 pub fn quote_ident(name: &str) -> String {
@@ -152,7 +155,12 @@ impl DataStore {
             "SET autoinstall_known_extensions = false;
              SET autoload_known_extensions = false;",
         )?;
+        // Lets the UI show how far an import or export is. Failing to turn it
+        // on only loses the estimate.
+        let _ = conn.set_query_progress_tracking(true);
+        let monitor = Arc::new(JobMonitor::new(conn.interrupt_handle(), conn.progress_handle()));
         let mut store = DataStore {
+            monitor,
             conn,
             schema_cache: HashMap::new(),
             versions: HashMap::new(),
@@ -169,6 +177,22 @@ impl DataStore {
         Ok(self
             .conn
             .query_row("SELECT version()", [], |r| r.get::<_, String>(0))?)
+    }
+
+    /// Progress and cancellation for the long job running on this store; safe
+    /// to read and cancel from another thread while the job holds the store.
+    pub fn monitor(&self) -> Arc<JobMonitor> {
+        self.monitor.clone()
+    }
+
+    /// Runs `job` as one monitored job: an earlier cancel is cleared first,
+    /// and an interrupted query comes back as `Cancelled`.
+    fn monitored<T>(&mut self, job: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let monitor = self.monitor.clone();
+        monitor.begin();
+        let result = job(self);
+        monitor.end();
+        monitor.map_err(result)
     }
 
     pub fn interrupt_handle(&self) -> Arc<InterruptHandle> {
@@ -223,6 +247,16 @@ impl DataStore {
     /// Imports with an explicit text encoding (`utf-8`, `utf-16`, `cp949`,
     /// `shift_jis`, `gbk`, `big5`, `windows-1252`), or `None`/`auto` to detect it.
     pub fn import_file_with_encoding(
+        &mut self,
+        path: &Path,
+        table: &str,
+        locale: &str,
+        encoding: Option<&str>,
+    ) -> Result<TableInfo> {
+        self.monitored(|store| store.import_inner(path, table, locale, encoding))
+    }
+
+    fn import_inner(
         &mut self,
         path: &Path,
         table: &str,
@@ -312,13 +346,17 @@ impl DataStore {
             "CREATE OR REPLACE TABLE {t} AS SELECT row_number() OVER () AS _rid, * FROM {reader}",
             t = quote_ident(table)
         );
+        self.monitor.check()?;
+        self.monitor.set_phase(JobPhase::Querying);
         if let Err(error) = self.conn.execute(&sql, [path_text]) {
+            self.monitor.check()?;
             let diagnostic = error.to_string().to_ascii_lowercase();
             if diagnostic.contains("utf-8") || diagnostic.contains("utf8") || diagnostic.contains("unicode") {
                 return Err(CellxError::CsvEncoding("non-UTF-8 input".into()));
             }
             return Err(error.into());
         }
+        self.monitor.set_phase(JobPhase::Finishing);
         self.touch(table);
         self.table_info(table)
     }
@@ -393,7 +431,7 @@ impl DataStore {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("csv");
         let temp = std::env::temp_dir().join(format!("cellx-import-{}-{id}.{ext}", std::process::id()));
         let result = (|| -> Result<TableInfo> {
-            transcode_to_utf8(path, &temp, encoding)?;
+            transcode_to_utf8(path, &temp, encoding, &self.monitor)?;
             self.import_with_reader(&temp, table, reader)
         })();
         let _ = fs::remove_file(&temp);
@@ -409,9 +447,13 @@ impl DataStore {
             "CREATE OR REPLACE TABLE {t} AS SELECT row_number() OVER () AS _rid, * FROM ({select_sql})",
             t = quote_ident(table)
         );
-        self.conn.execute_batch(&sql)?;
-        self.touch(table);
-        self.table_info(table)
+        self.monitored(|store| {
+            store.monitor.set_phase(JobPhase::Querying);
+            store.conn.execute_batch(&sql)?;
+            store.monitor.set_phase(JobPhase::Finishing);
+            store.touch(table);
+            store.table_info(table)
+        })
     }
 
     pub fn drop_table(&mut self, table: &str) -> Result<()> {
@@ -808,6 +850,14 @@ impl DataStore {
     /// as `cp949` for programs that cannot read UTF-8. A character the legacy
     /// encoding cannot hold is an error, not a silent `?`.
     pub fn export_with_encoding(&self, table: &str, path: &Path, encoding: Option<&str>) -> Result<()> {
+        let monitor = self.monitor.clone();
+        monitor.begin();
+        let result = monitor.map_err(self.export_inner(table, path, encoding));
+        monitor.end();
+        result
+    }
+
+    fn export_inner(&self, table: &str, path: &Path, encoding: Option<&str>) -> Result<()> {
         let legacy = match encoding.map(|e| e.trim().to_ascii_lowercase()) {
             None => None,
             Some(e) if e.is_empty() || e == "auto" || e == "utf-8" || e == "utf8" => None,
@@ -821,12 +871,17 @@ impl DataStore {
             static EXPORT_ID: AtomicU64 = AtomicU64::new(1);
             let id = EXPORT_ID.fetch_add(1, Ordering::Relaxed);
             let temp = std::env::temp_dir().join(format!("cellx-export-{}-{id}.csv", std::process::id()));
+            // The destination is only opened once the UTF-8 copy is complete,
+            // so a failure or cancel before that leaves an existing file alone.
+            let mut writing = false;
             let result = (|| -> Result<()> {
                 self.export_utf8(table, &temp, false)?;
-                transcode_from_utf8(&temp, path, enc)
+                self.monitor.check()?;
+                writing = true;
+                transcode_from_utf8(&temp, path, enc, &self.monitor)
             })();
             let _ = fs::remove_file(&temp);
-            if result.is_err() {
+            if result.is_err() && writing {
                 let _ = fs::remove_file(path);
             }
             return result;
@@ -839,12 +894,16 @@ impl DataStore {
             .to_str()
             .ok_or_else(|| CellxError::InvalidName(path.display().to_string()))?;
         let is_parquet = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("parquet"));
+        self.monitor.set_phase(JobPhase::Querying);
         if is_parquet {
             let escaped = path_text.replace('\'', "''");
-            self.conn.execute_batch(&format!(
+            if let Err(error) = self.conn.execute_batch(&format!(
                 "COPY (SELECT * EXCLUDE (_rid) FROM {t} ORDER BY _rid) TO '{escaped}' (FORMAT parquet)",
                 t = quote_ident(table)
-            ))?;
+            )) {
+                let _ = fs::remove_file(path);
+                return Err(error.into());
+            }
             return Ok(());
         }
 
@@ -1066,7 +1125,16 @@ fn non_utf8_sample(path: &Path) -> Result<Vec<u8>> {
     }
 }
 
-fn transcode_from_utf8(from: &Path, to: &Path, encoding: &'static encoding_rs::Encoding) -> Result<()> {
+fn transcode_from_utf8(
+    from: &Path,
+    to: &Path,
+    encoding: &'static encoding_rs::Encoding,
+    monitor: &JobMonitor,
+) -> Result<()> {
+    let total = fs::metadata(from).map(|m| m.len()).unwrap_or(0);
+    let mut done = 0_u64;
+    monitor.set_bytes(0, total);
+    monitor.set_phase(JobPhase::Converting);
     let mut input = std::io::BufReader::with_capacity(1 << 20, File::open(from)?);
     let mut output = std::io::BufWriter::with_capacity(1 << 20, File::create(to)?);
     let mut encoder = encoding.new_encoder();
@@ -1074,7 +1142,10 @@ fn transcode_from_utf8(from: &Path, to: &Path, encoding: &'static encoding_rs::E
     let mut carry: Vec<u8> = Vec::new();
     let mut outbuf = vec![0_u8; 4 << 20];
     loop {
+        monitor.check()?;
         let n = input.read(&mut inbuf)?;
+        done += n as u64;
+        monitor.set_bytes(done, total);
         let last = n == 0;
         let mut chunk = std::mem::take(&mut carry);
         chunk.extend_from_slice(&inbuf[..n]);
@@ -1134,14 +1205,26 @@ fn is_utf8_prefix(bytes: &[u8]) -> bool {
     }
 }
 
-fn transcode_to_utf8(from: &Path, to: &Path, encoding: &'static encoding_rs::Encoding) -> Result<()> {
+fn transcode_to_utf8(
+    from: &Path,
+    to: &Path,
+    encoding: &'static encoding_rs::Encoding,
+    monitor: &JobMonitor,
+) -> Result<()> {
+    let total = fs::metadata(from).map(|m| m.len()).unwrap_or(0);
+    let mut done = 0_u64;
+    monitor.set_bytes(0, total);
+    monitor.set_phase(JobPhase::Converting);
     let mut input = std::io::BufReader::with_capacity(1 << 20, File::open(from)?);
     let mut output = std::io::BufWriter::with_capacity(1 << 20, File::create(to)?);
     let mut decoder = encoding.new_decoder_without_bom_handling();
     let mut inbuf = vec![0_u8; 1 << 20];
     let mut outbuf = String::with_capacity(3 << 20);
     loop {
+        monitor.check()?;
         let n = input.read(&mut inbuf)?;
+        done += n as u64;
+        monitor.set_bytes(done, total);
         let last = n == 0;
         let mut src = &inbuf[..n];
         loop {
@@ -1186,6 +1269,143 @@ fn json_contains_table_function(v: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cancels the store's job from another thread once it reaches `phase`,
+    /// returning the largest progress fraction seen before that.
+    fn cancel_when(monitor: Arc<JobMonitor>, phase: JobPhase) -> std::thread::JoinHandle<f64> {
+        std::thread::spawn(move || {
+            let mut best = 0.0_f64;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while std::time::Instant::now() < deadline {
+                let snap = monitor.snapshot();
+                if let Some(f) = snap.fraction {
+                    best = best.max(f);
+                }
+                if snap.phase == phase {
+                    monitor.cancel();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            best
+        })
+    }
+
+    #[test]
+    fn a_running_query_can_be_cancelled_and_the_store_still_works() {
+        let mut store = DataStore::open_in_memory().unwrap();
+        let canceller = cancel_when(store.monitor(), JobPhase::Querying);
+        let result = store.create_table_from_sql(
+            "huge",
+            "SELECT a.range * b.range AS x FROM range(200000) a, range(200000) b",
+        );
+        canceller.join().unwrap();
+        assert!(matches!(result, Err(CellxError::Cancelled)), "{result:?}");
+        assert!(!store.has_table("huge"));
+        assert!(!store.monitor().snapshot().cancelled || store.monitor().snapshot().phase == JobPhase::Idle);
+        // The next job starts clean.
+        let info = store.create_table_from_sql("small", "SELECT 1 AS x").unwrap();
+        assert_eq!(info.rows, 1);
+    }
+
+    #[test]
+    fn converting_a_legacy_csv_reports_progress_and_can_be_cancelled() {
+        let dir = std::env::temp_dir().join(format!("cellx-cancel-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.csv");
+        let mut text = String::from("지역,금액\n");
+        while text.len() < 24 << 20 {
+            text.push_str("서울특별시,12345\n부산광역시,67890\n");
+        }
+        let (bytes, _, _) = encoding_rs::EUC_KR.encode(&text);
+        fs::write(&path, &bytes).unwrap();
+        drop(text);
+
+        let mut store = DataStore::open_in_memory().unwrap();
+        let monitor = store.monitor();
+        // Cancel half-way through the conversion.
+        let watcher = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let mut seen = 0.0_f64;
+            while std::time::Instant::now() < deadline {
+                let snap = monitor.snapshot();
+                if snap.phase == JobPhase::Converting {
+                    if let Some(f) = snap.fraction {
+                        seen = seen.max(f);
+                        if f >= 0.3 {
+                            monitor.cancel();
+                            break;
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+            seen
+        });
+        let result = store.import_file_with_encoding(&path, "big", "ko-KR", Some("cp949"));
+        let seen = watcher.join().unwrap();
+        assert!(matches!(result, Err(CellxError::Cancelled)), "{result:?}");
+        assert!((0.3..1.0).contains(&seen), "progress {seen}");
+        assert!(!store.has_table("big"));
+
+        let info = store.import_file_with_encoding(&path, "big", "ko-KR", Some("cp949")).unwrap();
+        assert!(info.rows > 1000);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cancelled_export_leaves_an_existing_file_alone() {
+        let store = store_with_sales();
+        let path = std::env::temp_dir().join(format!("cellx-keep-{}.csv", std::process::id()));
+        fs::write(&path, "keep me").unwrap();
+        // A cancel requested before the export starts is cleared by it, so
+        // simulate the request landing mid-job: the job checks it at its
+        // first step and stops before opening the destination.
+        let monitor = store.monitor();
+        monitor.begin();
+        monitor.cancel();
+        let result = monitor.map_err(store.export_inner("sales", &path, Some("cp949")));
+        assert!(matches!(result, Err(CellxError::Cancelled)), "{result:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "keep me");
+        let _ = fs::remove_file(path);
+    }
+
+    /// `cargo test -p cellx-core --release -- --ignored --nocapture csv_import_progress`
+    #[test]
+    #[ignore]
+    fn csv_import_progress_advances() {
+        let path = std::env::temp_dir().join(format!("cellx-progress-{}.csv", std::process::id()));
+        {
+            let mut out = std::io::BufWriter::new(File::create(&path).unwrap());
+            writeln!(out, "id,region,amount,day").unwrap();
+            for i in 0..3_000_000u64 {
+                writeln!(out, "{i},region{},{}.25,2025-01-{:02}", i % 17, i % 1000, 1 + i % 28).unwrap();
+            }
+        }
+        let mut store = DataStore::open_in_memory().unwrap();
+        let monitor = store.monitor();
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = done.clone();
+        let watcher = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            while !flag.load(Ordering::Acquire) {
+                let snap = monitor.snapshot();
+                if let Some(f) = snap.fraction {
+                    if seen.last() != Some(&(f * 100.0).round()) {
+                        seen.push((f * 100.0).round());
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            seen
+        });
+        let start = std::time::Instant::now();
+        let info = store.import_file(&path, "big").unwrap();
+        done.store(true, Ordering::Release);
+        let seen = watcher.join().unwrap();
+        println!("rows {} in {:?}; progress samples {:?}", info.rows, start.elapsed(), seen);
+        let _ = fs::remove_file(path);
+    }
 
     fn store_with_sales() -> DataStore {
         let mut s = DataStore::open_in_memory().unwrap();

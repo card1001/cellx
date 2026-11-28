@@ -804,7 +804,25 @@ export const api = {
   exportTable: (table: string, path: string, locale: string, encoding: string | null = null) =>
     invoke<void>("export_table", { table, path, locale, encoding }),
   dropTable: (table: string) => invoke<BookInfo>("drop_table", { table }),
+  dataJobProgress: () => invoke<DataJobStatus | null>("data_job_progress"),
+  cancelDataJob: () => invoke<boolean>("cancel_data_job"),
 };
+
+/** A long data-sheet command (import, export, query) while it runs. */
+export interface DataJobStatus {
+  kind: "import" | "export" | "query";
+  label: string;
+  elapsedMs: number;
+  progress: {
+    phase: "idle" | "converting" | "querying" | "finishing";
+    /** 0..1 within the current phase, or null when it cannot be estimated. */
+    fraction: number | null;
+    bytesDone: number;
+    bytesTotal: number;
+    rowsProcessed: number;
+    cancelled: boolean;
+  };
+}
 
 export function scalarText(s: Scalar): string {
   switch (s.t) {

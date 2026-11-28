@@ -1,4 +1,5 @@
 import { formatLocaleNumber, getActiveLocale, tr } from "./i18n";
+import { DataJobProgress } from "./components/DataJobProgress";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -175,6 +176,8 @@ export default function App() {
   const [selStats, setSelStats] = useState<SelectionStats | null>(null);
   const [message, setMessage] = useState<{ text: string; error?: boolean } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // A long data-sheet command (import, export, query) is running: shows the progress window.
+  const [dataJob, setDataJob] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [showSql, setShowSql] = useState(false);
   const [dialog, setDialog] = useState<Dialog>(null);
@@ -279,6 +282,16 @@ export default function App() {
       return undefined;
     } finally {
       setBusy(null);
+    }
+  };
+
+  /** `run` for data-sheet commands that report progress and can be cancelled. */
+  const runDataJob = async <T,>(label: string, fn: () => Promise<T>): Promise<T | undefined> => {
+    setDataJob(true);
+    try {
+      return await run(label, fn);
+    } finally {
+      setDataJob(false);
     }
   };
 
@@ -1152,7 +1165,7 @@ export default function App() {
     if (!choice) return;
     const { name, encoding } = choice;
     const t = performance.now();
-    const table = await run("가져오는 중", () => api.importData(path, name, locale, encoding));
+    const table = await runDataJob("가져오는 중", () => api.importData(path, name, locale, encoding));
     if (!table) return;
     await refreshInfo();
     sources.current.delete(tabKey({ kind: "data", name: table.name }));
@@ -1178,7 +1191,7 @@ export default function App() {
       if (picked === undefined) return;
       encoding = picked;
     }
-    const ok = await run("내보내는 중", () => api.exportTable(src.info.name, path, locale, encoding));
+    const ok = await runDataJob("내보내는 중", () => api.exportTable(src.info.name, path, locale, encoding));
     if (ok !== undefined) say(`내보냈습니다: ${path}`);
   };
 
@@ -3150,7 +3163,7 @@ export default function App() {
               say(`${table.name}: ${formatCount(table.rows)}행`);
             }}
             onCreate={async (sql, name) => {
-              const table = await run("쿼리 실행 중", () => api.queryToTable(sql, name));
+              const table = await runDataJob("쿼리 실행 중", () => api.queryToTable(sql, name));
               if (!table) return;
               await refreshInfo();
               sources.current.delete(tabKey({ kind: "data", name: table.name }));
@@ -3299,6 +3312,7 @@ export default function App() {
       </footer>
 
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
+      <DataJobProgress active={dataJob} />
       {dialog?.kind === "importData" && (
         <ImportDataDialog
           path={dialog.path}

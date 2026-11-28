@@ -42,6 +42,8 @@ impl Book {
     }
 }
 
+use crate::data_jobs::{self, DataJobState};
+
 pub struct AppState(pub Arc<Mutex<Book>>);
 
 pub(crate) type CmdResult<T> = Result<T, String>;
@@ -56,7 +58,7 @@ fn active_locale() -> String {
         .unwrap_or_else(|_| "ko-KR".to_string())
 }
 
-fn err(e: impl std::fmt::Display + 'static) -> String {
+pub(crate) fn err(e: impl std::fmt::Display + 'static) -> String {
     if let Some(core_error) = (&e as &dyn Any).downcast_ref::<cellx_core::CellxError>() {
         core_error.localized_message(&active_locale())
     } else {
@@ -88,7 +90,7 @@ pub fn set_locale(locale: String) -> CmdResult<()> {
     Ok(())
 }
 
-fn lock<'a>(state: &'a State<'_, AppState>) -> CmdResult<std::sync::MutexGuard<'a, Book>> {
+pub(crate) fn lock<'a>(state: &'a State<'_, AppState>) -> CmdResult<std::sync::MutexGuard<'a, Book>> {
     state.0.lock().map_err(|_| "내부 상태를 잠글 수 없습니다. 앱을 다시 시작하세요".to_string())
 }
 
@@ -428,12 +430,23 @@ pub fn unmerge(state: State<'_, AppState>, sheet: u32, range: CellRange) -> CmdR
 #[tauri::command]
 pub async fn import_data(
     state: State<'_, AppState>,
+    jobs: State<'_, DataJobState>,
     path: String,
     name: String,
     locale: String,
     encoding: Option<String>,
 ) -> CmdResult<TableInfo> {
-    edit(&state, |wb| wb.import_data_with_encoding(Path::new(&path), &name, &locale, encoding.as_deref()))
+    let label = file_label(&path);
+    data_jobs::run(&state, &jobs, "import", label, true, |wb| {
+        wb.import_data_with_encoding(Path::new(&path), &name, &locale, encoding.as_deref())
+    })
+}
+
+fn file_label(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
 }
 
 /// The first lines of a data file as the chosen (or detected) encoding reads them.
@@ -447,8 +460,14 @@ pub async fn preview_data_file(
 }
 
 #[tauri::command]
-pub async fn query_to_table(state: State<'_, AppState>, sql: String, name: String) -> CmdResult<TableInfo> {
-    edit(&state, |wb| wb.create_table_from_query(&name, &sql))
+pub async fn query_to_table(
+    state: State<'_, AppState>,
+    jobs: State<'_, DataJobState>,
+    sql: String,
+    name: String,
+) -> CmdResult<TableInfo> {
+    let label = name.clone();
+    data_jobs::run(&state, &jobs, "query", label, true, |wb| wb.create_table_from_query(&name, &sql))
 }
 
 #[tauri::command]
@@ -471,13 +490,17 @@ pub async fn update_data_cell(state: State<'_, AppState>, table: String, rid: i6
 #[tauri::command]
 pub async fn export_table(
     state: State<'_, AppState>,
+    jobs: State<'_, DataJobState>,
     table: String,
     path: String,
     locale: String,
     encoding: Option<String>,
 ) -> CmdResult<()> {
     let _ = locale;
-    read(&state, |wb| wb.data().export_with_encoding(&table, Path::new(&path), encoding.as_deref()))
+    let label = file_label(&path);
+    data_jobs::run(&state, &jobs, "export", label, false, |wb| {
+        wb.data().export_with_encoding(&table, Path::new(&path), encoding.as_deref())
+    })
 }
 
 #[tauri::command]
