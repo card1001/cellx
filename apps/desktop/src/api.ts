@@ -796,6 +796,9 @@ export const api = {
   deleteDataConnector: (id: string) => invoke<SavedConnector[]>("delete_data_connector", { id }),
   dataPage: (table: string, offset: number, limit: number, sort: Sort | null, filters: ColumnFilter[]) =>
     invoke<Page>("data_page", { table, offset, limit, sort, filters }),
+  /** Large-table sequential scan; cursor is the last stable _rid from the previous page. */
+  dataPageAfterRid: (table: string, afterRid: number | null, limit: number, filters: ColumnFilter[]) =>
+    invoke<Page>("data_page_after_rid", { table, afterRid, limit, filters }),
   updateDataCell: (table: string, rid: number, column: string, text: string) =>
     invoke<RecalcStats>("update_data_cell", { table, rid, column, text }),
   exportTable: (table: string, path: string, locale: string) => invoke<void>("export_table", { table, path, locale }),
