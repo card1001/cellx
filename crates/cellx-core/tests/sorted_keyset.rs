@@ -134,7 +134,7 @@ fn sorted_keyset_full_scan_matches_offset_for_many_duplicate_and_null_keys() {
 }
 
 #[test]
-fn sorted_keyset_cursor_is_invalidated_by_insert_and_delete() {
+fn sorted_keyset_cursor_ignores_other_tables_and_rejects_own_table_updates() {
     let mut store = DataStore::open_in_memory().unwrap();
     store.create_table_from_sql(
         "items",
