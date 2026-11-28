@@ -924,6 +924,46 @@ mod tests {
     }
 
     #[test]
+    fn incremental_transform_appends_only_new_source_rows() {
+        let mut store = DataStore::open_in_memory().unwrap();
+        store.create_table_from_sql(
+            "sales",
+            "SELECT * FROM (VALUES ('a', 10), ('b', 20)) AS t(region, amount)",
+        ).unwrap();
+        let pipeline = TransformPipeline {
+            source_table: "sales".into(),
+            steps: vec![TransformStep::SelectColumns { columns: vec!["region".into(), "amount".into()] }],
+        };
+        let (first, watermark) = store.execute_transform_incremental("clean_sales", &pipeline, None).unwrap();
+        assert_eq!(first.rows, 2);
+        assert_eq!(watermark, 2);
+
+        store.conn.execute("INSERT INTO sales VALUES (3, 'c', 30)", []).unwrap();
+        let (second, next_watermark) = store.execute_transform_incremental("clean_sales", &pipeline, Some(watermark)).unwrap();
+        assert_eq!(second.rows, 3);
+        assert_eq!(next_watermark, 3);
+        let (columns, rows, _) = store.rows(
+            "SELECT _rid, region, amount FROM clean_sales ORDER BY _rid",
+            &[],
+            10,
+        ).unwrap();
+        assert_eq!(columns, vec!["_rid", "region", "amount"]);
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn incremental_transform_rejects_aggregates_and_order_sensitive_steps() {
+        let mut store = DataStore::open_in_memory().unwrap();
+        store.create_table_from_sql("sales", "SELECT * FROM (VALUES ('a', 10)) AS t(region, amount)").unwrap();
+        let pipeline = TransformPipeline {
+            source_table: "sales".into(),
+            steps: vec![TransformStep::GroupBy { columns: vec!["region".into()], aggregates: vec![] }],
+        };
+        let error = store.execute_transform_incremental("summary", &pipeline, None).unwrap_err();
+        assert!(error.to_string().contains("증분 실행"));
+    }
+
+    #[test]
     fn page_sorts_and_filters() {
         let mut s = store_with_sales();
         let page = s
