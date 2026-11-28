@@ -450,6 +450,17 @@ pub async fn data_page(
 }
 
 #[tauri::command]
+pub async fn data_page_after_rid(
+    state: State<'_, AppState>,
+    table: String,
+    after_rid: Option<i64>,
+    limit: u64,
+    filters: Vec<ColumnFilter>,
+) -> CmdResult<Page> {
+    read(&state, |wb| wb.data_page_after_rid(&table, after_rid, limit.min(5000), &filters))
+}
+
+#[tauri::command]
 pub async fn update_data_cell(state: State<'_, AppState>, table: String, rid: i64, column: String, text: String) -> CmdResult<RecalcStats> {
     edit(&state, |wb| wb.update_data_cell(&table, rid, &column, &text))
 }
