@@ -4089,6 +4089,8 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
       path: picked,
       table_name: safeName,
       locale: getActiveLocale(),
+      schema: [],
+      fingerprint: "",
     };
     const table = await api.saveDataConnector(connector);
     setConnectors(await api.dataConnectors());
@@ -4174,7 +4176,17 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
         <div key={connector.id} style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
           <span style={{ flex: 1 }}>{connector.name} <span className="muted">→ {connector.table_name}</span></span>
           <button disabled={busy} onClick={() => void runBusy(async () => {
-            const table = await api.refreshDataConnector(connector.id);
+            let table: TableInfo;
+            try {
+              table = await api.refreshDataConnector(connector.id, false);
+            } catch (cause) {
+              const message = errorText(cause);
+              if (!message.includes("SCHEMA_DRIFT")) throw cause;
+              const detail = message.replace(/^SCHEMA_DRIFT:\\s*/, "");
+              if (!window.confirm(detail)) return;
+              table = await api.refreshDataConnector(connector.id, true);
+            }
+            setConnectors(await api.dataConnectors());
             await props.onExecuted(table);
           })}>새로 고침</button>
           <button disabled={busy} onClick={() => void runBusy(async () => {
