@@ -36,6 +36,7 @@ import {
   type AggregateFunction,
   type SavedConnector,
   type TableProfile,
+  type TransformJobSnapshot,
 } from "./api";
 import { colorScaleRule, dataBarRule, highlightRule, type HighlightKind, ICON_SETS, iconSetRule, ratingRule } from "./cf";
 import { CHART_KINDS, ChartLayer } from "./components/Chart";
@@ -3993,6 +3994,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   const [selectedId, setSelectedId] = useState("");
   const [preview, setPreview] = useState<TransformPreview | null>(null);
   const [profile, setProfile] = useState<TableProfile | null>(null);
+  const [job, setJob] = useState<TransformJobSnapshot | null>(null);
   const [stepPreviews, setStepPreviews] = useState<{ step: number; preview: TransformPreview }[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -4112,8 +4114,18 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   });
   const executeNow = () => runBusy(async () => {
     if (!selectedId) throw new Error("먼저 파이프라인을 저장하세요.");
-    const table = await api.executeTransformPipeline(selectedId, output.trim());
-    await props.onExecuted(table);
+    const started = await api.startTransformJob(selectedId, output.trim());
+    setJob(started);
+    let latest = started;
+    while (latest.status === "queued" || latest.status === "running" || latest.status === "cancelling") {
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+      latest = await api.getTransformJob(started.id);
+      setJob(latest);
+    }
+    if (latest.status === "failed") throw new Error(latest.error || "데이터 변환 작업에 실패했습니다.");
+    if (latest.status === "cancelled") return;
+    if (!latest.result) throw new Error("작업 결과를 찾을 수 없습니다.");
+    await props.onExecuted(latest.result);
   });
   const loadSaved = (id: string) => {
     setSelectedId(id);
@@ -4249,12 +4261,16 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
         <button disabled={busy || !source} onClick={() => void previewStepsNow()}>단계별 미리보기</button>
         <button disabled={busy || !source} onClick={() => void saveNow()}>저장</button>
         <button disabled={busy || !selectedId} onClick={() => void executeNow()}>새 데이터 시트로 실행</button>
+        {job && (job.status === "queued" || job.status === "running" || job.status === "cancelling") && <button onClick={() => {
+          void api.cancelTransformJob(job.id).then(setJob).catch((e) => setError(errorText(e)));
+        }}>실행 취소</button>}
         {selectedId && <button disabled={busy} onClick={() => void runBusy(async () => {
           const list = await api.deleteTransformPipeline(selectedId);
           setSaved(list); setSelectedId(""); setPreview(null);
         })}>삭제</button>}
       </div>
       {error && <p role="alert" style={{ color: "var(--danger, #b42318)" }}>{error}</p>}
+      {job && <p className="muted" role="status">백그라운드 작업: {job.phase}{job.status === "failed" && job.error ? ` · ${job.error}` : ""}</p>}
       {profile && profile.table === source && <div>
         <p className="muted">데이터 프로파일 · {profile.row_count.toLocaleString()}행 · {profile.columns.length}열</p>
         <div style={{ overflow: "auto", maxHeight: 220 }}>
