@@ -106,6 +106,7 @@ fn main() {
             connector_commands::delete_data_connector,
             commands::data_page,
             commands::data_page_after_rid,
+            commands::data_page_after_sort,
             commands::update_data_cell,
             commands::export_table,
             commands::drop_table,
