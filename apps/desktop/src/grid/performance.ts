@@ -21,3 +21,13 @@ export function estimateSerializedBytes(value: unknown): number {
     return 0;
   }
 }
+
+/** A response may update cache state only while both generation and request token match. */
+export function isCurrentPageRequest(
+  currentGeneration: number,
+  requestGeneration: number,
+  activeToken: number | undefined,
+  requestToken: number,
+): boolean {
+  return currentGeneration === requestGeneration && activeToken === requestToken;
+}
