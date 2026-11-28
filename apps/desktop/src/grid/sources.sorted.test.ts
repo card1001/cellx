@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api, type KeysetPage, type Page, type Sort, type SortCursor, type TableInfo } from "../api";
 import { DataSource } from "./sources";
+import { estimatePageBytes } from "./performance";
 
 vi.mock("../api", () => ({
   api: {
@@ -87,5 +88,64 @@ describe("DataSource sorted keyset paging", () => {
 
     expect(api.dataPageAfterSort).toHaveBeenNthCalledWith(2, "items", null, 256, sort, []);
     await vi.waitFor(() => expect(source.cell(1, 1)?.text).toBe("after reload"));
+  });
+});
+
+
+describe("DataSource page-cache accounting", () => {
+  it("tracks retained bytes and resets accounting on reload", async () => {
+    const firstPage = page("payload");
+    vi.mocked(api.dataPageAfterSort).mockResolvedValueOnce({
+      page: firstPage,
+      next_cursor: cursor,
+    });
+    const source = new DataSource(info, ["Arial", 10]);
+    source.setView(sort, []);
+    await vi.waitFor(() => expect(source.cell(1, 1)?.text).toBe("payload"));
+
+    expect(source.getDiagnosticsSnapshot()).toMatchObject({
+      cachedPages: 1,
+      cachedBytes: estimatePageBytes(firstPage),
+      maxCachedBytes: 64 * 1024 * 1024,
+    });
+
+    source.reload();
+    expect(source.getDiagnosticsSnapshot()).toMatchObject({
+      cachedPages: 0,
+      cachedBytes: 0,
+    });
+  });
+
+  it("keeps forward cursor checkpoints when an old page is evicted", async () => {
+    const requests: (SortCursor | null)[] = [];
+    let sequence = 0;
+    vi.mocked(api.dataPageAfterSort).mockImplementation(async (_table, previous) => {
+      requests.push(previous);
+      const current = sequence++;
+      return keysetPage(`row-${current}`, {
+        value: `value-${current}`,
+        rid: current + 1,
+        query_id: "stable-query",
+      });
+    });
+    const source = new DataSource({ ...info, rows: 20_000 }, ["Arial", 10]);
+    source.setView(sort, []);
+    await vi.waitFor(() => expect(source.cell(1, 1)?.text).toBe("row-0"));
+
+    for (let pageIndex = 1; pageIndex <= 64; pageIndex++) {
+      source.request(pageIndex * 256 + 1, 1, pageIndex * 256 + 256);
+      await vi.waitFor(() => expect(source.cell(pageIndex * 256 + 1, 1)?.text).toBe(`row-${pageIndex}`));
+    }
+
+    expect(source.getDiagnosticsSnapshot().cachedPages).toBe(64);
+    expect(source.cell(1, 1)).toBeUndefined();
+
+    source.request(65 * 256 + 1, 1, 66 * 256);
+    await vi.waitFor(() => expect(requests).toHaveLength(66));
+    expect(requests[65]).toEqual({
+      value: "value-64",
+      rid: 65,
+      query_id: "stable-query",
+    });
   });
 });
