@@ -75,7 +75,7 @@ pub fn start_transform_job(
     let jobs_map = jobs.0.clone();
     {
         let mut records = jobs_map.lock().map_err(|_| "작업 상태를 잠글 수 없습니다".to_string())?;
-        // Keep the in-memory history bounded for long-running desktop sessions.
+        // Bound in-memory job history for long-running desktop sessions.
         if records.len() >= 100 {
             if let Some(oldest) = records.keys().next().cloned() {
                 records.remove(&oldest);
@@ -103,14 +103,20 @@ pub fn start_transform_job(
                 Err("작업이 취소되었습니다".to_string())
             } else {
                 match app_state.lock() {
-                    Ok(mut book) => book.wb.data()
-                        .execute_transform(&output_table, &pipeline)
-                        .map_err(|e| e.to_string())
-                        .map(|table| {
-                            book.dirty = true;
-                            book.edits = book.edits.saturating_add(1);
-                            table
-                        }),
+                    Ok(mut book) => {
+                        if cancelled.load(Ordering::Acquire) {
+                            Err("작업이 취소되었습니다".to_string())
+                        } else {
+                            book.wb.data()
+                                .execute_transform(&output_table, &pipeline)
+                                .map_err(|e| e.to_string())
+                                .map(|table| {
+                                    book.dirty = true;
+                                    book.edits = book.edits.saturating_add(1);
+                                    table
+                                })
+                        }
+                    }
                     Err(_) => Err("통합 문서 상태를 잠글 수 없습니다".to_string()),
                 }
             };
