@@ -99,6 +99,7 @@ fn main() {
             connector_commands::refresh_data_connector,
             connector_commands::delete_data_connector,
             commands::data_page,
+            commands::data_page_after_rid,
             commands::update_data_cell,
             commands::export_table,
             commands::drop_table,
