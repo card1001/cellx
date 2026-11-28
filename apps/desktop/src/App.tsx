@@ -79,7 +79,7 @@ import { FormulaText } from "./components/FormulaText";
 import { ContextMenu, type MenuItem } from "./components/Menu";
 import { Ribbon, type RibbonActions } from "./components/Ribbon";
 import { decreaseDecimals, increaseDecimals } from "./formats";
-import { canPointAt, completeFunctions, cycleAbsolute, functionPrefixAt, insertRef, type PointRef, quoteSheet, refSpans } from "./formula";
+import { canPointAt, completeFunctions, cycleAbsolute, functionPrefixAt, insertRef, quoteSheet, refSpans } from "./formula";
 import { fontCss, Grid, type Hit, type RefBox, type Selection } from "./grid/Grid";
 import { addr, colName, normalize, parseAddr, type Pos, type Range, rangeLabel, toTsv } from "./grid/model";
 import { DataSource, SheetSource } from "./grid/sources";
