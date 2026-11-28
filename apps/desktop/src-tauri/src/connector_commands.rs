@@ -1,7 +1,6 @@
 //! Tauri commands for reusable, local-only file connectors.
 use std::io::Read;
 use std::path::Path;
-use std::time::UNIX_EPOCH;
 
 use cellx_core::data::TableInfo;
 use cellx_core::project::SavedConnector;
@@ -19,11 +18,6 @@ fn file_fingerprint(path: &Path) -> CmdResult<String> {
         .map_err(|e| format!("로컬 파일을 열 수 없습니다: {e}"))?;
     let before = file.metadata()
         .map_err(|e| format!("로컬 파일 정보를 읽을 수 없습니다: {e}"))?;
-    let modified = before.modified().ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_nanos().to_string())
-        .unwrap_or_else(|| "unknown".into());
-
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 1024 * 1024];
     loop {
@@ -43,8 +37,9 @@ fn file_fingerprint(path: &Path) -> CmdResult<String> {
     let digest = hasher.finalize().iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    // Legacy size:mtime fingerprints safely appear changed and are refreshed once.
-    Ok(format!("sha256:{}:{modified}:{digest}", before.len()))
+    // The digest, not metadata, defines content identity. Legacy size:mtime
+    // fingerprints safely appear changed and are refreshed once.
+    Ok(format!("sha256:{}:{digest}", before.len()))
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
