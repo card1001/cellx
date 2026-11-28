@@ -519,6 +519,7 @@ export interface TransformJobSnapshot {
   id: string;
   pipeline_id: string;
   output_table: string;
+  incremental: boolean;
   started_at_ms: number;
   finished_at_ms: number | null;
   result_rows: number | null;
@@ -777,8 +778,8 @@ export const api = {
   previewTransform: (pipeline: TransformPipeline) => invoke<TransformPreview>("preview_transform", { pipeline }),
   executeTransformPipeline: (id: string, outputTable: string) =>
     invoke<TableInfo>("execute_transform_pipeline", { id, outputTable }),
-  startTransformJob: (pipelineId: string, outputTable: string) =>
-    invoke<TransformJobSnapshot>("start_transform_job", { pipelineId, outputTable }),
+  startTransformJob: (pipelineId: string, outputTable: string, incremental = false) =>
+    invoke<TransformJobSnapshot>("start_transform_job", { pipelineId, outputTable, incremental }),
   getTransformJob: (id: string) => invoke<TransformJobSnapshot>("get_transform_job", { id }),
   listTransformJobs: () => invoke<TransformJobSnapshot[]>("list_transform_jobs"),
   cancelTransformJob: (id: string) => invoke<TransformJobSnapshot>("cancel_transform_job", { id }),
