@@ -1656,6 +1656,16 @@ impl Workbook {
         self.data.page(table, offset, limit, sort, filters)
     }
 
+    pub fn data_page_after_rid(
+        &mut self,
+        table: &str,
+        after_rid: Option<i64>,
+        limit: u64,
+        filters: &[ColumnFilter],
+    ) -> Result<Page> {
+        self.data.page_after_rid(table, after_rid, limit, filters)
+    }
+
     pub fn update_data_cell(&mut self, table: &str, rid: i64, column: &str, text: &str) -> Result<RecalcStats> {
         self.data.update_cell(table, rid, column, text)?;
         self.recalc()
