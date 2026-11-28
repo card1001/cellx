@@ -4,6 +4,7 @@ import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialo
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  SPREADSHEET_EXTENSIONS,
   type AutoFilter,
   type BookInfo,
   type NameView,
@@ -73,6 +74,7 @@ import {
   ProtectDialog,
   SubtotalDialog,
   ImportDataDialog,
+  type ImportChoice,
   ExportEncodingDialog,
 } from "./components/DataDialogs";
 import { type FormatResult, FormatCellsDialog, PromptDialog } from "./components/Dialogs";
@@ -133,7 +135,7 @@ type Dialog =
   | { kind: "print" }
   | { kind: "subtotal"; range: Range }
   | { kind: "createTable"; range: Range; header: boolean; style: string }
-  | { kind: "importData"; path: string; suggested: string; csv: boolean; resolve(v: { name: string; encoding: string | null } | null): void }
+  | { kind: "importData"; path: string; suggested: string; csv: boolean; spreadsheet: boolean; resolve(v: ImportChoice | null): void }
   | { kind: "exportEncoding"; resolve(v: string | null | undefined): void }
   | { kind: "protect" }
   | { kind: "unprotect" }
@@ -1154,18 +1156,28 @@ export default function App() {
   };
 
   const importData = async () => {
-    const path = await openDialog({ multiple: false, filters: [{ name: tr("데이터 파일"), extensions: ["csv", "tsv", "txt", "parquet"] }] });
+    const path = await openDialog({
+      multiple: false,
+      filters: [
+        { name: tr("데이터 파일"), extensions: ["csv", "tsv", "txt", "parquet", ...SPREADSHEET_EXTENSIONS] },
+        { name: tr("Excel·OpenDocument 통합 문서"), extensions: SPREADSHEET_EXTENSIONS },
+      ],
+    });
     if (!path || Array.isArray(path)) return;
     const base = path.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") ?? "data";
     const suggested = base.replace(/[^\p{L}\p{N}_]/gu, "_").replace(/^(\d)/, "_$1");
-    const csv = !/\.parquet$/i.test(path);
-    const choice = await new Promise<{ name: string; encoding: string | null } | null>((resolve) =>
-      setDialog({ kind: "importData", path, suggested, csv, resolve }),
+    const ext = path.split(".").pop()?.toLowerCase() ?? "";
+    const spreadsheet = (SPREADSHEET_EXTENSIONS as readonly string[]).includes(ext);
+    const csv = !spreadsheet && ext !== "parquet";
+    const choice = await new Promise<ImportChoice | null>((resolve) =>
+      setDialog({ kind: "importData", path, suggested, csv, spreadsheet, resolve }),
     );
     if (!choice) return;
-    const { name, encoding } = choice;
+    const { name, encoding, sheet, header } = choice;
     const t = performance.now();
-    const table = await runDataJob("가져오는 중", () => api.importData(path, name, locale, encoding));
+    const table = await runDataJob("가져오는 중", () =>
+      spreadsheet ? api.importSpreadsheet(path, name, sheet, header) : api.importData(path, name, locale, encoding),
+    );
     if (!table) return;
     await refreshInfo();
     sources.current.delete(tabKey({ kind: "data", name: table.name }));
@@ -3318,7 +3330,9 @@ export default function App() {
           path={dialog.path}
           suggested={dialog.suggested}
           csv={dialog.csv}
+          spreadsheet={dialog.spreadsheet}
           preview={(encoding) => api.previewDataFile(dialog.path, locale, encoding)}
+          sheets={() => api.spreadsheetSheets(dialog.path)}
           onDone={(v) => {
             dialog.resolve(v);
             setDialog(null);

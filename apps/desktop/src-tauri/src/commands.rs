@@ -449,6 +449,28 @@ fn file_label(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
+/// Imports one worksheet of an Excel or OpenDocument file as a data sheet.
+#[tauri::command]
+pub async fn import_spreadsheet(
+    state: State<'_, AppState>,
+    jobs: State<'_, DataJobState>,
+    path: String,
+    name: String,
+    sheet: Option<String>,
+    header: bool,
+) -> CmdResult<TableInfo> {
+    let label = file_label(&path);
+    data_jobs::run(&state, &jobs, "import", label, true, |wb| {
+        wb.import_spreadsheet_data(Path::new(&path), &name, sheet.as_deref(), header)
+    })
+}
+
+/// The worksheets of an Excel or OpenDocument file, for the import dialog.
+#[tauri::command]
+pub async fn spreadsheet_sheets(path: String) -> CmdResult<Vec<String>> {
+    cellx_core::data::spreadsheet_sheets(Path::new(&path)).map_err(err)
+}
+
 /// The first lines of a data file as the chosen (or detected) encoding reads them.
 #[tauri::command]
 pub async fn preview_data_file(

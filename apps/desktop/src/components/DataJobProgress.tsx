@@ -54,7 +54,9 @@ export function DataJobProgress(props: { active: boolean }) {
     cancelling || p.cancelled
       ? tr("취소하는 중")
       : p.phase === "converting"
-        ? tr("텍스트 인코딩 변환 중")
+        ? p.unit === "rows"
+          ? tr("시트 읽는 중")
+          : tr("텍스트 인코딩 변환 중")
         : p.phase === "querying"
           ? status.kind === "export"
             ? tr("파일 쓰는 중")
@@ -66,7 +68,12 @@ export function DataJobProgress(props: { active: boolean }) {
             : tr("준비하는 중");
   const percent = p.fraction == null ? null : Math.round(p.fraction * 1000) / 10;
   const detail: string[] = [];
-  if (p.phase === "converting" && p.bytesTotal > 0) detail.push(`${formatBytes(p.bytesDone)} / ${formatBytes(p.bytesTotal)}`);
+  if (p.phase === "converting" && p.bytesTotal > 0)
+    detail.push(
+      p.unit === "rows"
+        ? `${p.bytesDone.toLocaleString()} / ${p.bytesTotal.toLocaleString()} ${tr("행")}`
+        : `${formatBytes(p.bytesDone)} / ${formatBytes(p.bytesTotal)}`,
+    );
   if (p.phase === "querying" && p.rowsProcessed > 0) detail.push(`${p.rowsProcessed.toLocaleString()} ${tr("행 처리")}`);
   detail.push(`${tr("경과")} ${formatElapsed(status.elapsedMs)}`);
 

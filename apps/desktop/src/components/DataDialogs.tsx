@@ -1325,15 +1325,45 @@ export function MessageBox(props: { title?: string; message: string; onClose(): 
 // ---------------------------------------------------------------- 데이터 가져오기 / 내보내기
 
 /** 데이터 시트 가져오기: name, text encoding (detected unless chosen) and a preview. */
+export interface ImportChoice {
+  name: string;
+  encoding: string | null;
+  /** Spreadsheets: the worksheet (null: the first) and whether row 1 holds the column names. */
+  sheet: string | null;
+  header: boolean;
+}
+
 export function ImportDataDialog(props: {
   path: string;
   suggested: string;
   csv: boolean;
+  /** The file is xlsx, xls, ods…: choose a worksheet instead of an encoding. */
+  spreadsheet?: boolean;
   preview(encoding: string | null): Promise<FilePreview>;
-  onDone(r: { name: string; encoding: string | null } | null): void;
+  sheets?(): Promise<string[]>;
+  onDone(r: ImportChoice | null): void;
 }) {
   const [name, setName] = useState(props.suggested);
   const [encoding, setEncoding] = useState("auto");
+  const [sheets, setSheets] = useState<string[] | null>(null);
+  const [sheet, setSheet] = useState<string | null>(null);
+  const [header, setHeader] = useState(true);
+  useEffect(() => {
+    if (!props.spreadsheet || !props.sheets) return;
+    let live = true;
+    props
+      .sheets()
+      .then((list) => {
+        if (!live) return;
+        setSheets(list);
+        setSheet(list[0] ?? null);
+        setError(null);
+      })
+      .catch((e) => live && setError(String(e)));
+    return () => {
+      live = false;
+    };
+  }, [props.spreadsheet, props.path]);
   const [preview, setPreview] = useState<FilePreview | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -1358,13 +1388,34 @@ export function ImportDataDialog(props: {
         className="modal-body"
         onSubmit={(e) => {
           e.preventDefault();
-          if (name.trim()) props.onDone({ name: name.trim(), encoding: encoding === "auto" ? null : encoding });
+          if (name.trim())
+            props.onDone({ name: name.trim(), encoding: encoding === "auto" ? null : encoding, sheet, header });
         }}
       >
         <label>
           {tr("데이터 시트 이름 (수식에서 이름[열]로 참조합니다)")}
           <input autoFocus value={name} onChange={(e) => setName(e.target.value)} />
         </label>
+        {props.spreadsheet && (
+          <>
+            <label>
+              {tr("시트")}
+              <select value={sheet ?? ""} disabled={!sheets} onChange={(e) => setSheet(e.target.value)}>
+                {(sheets ?? []).map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="check">
+              <input type="checkbox" checked={header} onChange={(e) => setHeader(e.target.checked)} />
+              {tr("첫 행을 열 이름으로 사용")}
+            </label>
+            {error && <span className="error">{error}</span>}
+            <p className="hint">{tr("열마다 값에 맞는 형식(숫자·날짜·텍스트)으로 가져옵니다. 섞여 있으면 텍스트가 됩니다.")}</p>
+          </>
+        )}
         {props.csv && (
           <>
             <label>
@@ -1388,7 +1439,7 @@ export function ImportDataDialog(props: {
           </>
         )}
         <div className="actions">
-          <button type="submit" className="primary" disabled={!name.trim()}>
+          <button type="submit" className="primary" disabled={!name.trim() || (props.spreadsheet && !sheets)}>
             {tr("가져오기")}
           </button>
           <button type="button" onClick={() => props.onDone(null)}>

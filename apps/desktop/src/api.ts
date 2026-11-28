@@ -434,6 +434,9 @@ export interface FilePreview {
 }
 
 /** Text encodings for CSV import and export. */
+/** Files imported as spreadsheets (one worksheet becomes a data sheet). */
+export const SPREADSHEET_EXTENSIONS = ["xlsx", "xlsm", "xlsb", "xls", "ods"];
+
 export const TEXT_ENCODINGS: { value: string; label: string }[] = [
   { value: "utf-8", label: "UTF-8" },
   { value: "utf-16", label: "UTF-16" },
@@ -776,6 +779,9 @@ export const api = {
 
   importData: (path: string, name: string, locale: string, encoding: string | null = null) =>
     invoke<TableInfo>("import_data", { path, name, locale, encoding }),
+  importSpreadsheet: (path: string, name: string, sheet: string | null, header: boolean) =>
+    invoke<TableInfo>("import_spreadsheet", { path, name, sheet, header }),
+  spreadsheetSheets: (path: string) => invoke<string[]>("spreadsheet_sheets", { path }),
   previewDataFile: (path: string, locale: string, encoding: string | null) =>
     invoke<FilePreview>("preview_data_file", { path, locale, encoding }),
   queryToTable: (sql: string, name: string) => invoke<TableInfo>("query_to_table", { sql, name }),
@@ -819,6 +825,8 @@ export interface DataJobStatus {
     fraction: number | null;
     bytesDone: number;
     bytesTotal: number;
+    /** What bytesDone/bytesTotal count: bytes of text, or rows of a worksheet. */
+    unit: "bytes" | "rows";
     rowsProcessed: number;
     cancelled: boolean;
   };

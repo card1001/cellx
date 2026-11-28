@@ -18,6 +18,9 @@ use crate::value::{from_duckdb, Scalar};
 use crate::job::{JobMonitor, JobPhase};
 use crate::transform::{TransformPipeline, TransformPlan, TransformValue};
 
+mod spreadsheet;
+pub use spreadsheet::{is_spreadsheet, spreadsheet_sheets, SPREADSHEET_EXTENSIONS};
+
 /// Column kind as the bridge needs it to translate Excel criteria.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ColumnKind {

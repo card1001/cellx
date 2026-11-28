@@ -858,6 +858,35 @@ pub(crate) fn parse_date(value: &str, locale: &Locale) -> Result<(i32, String), 
 /// "$ 123,345.678" => (123345.678, "$#,##0.00")
 /// "30.34%" => (0.3034, "0.00%")
 /// 100€ => (100, "100€")
+/// A time of day typed into a cell, with the format Excel gives it.
+fn parse_time_input(text: &str) -> Option<(f64, String)> {
+    let lower = text.to_ascii_lowercase();
+    let am_pm = lower.ends_with("am") || lower.ends_with("pm");
+    if !text.contains(':') && !am_pm {
+        return None;
+    }
+    let fraction = crate::functions::date_and_time::parse_time_of_day(text)?;
+    let seconds = text.matches(':').count() >= 2;
+    let format = match (seconds, am_pm) {
+        (false, false) => "h:mm",
+        (true, false) => "h:mm:ss",
+        (false, true) => "h:mm AM/PM",
+        (true, true) => "h:mm:ss AM/PM",
+    };
+    Some((fraction, format.to_string()))
+}
+
+/// A time, or a date followed by a time, typed into a cell.
+fn parse_date_time_input(text: &str, locale: &Locale) -> Option<(f64, String)> {
+    if let Some(time) = parse_time_input(text) {
+        return Some(time);
+    }
+    let (date, time) = text.split_once(char::is_whitespace)?;
+    let (serial, date_format) = parse_date(date, locale).ok()?;
+    let (fraction, time_format) = parse_time_input(time.trim())?;
+    Some((serial as f64 + fraction, format!("{date_format} {time_format}")))
+}
+
 pub(crate) fn parse_formatted_number(
     original: &str,
     currencies: &[&str],
@@ -917,6 +946,12 @@ pub(crate) fn parse_formatted_number(
             let currency_format = &format!("#,##0{currency}");
             return Ok((f, Some(currency_format.to_string())));
         }
+    }
+
+    // A time ("13:30", "1:30 PM") or a date and time ("2025-05-04 13:30"),
+    // as Excel reads them on entry.
+    if let Some((serial, format)) = parse_date_time_input(value, locale) {
+        return Ok((serial, Some(format)));
     }
 
     // check if it is a date. NOTE: we don't trim the original here

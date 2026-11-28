@@ -1629,6 +1629,20 @@ impl Workbook {
         Ok(info)
     }
 
+    /// Imports a worksheet of an xlsx, xlsm, xlsb, xls or ods file as a data sheet.
+    pub fn import_spreadsheet_data(
+        &mut self,
+        path: &Path,
+        table: &str,
+        sheet: Option<&str>,
+        header: bool,
+    ) -> Result<TableInfo> {
+        let info = self.data.import_spreadsheet(path, table, sheet, header)?;
+        self.reclassify_bridges()?;
+        self.recalc()?;
+        Ok(info)
+    }
+
     /// Runs a user SELECT and stores its result as a new data sheet.
     pub fn create_table_from_query(&mut self, table: &str, sql: &str) -> Result<TableInfo> {
         self.data.validate_user_select(sql)?;

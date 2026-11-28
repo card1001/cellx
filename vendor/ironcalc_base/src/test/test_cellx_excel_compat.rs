@@ -168,3 +168,29 @@ fn relative_names_and_their_dependencies() {
     assert_eq!(m._get_text("B3"), *"8");
     assert_eq!(m._get_text("B4"), *"12");
 }
+
+#[test]
+fn times_and_date_times_typed_into_cells() {
+    let mut model = new_empty_model();
+    model.set_user_input(0, 1, 1, "13:30".to_string()).unwrap();
+    model.set_user_input(0, 2, 1, "6:05:10".to_string()).unwrap();
+    model.set_user_input(0, 3, 1, "1:30 PM".to_string()).unwrap();
+    model.set_user_input(0, 4, 1, "2025-05-04 13:30".to_string()).unwrap();
+    model.set_user_input(0, 5, 1, "2025-13-04 13:30".to_string()).unwrap();
+    model._set("B1", "=A1*24&\"\"");
+    model._set("B3", "=A3*24&\"\"");
+    model._set("B4", "=A4&\"\"");
+    model._set("B5", "=ISTEXT(A5)");
+    model.evaluate();
+    assert_eq!(model.get_style_for_cell(0, 1, 1).unwrap().num_fmt, "h:mm");
+    assert_eq!(model.get_style_for_cell(0, 2, 1).unwrap().num_fmt, "h:mm:ss");
+    assert_eq!(model.get_style_for_cell(0, 3, 1).unwrap().num_fmt, "h:mm AM/PM");
+    assert_eq!(model.get_style_for_cell(0, 4, 1).unwrap().num_fmt, "yyyy-mm-dd h:mm");
+    assert_eq!(model._get_text("B1"), *"13.5");
+    assert_eq!(model._get_text("B3"), *"13.5");
+    assert_eq!(model._get_text("A1"), *"13:30");
+    assert_eq!(model._get_text("A3"), *"1:30 PM");
+    assert_eq!(model._get_text("A4"), *"2025-05-04 13:30");
+    assert_eq!(model._get_text("B4"), *"45781.5625");
+    assert_eq!(model._get_text("B5"), *"TRUE");
+}

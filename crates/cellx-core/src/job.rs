@@ -45,8 +45,11 @@ pub struct JobProgress {
     pub phase: JobPhase,
     /// Fraction done in the current phase, 0..=1, when it can be estimated.
     pub fraction: Option<f64>,
+    /// Work done in the converting phase, in `unit`s.
     pub bytes_done: u64,
     pub bytes_total: u64,
+    /// `bytes` for text conversion, `rows` for reading a spreadsheet.
+    pub unit: &'static str,
     pub rows_processed: u64,
     pub cancelled: bool,
 }
@@ -56,6 +59,7 @@ pub struct JobMonitor {
     cancelled: AtomicBool,
     bytes_done: AtomicU64,
     bytes_total: AtomicU64,
+    unit_rows: AtomicBool,
     interrupt: Arc<InterruptHandle>,
     progress: ProgressHandle,
 }
@@ -67,6 +71,7 @@ impl JobMonitor {
             cancelled: AtomicBool::new(false),
             bytes_done: AtomicU64::new(0),
             bytes_total: AtomicU64::new(0),
+            unit_rows: AtomicBool::new(false),
             interrupt,
             progress,
         }
@@ -89,6 +94,13 @@ impl JobMonitor {
     }
 
     pub(crate) fn set_bytes(&self, done: u64, total: u64) {
+        self.unit_rows.store(false, Ordering::Relaxed);
+        self.bytes_total.store(total, Ordering::Relaxed);
+        self.bytes_done.store(done, Ordering::Relaxed);
+    }
+
+    pub(crate) fn set_rows(&self, done: u64, total: u64) {
+        self.unit_rows.store(true, Ordering::Relaxed);
         self.bytes_total.store(total, Ordering::Relaxed);
         self.bytes_done.store(done, Ordering::Relaxed);
     }
@@ -140,6 +152,7 @@ impl JobMonitor {
             fraction,
             bytes_done,
             bytes_total,
+            unit: if self.unit_rows.load(Ordering::Relaxed) { "rows" } else { "bytes" },
             rows_processed,
             cancelled: self.is_cancelled(),
         }

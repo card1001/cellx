@@ -88,6 +88,8 @@ fn main() {
             pipeline_commands::profile_data_table,
             transform_jobs::start_transform_job,
             data_jobs::data_job_progress,
+            commands::import_spreadsheet,
+            commands::spreadsheet_sheets,
             data_jobs::cancel_data_job,
             transform_jobs::get_transform_job,
             transform_jobs::list_transform_jobs,

@@ -695,7 +695,7 @@ export function Ribbon(props: Props) {
               </Btn>
             </Group>
             <Group label={tr("데이터")}>
-              <Btn big title={tr("CSV·Parquet을 데이터 시트로")} onClick={a.importData}>
+              <Btn big title={tr("CSV·Parquet·Excel을 데이터 시트로")} onClick={a.importData}>
                 <span className="ic">🗄</span>{tr("데이터 시트")}
               </Btn>
             </Group>
@@ -866,7 +866,7 @@ export function Ribbon(props: Props) {
         {tab === "데이터" && (
           <>
             <Group label={tr("데이터 가져오기")}>
-              <Btn big title={tr("CSV, TSV, Parquet 파일을 데이터 시트로 엽니다")} onClick={a.importData}>
+              <Btn big title={tr("CSV, TSV, Parquet, Excel 파일을 데이터 시트로 엽니다")} onClick={a.importData}>
                 <span className="ic">🗄</span>{tr("데이터 가져오기")}
               </Btn>
               <Btn big title={tr("SELECT 결과를 새 데이터 시트로")} on={props.sqlOpen} onClick={a.toggleSql}>
