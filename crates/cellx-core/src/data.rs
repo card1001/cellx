@@ -112,7 +112,7 @@ pub struct SortCursor {
     pub value: Option<String>,
     pub rid: i64,
     /// Binds the cursor to its table version, filters, and sort definition.
-    pub query_id: u64,
+    pub query_id: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1041,7 +1041,7 @@ impl DataStore {
         use std::hash::{Hash, Hasher};
         let mut query_hasher = std::collections::hash_map::DefaultHasher::new();
         key.hash(&mut query_hasher);
-        let query_id = query_hasher.finish();
+        let query_id = format!("{:016x}", query_hasher.finish());
         if let Some(cursor) = cursor {
             if cursor.query_id != query_id {
                 return Err(CellxError::Bridge("정렬 또는 필터가 변경된 페이지 커서입니다".into()));
