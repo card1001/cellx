@@ -1,5 +1,4 @@
 use cellx_core::data::{ColumnFilter, DataStore, Sort, SortCursor};
-use cellx_core::Scalar;
 
 fn labels(page: &cellx_core::data::Page) -> Vec<String> {
     page.rows.iter().map(|row| row[0].display()).collect()
@@ -82,4 +81,22 @@ fn sorted_keyset_cursor_is_bound_to_stable_row_id_tie_breaker() {
     let cursor: SortCursor = first.next_cursor.unwrap();
     let second = store.page_after_sort("items", Some(&cursor), 2, &sort, &[]).unwrap();
     assert_eq!([labels(&first.page), labels(&second.page)].concat(), vec!["a", "b", "c", "d"]);
+}
+
+#[test]
+fn sorted_keyset_rejects_cursor_from_a_different_sort_or_table_version() {
+    let mut store = DataStore::open_in_memory().unwrap();
+    store.create_table_from_sql(
+        "items",
+        "SELECT * FROM (VALUES ('a', 1, 10), ('b', 2, 20), ('c', 3, 30)) AS t(label, rank, amount)",
+    ).unwrap();
+    let ascending = Sort { column: "rank".into(), descending: false };
+    let first = store.page_after_sort("items", None, 1, &ascending, &[]).unwrap();
+    let cursor = first.next_cursor.unwrap();
+
+    let descending = Sort { column: "rank".into(), descending: true };
+    assert!(store.page_after_sort("items", Some(&cursor), 1, &descending, &[]).is_err());
+
+    store.update_cell("items", 1, "rank", "99").unwrap();
+    assert!(store.page_after_sort("items", Some(&cursor), 1, &ascending, &[]).is_err());
 }
