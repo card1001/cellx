@@ -3995,6 +3995,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   const [preview, setPreview] = useState<TransformPreview | null>(null);
   const [profile, setProfile] = useState<TableProfile | null>(null);
   const [job, setJob] = useState<TransformJobSnapshot | null>(null);
+  const [jobHistory, setJobHistory] = useState<TransformJobSnapshot[]>([]);
   const [stepPreviews, setStepPreviews] = useState<{ step: number; preview: TransformPreview }[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -4010,6 +4011,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   useEffect(() => {
     void api.transformPipelines().then(setSaved).catch((e) => setError(errorText(e)));
     void api.dataConnectors().then(setConnectors).catch((e) => setError(errorText(e)));
+    void api.listTransformJobs().then(setJobHistory).catch((e) => setError(errorText(e)));
   }, []);
   useEffect(() => {
     const stored = saved.find((item) => item.id === selectedId && item.pipeline.source_table === source);
@@ -4126,6 +4128,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
     if (latest.status === "cancelled") return;
     if (!latest.result) throw new Error("작업 결과를 찾을 수 없습니다.");
     await props.onExecuted(latest.result);
+    setJobHistory(await api.listTransformJobs());
   });
   const loadSaved = (id: string) => {
     setSelectedId(id);
@@ -4271,6 +4274,19 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
       </div>
       {error && <p role="alert" style={{ color: "var(--danger, #b42318)" }}>{error}</p>}
       {job && <p className="muted" role="status">백그라운드 작업: {job.phase}{job.status === "failed" && job.error ? ` · ${job.error}` : ""}</p>}
+      {jobHistory.length > 0 && <details>
+        <summary>최근 변환 실행 이력 ({jobHistory.length})</summary>
+        <div style={{ overflow: "auto", maxHeight: 180 }}>
+          <table>
+            <thead><tr><th>작업 ID</th><th>상태</th><th>결과 행</th><th>오류</th></tr></thead>
+            <tbody>{jobHistory.map((item) => <tr key={item.id}>
+              <td>{item.id}</td><td>{item.status}</td>
+              <td>{item.result?.rows.toLocaleString() ?? "—"}</td>
+              <td>{item.error ?? "—"}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>
+      </details>}
       {profile && profile.table === source && <div>
         <p className="muted">데이터 프로파일 · {profile.row_count.toLocaleString()}행 · {profile.columns.length}열</p>
         <div style={{ overflow: "auto", maxHeight: 220 }}>
