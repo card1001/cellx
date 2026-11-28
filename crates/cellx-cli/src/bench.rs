@@ -175,6 +175,51 @@ pub fn bench_data_generated(rows: u64, db: &Path, runs: usize) -> Result<()> {
     bench_formulas(&mut wb, runs)
 }
 
+/// Compares deep sorted OFFSET requests with keyset requests at the same page boundaries.
+/// Cursor setup is deliberately outside the timed section; this measures per-page latency,
+/// not the cumulative cost of traversing from the first page.
+fn bench_sorted_keyset(wb: &mut Workbook, runs: usize) -> Result<()> {
+    use cellx_core::data::Sort;
+    const PAGE: u64 = 100;
+    let sort = Sort { column: "amount".into(), descending: true };
+    let total = wb.data_page("orders", 0, 1, Some(&sort), &[])?.total;
+    let depths = [0_u64, 10, 100];
+    println!("\\n정렬 페이지 OFFSET vs Keyset (페이지 크기 {PAGE}, 커서 준비 시간 제외)");
+    println!("{:<16} {:>12} {:>12} {:>12} {:>12}", "페이지", "OFFSET ms", "Keyset ms", "OFFSET P95", "Keyset P95");
+
+    for page_index in depths {
+        let offset = page_index.saturating_mul(PAGE);
+        if offset >= total { continue; }
+        let mut cursor = None;
+        for _ in 0..page_index {
+            let result = wb.data_page_after_sort("orders", cursor.as_ref(), PAGE, &sort, &[])?;
+            cursor = result.next_cursor;
+            if cursor.is_none() { break; }
+        }
+        let mut offset_times = Vec::with_capacity(runs.max(1));
+        let mut keyset_times = Vec::with_capacity(runs.max(1));
+        let mut offset_ids = Vec::new();
+        let mut keyset_ids = Vec::new();
+        for _ in 0..runs.max(1) {
+            let started = Instant::now();
+            let offset_page = wb.data_page("orders", offset, PAGE, Some(&sort), &[])?;
+            offset_times.push(started.elapsed().as_secs_f64() * 1000.0);
+            let started = Instant::now();
+            let keyset_page = wb.data_page_after_sort("orders", cursor.as_ref(), PAGE, &sort, &[])?;
+            keyset_times.push(started.elapsed().as_secs_f64() * 1000.0);
+            offset_ids = offset_page.row_ids;
+            keyset_ids = keyset_page.page.row_ids;
+        }
+        if offset_ids != keyset_ids {
+            anyhow::bail!("OFFSET/Keyset 결과 불일치: page={page_index}");
+        }
+        println!("{:<16} {:>12.2} {:>12.2} {:>12.2} {:>12.2}",
+            page_index, median(offset_times.clone()), median(keyset_times.clone()),
+            p95(offset_times), p95(keyset_times));
+    }
+    Ok(())
+}
+
 /// What the data-sheet grid asks for while scrolling, sorting and filtering.
 fn bench_grid(wb: &mut Workbook, runs: usize) -> Result<()> {
     use cellx_core::data::{ColumnFilter, Sort};
