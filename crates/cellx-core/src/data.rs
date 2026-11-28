@@ -105,6 +105,20 @@ pub struct Sort {
     pub descending: bool,
 }
 
+/// Stable keyset position for a sorted page. The value is serialized as text
+/// and cast back to the declared DuckDB column type in the next query.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SortCursor {
+    pub value: Option<String>,
+    pub rid: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct KeysetPage {
+    pub page: Page,
+    pub next_cursor: Option<SortCursor>,
+}
+
 /// A simple filter entered in the column header UI: an Excel-style criterion
 /// such as `">=100"`, `"서울"` or `"*카드*"` applied to one column.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -983,6 +997,113 @@ impl DataStore {
             row_ids,
             rows: data,
             total,
+        })
+    }
+
+    /// Reads the next page in a deterministic sorted order without OFFSET.
+    /// NULL sort values are always last; equal values are ordered by stable _rid.
+    pub fn page_after_sort(
+        &mut self,
+        table: &str,
+        cursor: Option<&SortCursor>,
+        limit: u64,
+        sort: &Sort,
+        filters: &[ColumnFilter],
+    ) -> Result<KeysetPage> {
+        let info = self.table_info(table)?;
+        let sort_column = self.column(table, &sort.column)?;
+        let limit = limit.clamp(1, MAX_PAGE_SIZE);
+        let mut where_sql = Vec::new();
+        let mut params = Vec::new();
+        for filter in filters {
+            if filter.criterion.trim().is_empty() { continue; }
+            let column = self.column(table, &filter.column)?;
+            let (sql, mut values) = crate::criteria::criterion_sql(
+                &column,
+                &Scalar::Text(filter.criterion.clone()),
+            );
+            where_sql.push(sql);
+            params.append(&mut values);
+        }
+        let filter_clause = if where_sql.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", where_sql.join(" AND "))
+        };
+        let key = format!(
+            "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{:?}",
+            info.name, self.version(&info.name), filter_clause,
+            format!("ORDER BY {} {} NULLS LAST, _rid", quote_ident(&sort_column.name),
+                if sort.descending { "DESC" } else { "ASC" }), params
+        );
+        let total = if let Some((_, count)) = self.page_count.as_ref().filter(|(k, _)| *k == key) {
+            *count
+        } else {
+            let count = match self.scalar(
+                &format!("SELECT count(*) FROM {} {}", quote_ident(table), filter_clause),
+                &params,
+            )? {
+                Scalar::Number(value) if value.is_finite() && value >= 0.0 => value as u64,
+                _ => 0,
+            };
+            self.page_count = Some((key, count));
+            count
+        };
+
+        let sort_expr = quote_ident(&sort_column.name);
+        let mut page_params = params;
+        let cursor_clause = match cursor {
+            Some(c) if c.value.is_none() => {
+                page_params.push(duckdb::types::Value::BigInt(c.rid));
+                let base = if filter_clause.is_empty() { "WHERE".to_string() } else { format!("{filter_clause} AND") };
+                format!("{base} {sort_expr} IS NULL AND _rid > ?")
+            }
+            Some(c) => {
+                let value = c.value.as_ref().expect("checked above");
+                let op = if sort.descending { "<" } else { ">" };
+                page_params.push(duckdb::types::Value::Text(value.clone()));
+                page_params.push(duckdb::types::Value::Text(value.clone()));
+                page_params.push(duckdb::types::Value::BigInt(c.rid));
+                let base = if filter_clause.is_empty() { "WHERE".to_string() } else { format!("{filter_clause} AND") };
+                format!("{base} ({sort_expr} {op} TRY_CAST(? AS {}) OR {sort_expr} IS NULL OR ({sort_expr} = TRY_CAST(? AS {}) AND _rid > ?))",
+                    sort_column.sql_type, sort_column.sql_type)
+            }
+            None => filter_clause.clone(),
+        };
+        let columns = info.columns.iter().map(|column| quote_ident(&column.name)).collect::<Vec<_>>();
+        let sql = format!(
+            "SELECT _rid, CAST({sort_expr} AS VARCHAR), {} FROM {} {} ORDER BY {sort_expr} {} NULLS LAST, _rid LIMIT {}",
+            columns.join(", "), quote_ident(table), cursor_clause,
+            if sort.descending { "DESC" } else { "ASC" }, limit + 1
+        );
+        let (_, mut rows, _) = self.rows(&sql, &page_params, (limit + 1) as usize)?;
+        let has_more = rows.len() as u64 > limit;
+        if has_more { rows.pop(); }
+        let mut row_ids = Vec::with_capacity(rows.len());
+        let mut data = Vec::with_capacity(rows.len());
+        let mut next_cursor = None;
+        for mut row in rows {
+            let rid = match row.remove(0) {
+                Scalar::Number(value) => value as i64,
+                _ => 0,
+            };
+            let cursor_value = match row.remove(0) {
+                Scalar::Empty => None,
+                value => Some(value.display()),
+            };
+            row_ids.push(rid);
+            data.push(row);
+            next_cursor = Some(SortCursor { value: cursor_value, rid });
+        }
+        if !has_more { next_cursor = None; }
+        Ok(KeysetPage {
+            page: Page {
+                columns: info.columns.iter().map(|column| column.name.clone()).collect(),
+                row_ids,
+                rows: data,
+                total,
+            },
+            next_cursor,
         })
     }
 
