@@ -3993,6 +3993,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   const [aggregateFunction, setAggregateFunction] = useState<AggregateFunction>("sum");
   const [name, setName] = useState("정제 파이프라인");
   const [output, setOutput] = useState("clean_result");
+  const [incrementalMode, setIncrementalMode] = useState(false);
   const [saved, setSaved] = useState<SavedPipeline[]>([]);
   const [connectors, setConnectors] = useState<SavedConnector[]>([]);
   const [connectorStatuses, setConnectorStatuses] = useState<ConnectorStatus[]>([]);
@@ -4137,8 +4138,8 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
     setSaved(list);
     setSelectedId(id);
   });
-  const runPipeline = async (pipelineId: string, outputTable: string) => {
-    const started = await api.startTransformJob(pipelineId, outputTable);
+  const runPipeline = async (pipelineId: string, outputTable: string, incremental = false) => {
+    const started = await api.startTransformJob(pipelineId, outputTable, incremental);
     setJob(started);
     let latest = started;
     while (latest.status === "queued" || latest.status === "running" || latest.status === "cancelling") {
@@ -4154,7 +4155,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   };
   const executeNow = () => runBusy(async () => {
     if (!selectedId) throw new Error("먼저 파이프라인을 저장하세요.");
-    await runPipeline(selectedId, output.trim());
+    await runPipeline(selectedId, output.trim(), incrementalMode);
   });
   const loadSaved = (id: string) => {
     setSelectedId(id);
@@ -4351,6 +4352,13 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
       <label>결과 데이터 시트 이름
         <input value={output} onChange={(e) => setOutput(e.target.value)} />
       </label>
+      <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <input type="checkbox" checked={incrementalMode} onChange={(e) => setIncrementalMode(e.target.checked)} />
+        추가된 행만 증분 실행
+      </label>
+      {incrementalMode && <p className="muted">
+        첫 실행은 전체 결과를 생성하고 이후에는 새로 추가된 행만 처리합니다. 기존 행의 수정·삭제, 조인·집계·정렬·행 제한은 반영하지 않으므로 해당 변경이 있으면 전체 실행을 사용하세요.
+      </p>}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         <button disabled={busy || !source} onClick={() => void profileNow()}>데이터 프로파일</button>
         <button disabled={busy || !source} onClick={() => void previewNow()}>미리보기</button>
@@ -4371,15 +4379,15 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
         <summary>최근 변환 실행 이력 ({jobHistory.length})</summary>
         <div style={{ overflow: "auto", maxHeight: 220 }}>
           <table>
-            <thead><tr><th>실행 시각</th><th>파이프라인</th><th>대상 시트</th><th>상태</th><th>결과 행</th><th>오류</th><th>작업</th></tr></thead>
+            <thead><tr><th>실행 시각</th><th>파이프라인</th><th>대상 시트</th><th>실행 방식</th><th>상태</th><th>결과 행</th><th>오류</th><th>작업</th></tr></thead>
             <tbody>{jobHistory.map((item) => <tr key={item.id}>
               <td>{new Date(item.started_at_ms).toLocaleString()}</td>
               <td>{saved.find((entry) => entry.id === item.pipeline_id)?.name ?? item.pipeline_id}</td>
-              <td>{item.output_table}</td><td>{item.status}</td>
+              <td>{item.output_table}</td><td>{item.incremental ? "증분" : "전체"}</td><td>{item.status}</td>
               <td>{(item.result_rows ?? item.result?.rows)?.toLocaleString() ?? "—"}</td>
               <td>{item.error ?? "—"}</td>
               <td><button disabled={busy || item.status === "queued" || item.status === "running" || item.status === "cancelling" || !saved.some((entry) => entry.id === item.pipeline_id)}
-                onClick={() => void runBusy(() => runPipeline(item.pipeline_id, item.output_table))}>다시 실행</button></td>
+                onClick={() => void runBusy(() => runPipeline(item.pipeline_id, item.output_table, item.incremental))}>다시 실행</button></td>
             </tr>)}</tbody>
           </table>
         </div>
