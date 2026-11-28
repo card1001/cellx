@@ -146,6 +146,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dependency_graph_links_formula_precedents() {
+        let mut wb = Workbook::new().unwrap();
+        wb.set_input(0, 1, 1, "10").unwrap();
+        wb.set_input(0, 1, 2, "=A1*2").unwrap();
+        wb.set_input(0, 1, 3, "=B1+1").unwrap();
+
+        let graph = wb.formula_dependency_graph().unwrap();
+        assert_eq!(graph.nodes.len(), 2);
+        assert!(graph.edges.iter().any(|edge| edge.from == "0!1:2" && edge.to == "0!1:3"));
+        assert!(!graph.truncated);
+    }
+
+    #[test]
     fn steps_and_traces() {
         let mut wb = Workbook::new().unwrap();
         wb.set_input(0, 1, 1, "3").unwrap();
