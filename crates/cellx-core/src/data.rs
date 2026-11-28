@@ -15,7 +15,7 @@ use serde::Serialize;
 
 use crate::error::{CellxError, Result};
 use crate::value::{from_duckdb, Scalar};
-use crate::transform::{TransformPipeline, TransformPlan, TransformValue};
+use crate::transform::{TransformPipeline, TransformPlan, TransformStep, TransformValue};
 
 /// Column kind as the bridge needs it to translate Excel criteria.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -517,6 +517,82 @@ impl DataStore {
         self.conn.execute(&sql, params_from_iter(parameters.iter()))?;
         self.touch(output_table);
         self.table_info(output_table)
+    }
+
+    /// Returns the largest stable source row ID. CellX imports assign monotonically
+    /// increasing _rid values, which are used as the append-only incremental watermark.
+    pub fn max_row_id(&self, table: &str) -> Result<i64> {
+        if !self.has_table(table) {
+            return Err(CellxError::UnknownTable(table.to_string()));
+        }
+        let value: i64 = self.conn.query_row(
+            &format!("SELECT COALESCE(MAX({}), 0)::BIGINT FROM {}", quote_ident("_rid"), quote_ident(table)),
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(value)
+    }
+
+    /// Appends only rows with source _rid greater than the saved watermark.
+    ///
+    /// Incremental execution is intentionally restricted to row-preserving,
+    /// append-only pipelines. Joins, aggregates, sorting, and limits need a full
+    /// recomputation because a new source row can change existing output rows.
+    pub fn execute_transform_incremental(
+        &mut self,
+        output_table: &str,
+        pipeline: &TransformPipeline,
+        last_source_rid: Option<i64>,
+    ) -> Result<(TableInfo, i64)> {
+        if !is_valid_table_name(output_table) {
+            return Err(CellxError::InvalidName(output_table.to_string()));
+        }
+        if output_table.eq_ignore_ascii_case(&pipeline.source_table)
+            || pipeline.required_join_tables().iter().any(|table| output_table.eq_ignore_ascii_case(table))
+        {
+            return Err(CellxError::Bridge("변환 결과를 원본 또는 조인 입력 데이터 시트에 덮어쓸 수 없습니다".into()));
+        }
+        if pipeline.steps.iter().any(|step| matches!(
+            step,
+            TransformStep::Join { .. } | TransformStep::GroupBy { .. } |
+            TransformStep::Sort { .. } | TransformStep::Limit { .. }
+        )) {
+            return Err(CellxError::Bridge(
+                "증분 실행은 행 단위 필터·열 선택·이름 변경·형 변환만 지원합니다. 조인, 집계, 정렬, 행 제한은 전체 실행을 사용하세요".into()
+            ));
+        }
+        let source_watermark = self.max_row_id(&pipeline.source_table)?;
+        let Some(last_rid) = last_source_rid else {
+            let result = self.execute_transform(output_table, pipeline)?;
+            return Ok((result, source_watermark));
+        };
+        if !self.has_table(output_table) {
+            return Err(CellxError::Bridge("증분 실행 대상 시트가 없습니다. 먼저 전체 실행으로 기준 데이터를 생성하세요".into()));
+        }
+        let plan = self.plan_transform(pipeline)?;
+        let existing = self.table_info(output_table)?;
+        let expected = plan.output_columns.iter().map(|name| name.to_ascii_lowercase()).collect::<Vec<_>>();
+        let actual = existing.columns.iter().map(|column| column.name.to_ascii_lowercase()).collect::<Vec<_>>();
+        if expected != actual {
+            return Err(CellxError::Bridge("증분 실행 대상 시트의 열 구조가 현재 파이프라인과 다릅니다. 전체 실행으로 다시 생성하세요".into()));
+        }
+        let mut parameters = plan.parameters.iter().map(|value| match value {
+            TransformValue::Text(value) => duckdb::types::Value::Text(value.clone()),
+            TransformValue::Number(value) => duckdb::types::Value::Double(*value),
+            TransformValue::Boolean(value) => duckdb::types::Value::Boolean(*value),
+        }).collect::<Vec<_>>();
+        parameters.push(duckdb::types::Value::BigInt(last_rid));
+        let sql = format!(
+            "INSERT INTO {} SELECT * FROM ({}) AS {} WHERE {} > ?",
+            quote_ident(output_table),
+            plan.sql,
+            quote_ident("_cellx_incremental"),
+            quote_ident("_rid")
+        );
+        self.conn.execute(&sql, params_from_iter(parameters.iter()))?;
+        self.touch(output_table);
+        let result = self.table_info(output_table)?;
+        Ok((result, source_watermark))
     }
 
     /// Runs a query that returns one value.
