@@ -139,6 +139,7 @@ pub fn start_transform_job(
                         // A late cancel request must not hide a result that already committed.
                         job.status = "completed".into();
                         job.phase = "완료".into();
+                        job.result_rows = Some(table.rows);
                         job.result = Some(table);
                         job.error = None;
                     }
@@ -154,6 +155,7 @@ pub fn start_transform_job(
                         job.error = Some(error);
                     }
                 }
+                job.finished_at_ms = Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64);
             });
             let completed = worker_jobs.lock().ok()
                 .and_then(|records| records.get(&worker_id).map(|record| record.snapshot.clone()));
@@ -165,7 +167,7 @@ pub fn start_transform_job(
                         output_table: snapshot.output_table.clone(),
                         status: snapshot.status.clone(),
                         phase: snapshot.phase.clone(),
-                        result_rows: snapshot.result.as_ref().map(|table| table.rows),
+                        result_rows: snapshot.result_rows,
                         error: snapshot.error.clone(),
                         started_at_ms: snapshot.started_at_ms,
                         finished_at_ms: Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64),
