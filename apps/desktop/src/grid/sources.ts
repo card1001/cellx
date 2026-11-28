@@ -373,7 +373,8 @@ export class DataSource extends Emitter implements GridSource {
       const token = ++this.requestSequence;
       const generation = this.generation;
       this.inflight.set(p, token);
-      const task = this.fetchPage(p, generation, token).finally(() => {
+      let task: Promise<void>;
+      task = this.fetchPage(p, generation, token).finally(() => {
         if (this.inflight.get(p) === token) this.inflight.delete(p);
         if (this.pagePromises.get(p) === task) this.pagePromises.delete(p);
       });
