@@ -111,6 +111,8 @@ pub struct Sort {
 pub struct SortCursor {
     pub value: Option<String>,
     pub rid: i64,
+    /// Binds the cursor to its table version, filters, and sort definition.
+    pub query_id: u64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1036,6 +1038,15 @@ impl DataStore {
             format!("ORDER BY {} {} NULLS LAST, _rid", quote_ident(&sort_column.name),
                 if sort.descending { "DESC" } else { "ASC" }), params
         );
+        use std::hash::{Hash, Hasher};
+        let mut query_hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut query_hasher);
+        let query_id = query_hasher.finish();
+        if let Some(cursor) = cursor {
+            if cursor.query_id != query_id {
+                return Err(CellxError::Bridge("정렬 또는 필터가 변경된 페이지 커서입니다".into()));
+            }
+        }
         let total = if let Some((_, count)) = self.page_count.as_ref().filter(|(k, _)| *k == key) {
             *count
         } else {
@@ -1093,7 +1104,7 @@ impl DataStore {
             };
             row_ids.push(rid);
             data.push(row);
-            next_cursor = Some(SortCursor { value: cursor_value, rid });
+            next_cursor = Some(SortCursor { value: cursor_value, rid, query_id });
         }
         if !has_more { next_cursor = None; }
         Ok(KeysetPage {
