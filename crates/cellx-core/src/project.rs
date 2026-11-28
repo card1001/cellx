@@ -48,6 +48,21 @@ pub struct SavedConnector {
     pub fingerprint: String,
 }
 
+/// Persisted summary of a transformation execution. Large result data stays in DuckDB;
+/// this record stores only metadata needed for history and reruns.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SavedTransformRun {
+    pub id: String,
+    pub pipeline_id: String,
+    pub output_table: String,
+    pub status: String,
+    pub phase: String,
+    pub result_rows: Option<u64>,
+    pub error: Option<String>,
+    pub started_at_ms: u64,
+    pub finished_at_ms: Option<u64>,
+}
+
 pub const FORMAT_VERSION: u32 = 1;
 
 #[derive(Serialize, Deserialize)]
@@ -92,6 +107,16 @@ pub fn save_project_with_assets(
     pipelines: &[SavedPipeline],
     connectors: &[SavedConnector],
 ) -> Result<()> {
+    save_project_with_execution_history(wb, path, pipelines, connectors, &[])
+}
+
+pub fn save_project_with_execution_history(
+    wb: &mut Workbook,
+    path: &Path,
+    pipelines: &[SavedPipeline],
+    connectors: &[SavedConnector],
+    transform_runs: &[SavedTransformRun],
+) -> Result<()> {
     if wb.data_path().is_none() {
         let dir = new_work_dir()?;
         wb.persist_data_to(&dir.join("data.duckdb"))?;
@@ -130,6 +155,9 @@ pub fn save_project_with_assets(
         zip_err(zip.start_file("connectors.json", opts))?;
         zip.write_all(&serde_json::to_vec_pretty(connectors).map_err(json_err)?)?;
 
+        zip_err(zip.start_file("transform_runs.json", opts))?;
+        zip.write_all(&serde_json::to_vec_pretty(transform_runs).map_err(json_err)?)?;
+
         let bridges: Vec<StoredBridge> = wb
             .bridges()
             .iter()
@@ -162,6 +190,16 @@ pub fn open_project_with_pipelines(path: &Path) -> Result<(Workbook, Vec<SavedPi
 }
 
 pub fn open_project_with_assets(path: &Path) -> Result<(Workbook, Vec<SavedPipeline>, Vec<SavedConnector>)> {
+    let (wb, pipelines, connectors, _) = open_project_with_execution_history(path)?;
+    let transform_runs = if zip.file_names().any(|name| name.is_ok_and(|entry| entry == "transform_runs.json")) {
+        serde_json::from_slice(&read_entry(&mut zip, "transform_runs.json")?).map_err(json_err)?
+    } else {
+        Vec::new()
+    };
+    Ok((wb, pipelines, connectors, transform_runs))
+}
+
+pub fn open_project_with_execution_history(path: &Path) -> Result<(Workbook, Vec<SavedPipeline>, Vec<SavedConnector>, Vec<SavedTransformRun>)> {
     let file = File::open(path)?;
     let mut zip = zip_err(zip::ZipArchive::new(file))?;
 
