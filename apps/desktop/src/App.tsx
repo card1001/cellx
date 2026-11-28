@@ -4097,6 +4097,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
     };
     const table = await api.saveDataConnector(connector);
     setConnectors(await api.dataConnectors());
+    setConnectorStatuses(await api.dataConnectorStatuses());
     await props.onExecuted(table);
   });
   const profileNow = () => runBusy(async () => { setProfile(await api.profileDataTable(source)); });
