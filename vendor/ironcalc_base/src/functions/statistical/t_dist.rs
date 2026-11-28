@@ -219,6 +219,10 @@ impl<'a> Model<'a> {
             Err(e) => return e,
         };
 
+        // With one degree of freedom Excel evaluates -1/TAN(0) and gets #DIV/0!.
+        if p == 0.0 && df == 1.0 {
+            return CalcResult::new_error(Error::DIV, cell, "Division by zero in T.INV".to_string());
+        }
         if p <= 0.0 || p >= 1.0 || df < 1.0 {
             return CalcResult::Error {
                 error: Error::NUM,
@@ -238,7 +242,7 @@ impl<'a> Model<'a> {
             }
         };
 
-        let x = dist.inverse_cdf(p);
+        let x = super::t_inverse(&dist, df, p);
 
         if !x.is_finite() {
             return CalcResult::Error {
@@ -267,7 +271,12 @@ impl<'a> Model<'a> {
             Err(e) => return e,
         };
 
-        if p <= 0.0 || p > 1.0 || df < 1.0 {
+        if p == 0.0 && df == 1.0 {
+            return CalcResult::new_error(Error::DIV, cell, "Division by zero in T.INV.2T".to_string());
+        }
+        // Excel's one-degree-of-freedom formula also accepts 1 < p < 2.
+        let p_ok = p > 0.0 && (p <= 1.0 || (df == 1.0 && p < 2.0));
+        if !p_ok || df < 1.0 {
             return CalcResult::Error {
                 error: Error::NUM,
                 origin: cell,
@@ -286,9 +295,9 @@ impl<'a> Model<'a> {
             }
         };
 
-        // Two-sided: F(x) = 1 - p/2
-        let target_cdf = 1.0 - p / 2.0;
-        let x = dist.inverse_cdf(target_cdf);
+        // Two-sided: F(x) = 1 - p/2. By symmetry x = -F⁻¹(p/2), which keeps
+        // its precision when p is tiny (1 - p/2 would round to 1).
+        let x = -super::t_inverse(&dist, df, p / 2.0);
 
         if !x.is_finite() {
             return CalcResult::Error {
@@ -298,7 +307,8 @@ impl<'a> Model<'a> {
             };
         }
 
-        CalcResult::Number(x.abs())
+        // Negative only for 1 < p < 2 (one degree of freedom); `+ 0.0` turns -0 into 0.
+        CalcResult::Number(x + 0.0)
     }
 
     // T.TEST(array1, array2, tails, type)

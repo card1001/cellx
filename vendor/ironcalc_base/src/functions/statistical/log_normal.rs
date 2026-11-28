@@ -109,7 +109,7 @@ impl<'a> Model<'a> {
             }
         };
 
-        let result = dist.inverse_cdf(p);
+        let result = super::guarded_inverse(|| dist.inverse_cdf(p));
 
         if !result.is_finite() {
             return CalcResult::Error {
