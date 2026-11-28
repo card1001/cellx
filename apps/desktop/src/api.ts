@@ -490,6 +490,21 @@ export interface TransformPipeline { source_table: string; steps: TransformStep[
 export interface SavedPipeline { id: string; name: string; pipeline: TransformPipeline }
 export interface SavedConnector { id: string; name: string; path: string; table_name: string; locale: string }
 export interface TransformPreview { columns: string[]; rows: Scalar[][]; truncated: boolean }
+export interface ColumnProfile {
+  name: string;
+  sql_type: string;
+  null_count: number;
+  empty_count: number;
+  distinct_count: number;
+  min: Scalar | null;
+  max: Scalar | null;
+}
+export interface TableProfile {
+  table: string;
+  row_count: number;
+  columns: ColumnProfile[];
+}
+
 
 export interface Page {
   columns: string[];
@@ -732,6 +747,7 @@ export const api = {
 
   importData: (path: string, name: string, locale: string) => invoke<TableInfo>("import_data", { path, name, locale }),
   queryToTable: (sql: string, name: string) => invoke<TableInfo>("query_to_table", { sql, name }),
+  profileDataTable: (table: string) => invoke<TableProfile>("profile_data_table", { table }),
   transformPipelines: () => invoke<SavedPipeline[]>("transform_pipelines"),
   saveTransformPipeline: (saved: SavedPipeline) => invoke<SavedPipeline[]>("save_transform_pipeline", { saved }),
   deleteTransformPipeline: (id: string) => invoke<SavedPipeline[]>("delete_transform_pipeline", { id }),
