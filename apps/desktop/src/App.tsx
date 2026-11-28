@@ -4369,7 +4369,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
         <button disabled={busy || !source} onClick={() => void previewNow()}>미리보기</button>
         <button disabled={busy || !source} onClick={() => void previewStepsNow()}>단계별 미리보기</button>
         <button disabled={busy || !source} onClick={() => void saveNow()}>저장</button>
-        <button disabled={busy || !selectedId} onClick={() => void executeNow()}>새 데이터 시트로 실행</button>
+        <button disabled={busy || !selectedId} onClick={() => void executeNow()}>{incrementalMode ? "증분 실행" : "새 데이터 시트로 실행"}</button>
         {job && (job.status === "queued" || job.status === "running" || job.status === "cancelling") && <button onClick={() => {
           void api.cancelTransformJob(job.id).then(setJob).catch((e) => setError(errorText(e)));
         }}>실행 취소</button>}
