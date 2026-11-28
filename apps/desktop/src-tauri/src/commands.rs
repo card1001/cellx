@@ -3,7 +3,7 @@
 
 use std::any::Any;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use cellx_core::data::{ColumnFilter, Page, Sort, TableInfo};
 use cellx_core::project;
@@ -42,7 +42,7 @@ impl Book {
     }
 }
 
-pub struct AppState(pub Mutex<Book>);
+pub struct AppState(pub Arc<Mutex<Book>>);
 
 pub(crate) type CmdResult<T> = Result<T, String>;
 
