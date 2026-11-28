@@ -13,7 +13,7 @@ import {
 } from "../api";
 import { Axis } from "./axis";
 import { colName, MAX_COLS, MAX_ROWS } from "./model";
-import { estimateSerializedBytes, isCurrentPageRequest, selectPagesToEvict } from "./performance";
+import { isCurrentPageRequest, selectPagesToEvict } from "./performance";
 
 export interface CellData {
   text: string;
@@ -291,7 +291,6 @@ export class DataSource extends Emitter implements GridSource {
   private pagePromises = new Map<number, Promise<void>>();
   private pageCursors = new Map<number, number>();
   private pageAccess = new Map<number, number>();
-  private pageBytes = new Map<number, number>();
   private visiblePages = new Set<number>();
   private accessClock = 0;
   private requestSequence = 0;
@@ -414,7 +413,6 @@ export class DataSource extends Emitter implements GridSource {
     }
     this.pages.set(p, page);
     this.pageAccess.set(p, ++this.accessClock);
-    this.pageBytes.set(p, estimateSerializedBytes(page));
     const lastRid = page.row_ids[page.row_ids.length - 1];
     if (lastRid !== undefined) {
       this.pageCursors.set(p, lastRid);
@@ -433,21 +431,15 @@ export class DataSource extends Emitter implements GridSource {
     for (const page of candidates) {
       this.pages.delete(page);
       this.pageAccess.delete(page);
-      this.pageBytes.delete(page);
     }
   }
 
-  getPerformanceSnapshot() {
+  getDiagnosticsSnapshot() {
     let cachedRows = 0;
-    let estimatedBytes = 0;
-    for (const [pageNumber, page] of this.pages) {
-      cachedRows += page.rows.length;
-      estimatedBytes += this.pageBytes.get(pageNumber) ?? 0;
-    }
+    for (const page of this.pages.values()) cachedRows += page.rows.length;
     return {
       cachedPages: this.pages.size,
       cachedRows,
-      estimatedBytes,
       maxCachedPages: MAX_CACHED_PAGES,
       inflightPages: this.inflight.size,
     };
@@ -466,7 +458,6 @@ export class DataSource extends Emitter implements GridSource {
     this.pagePromises.clear();
     this.pageCursors.clear();
     this.pageAccess.clear();
-    this.pageBytes.clear();
     this.visiblePages.clear();
     this.lastQueryMs = 0;
     this.request(1, 1, PAGE);
