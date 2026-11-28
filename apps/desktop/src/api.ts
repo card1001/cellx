@@ -576,6 +576,15 @@ export interface Page {
   rows: Scalar[][];
   total: number;
 }
+export interface SortCursor {
+  value: string | null;
+  rid: number;
+  query_id: string;
+}
+export interface KeysetPage {
+  page: Page;
+  next_cursor: SortCursor | null;
+}
 
 export interface Sort {
   column: string;
@@ -845,6 +854,8 @@ export const api = {
   /** Large-table sequential scan; cursor is the last stable _rid from the previous page. */
   dataPageAfterRid: (table: string, afterRid: number | null, limit: number, filters: ColumnFilter[]) =>
     invoke<Page>("data_page_after_rid", { table, afterRid, limit, filters }),
+  dataPageAfterSort: (table: string, cursor: SortCursor | null, limit: number, sort: Sort, filters: ColumnFilter[]) =>
+    invoke<KeysetPage>("data_page_after_sort", { table, cursor, limit, sort, filters }),
   updateDataCell: (table: string, rid: number, column: string, text: string) =>
     invoke<RecalcStats>("update_data_cell", { table, rid, column, text }),
   exportTable: (table: string, path: string, locale: string, encoding: string | null = null) =>

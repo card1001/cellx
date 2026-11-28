@@ -6,6 +6,7 @@ import {
   type ColumnKind,
   type Memo,
   type Page,
+  type SortCursor,
   type Scalar,
   type SheetLayout,
   type Sort,
@@ -13,7 +14,7 @@ import {
 } from "../api";
 import { Axis } from "./axis";
 import { colName, MAX_COLS, MAX_ROWS } from "./model";
-import { isCurrentPageRequest, selectPagesToEvict } from "./performance";
+import { estimatePageBytes, isCurrentPageRequest, selectPagesToEvictByBudget } from "./performance";
 
 export interface CellData {
   text: string;
@@ -237,6 +238,7 @@ export class SheetSource extends Emitter implements GridSource {
 
 const PAGE = 256;
 const MAX_CACHED_PAGES = 64;
+const MAX_CACHED_BYTES = 64 * 1024 * 1024;
 const MAX_CURSOR_CHECKPOINTS = 256;
 
 function pad(n: number) {
@@ -290,7 +292,10 @@ export class DataSource extends Emitter implements GridSource {
   private inflight = new Map<number, number>();
   private pagePromises = new Map<number, Promise<void>>();
   private pageCursors = new Map<number, number>();
+  private sortedCursors = new Map<number, SortCursor>();
   private pageAccess = new Map<number, number>();
+  private pageBytes = new Map<number, number>();
+  private cachedBytes = 0;
   private visiblePages = new Set<number>();
   private accessClock = 0;
   private requestSequence = 0;
@@ -389,16 +394,38 @@ export class DataSource extends Emitter implements GridSource {
    */
   private async fetchPage(p: number, gen: number, token: number) {
     try {
-      if (!this.sort && p > 0 && !this.pageCursors.has(p - 1)) {
+      if (p > 0 && ((!this.sort && !this.pageCursors.has(p - 1)) || (this.sort && !this.sortedCursors.has(p - 1)))) {
         await this.pagePromises.get(p - 1)?.catch(() => undefined);
       }
       if (!isCurrentPageRequest(this.generation, gen, this.inflight.get(p), token)) return;
       const started = performance.now();
       const cursor = p > 0 ? this.pageCursors.get(p - 1) : undefined;
-      const page = !this.sort && (p === 0 || cursor !== undefined)
-        ? await api.dataPageAfterRid(this.info.name, p === 0 ? null : cursor!, PAGE, this.filters)
-        : await api.dataPage(this.info.name, p * PAGE, PAGE, this.sort, this.filters);
+      let page: Page;
+      let nextSortedCursor: SortCursor | null | undefined;
+      if (!this.sort && (p === 0 || cursor !== undefined)) {
+        page = await api.dataPageAfterRid(this.info.name, p === 0 ? null : cursor!, PAGE, this.filters);
+      } else if (this.sort && (p === 0 || this.sortedCursors.has(p - 1))) {
+        const result = await api.dataPageAfterSort(
+          this.info.name, p === 0 ? null : this.sortedCursors.get(p - 1)!, PAGE, this.sort, this.filters,
+        );
+        page = result.page;
+        nextSortedCursor = result.next_cursor;
+      } else {
+        page = await api.dataPage(this.info.name, p * PAGE, PAGE, this.sort, this.filters);
+      }
       if (!isCurrentPageRequest(this.generation, gen, this.inflight.get(p), token)) return;
+      if (this.sort) {
+        if (nextSortedCursor) {
+          this.sortedCursors.set(p, nextSortedCursor);
+          while (this.sortedCursors.size > MAX_CURSOR_CHECKPOINTS) {
+            const oldest = this.sortedCursors.keys().next().value;
+            if (oldest === undefined) break;
+            this.sortedCursors.delete(oldest);
+          }
+        } else {
+          this.sortedCursors.delete(p);
+        }
+      }
       this.lastQueryMs = performance.now() - started;
       this.applyPage(p, page);
     } finally {
@@ -411,6 +438,9 @@ export class DataSource extends Emitter implements GridSource {
       this.total = page.total;
       this.rows.count = Math.max(1, page.total);
     }
+    const estimatedBytes = estimatePageBytes(page);
+    this.cachedBytes += estimatedBytes - (this.pageBytes.get(p) ?? 0);
+    this.pageBytes.set(p, estimatedBytes);
     this.pages.set(p, page);
     this.pageAccess.set(p, ++this.accessClock);
     const lastRid = page.row_ids[page.row_ids.length - 1];
@@ -427,10 +457,14 @@ export class DataSource extends Emitter implements GridSource {
   }
 
   private prunePages() {
-    const candidates = selectPagesToEvict(this.pageAccess, this.visiblePages, MAX_CACHED_PAGES);
+    const candidates = selectPagesToEvictByBudget(
+      this.pageAccess, this.pageBytes, this.visiblePages, MAX_CACHED_PAGES, MAX_CACHED_BYTES,
+    );
     for (const page of candidates) {
       this.pages.delete(page);
       this.pageAccess.delete(page);
+      this.cachedBytes -= this.pageBytes.get(page) ?? 0;
+      this.pageBytes.delete(page);
     }
   }
 
@@ -440,7 +474,9 @@ export class DataSource extends Emitter implements GridSource {
     return {
       cachedPages: this.pages.size,
       cachedRows,
+      cachedBytes: this.cachedBytes,
       maxCachedPages: MAX_CACHED_PAGES,
+      maxCachedBytes: MAX_CACHED_BYTES,
       inflightPages: this.inflight.size,
     };
   }
@@ -457,7 +493,10 @@ export class DataSource extends Emitter implements GridSource {
     this.inflight.clear();
     this.pagePromises.clear();
     this.pageCursors.clear();
+    this.sortedCursors.clear();
     this.pageAccess.clear();
+    this.pageBytes.clear();
+    this.cachedBytes = 0;
     this.visiblePages.clear();
     this.lastQueryMs = 0;
     this.request(1, 1, PAGE);

@@ -18,7 +18,7 @@ use ironcalc_base::{Model, UserModel};
 use serde::{Deserialize, Serialize};
 
 use crate::bridge::{self, BridgeValue, CellRef, CellResolver};
-use crate::data::{ColumnFilter, DataStore, Page, Sort, TableInfo};
+use crate::data::{ColumnFilter, DataStore, KeysetPage, Page, Sort, SortCursor, TableInfo};
 use crate::error::{CellxError, Result};
 use crate::datatools::{AutoFilter, Validation};
 use crate::sheetopts::{Guard, PageSetup, SheetProtection};
@@ -1682,6 +1682,17 @@ impl Workbook {
         filters: &[ColumnFilter],
     ) -> Result<Page> {
         self.data.page_after_rid(table, after_rid, limit, filters)
+    }
+
+    pub fn data_page_after_sort(
+        &mut self,
+        table: &str,
+        cursor: Option<&SortCursor>,
+        limit: u64,
+        sort: &Sort,
+        filters: &[ColumnFilter],
+    ) -> Result<KeysetPage> {
+        self.data.page_after_sort(table, cursor, limit, sort, filters)
     }
 
     pub fn update_data_cell(&mut self, table: &str, rid: i64, column: &str, text: &str) -> Result<RecalcStats> {
