@@ -3201,11 +3201,14 @@ export default function App() {
         )}
         {onSheetTab && detail?.bridge_error && <span className="msg err">{detail.bridge_error}</span>}
         <span className="spacer" />
+        {source instanceof DataSource && (
+          <span>{formatCount(source.total)}행 · 조회 {source.lastQueryMs.toFixed(0)} ms</span>
+        )}
         {import.meta.env.DEV && source instanceof DataSource && (() => {
           const cache = source.getDiagnosticsSnapshot();
           const heapBytes = (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize;
           return <span className="grid-diagnostics" title="개발 전용 진단 정보입니다. JS 힙은 WebView가 제공할 때만 표시됩니다.">
-            {formatCount(source.total)}행 · 조회 {source.lastQueryMs.toFixed(0)} ms · 캐시 {cache.cachedPages}/{cache.maxCachedPages}p · {formatCount(cache.cachedRows)}행 · 진행 중 {cache.inflightPages}p{heapBytes ? ` · JS 힙 ${(heapBytes / 1024 / 1024).toFixed(1)} MB` : ""} · 그리드 렌더 {gridPerf.current.renderMs.toFixed(1)} ms · {gridPerf.current.commits}회
+            캐시 {cache.cachedPages}/{cache.maxCachedPages}p · {formatCount(cache.cachedRows)}행 · 진행 중 {cache.inflightPages}p{heapBytes ? ` · JS 힙 ${(heapBytes / 1024 / 1024).toFixed(1)} MB` : ""} · 그리드 렌더 {gridPerf.current.renderMs.toFixed(1)} ms · {gridPerf.current.commits}회
           </span>;
         })()}
         {stats && onSheetTab && stats.bridge_calls > 0 && <span title={tr("데이터 엔진 계산 시간")}>데이터 엔진 {stats.bridge_ms.toFixed(0)} ms</span>}
