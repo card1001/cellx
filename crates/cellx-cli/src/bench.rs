@@ -180,6 +180,12 @@ fn bench_grid(wb: &mut Workbook, runs: usize) -> Result<()> {
     use cellx_core::data::{ColumnFilter, Sort};
     let total = wb.data_page("orders", 0, 1, None, &[])?.total;
     let f = |c: &str, v: &str| ColumnFilter { column: c.into(), criterion: v.into() };
+    let region_filter = vec![f("region", "서울")];
+    let combined_filter = vec![f("region", "서울"), f("category", "*가전")];
+    let region_total = wb.data_page("orders", 0, 1, None, &region_filter)?.total;
+    let combined_total = wb.data_page(
+        "orders", 0, 1, Some(&Sort { column: "order_date".into(), descending: false }), &combined_filter
+    )?.total;
     let cases: Vec<(&str, u64, Option<Sort>, Vec<ColumnFilter>)> = vec![
         ("첫 화면 (100행)", 0, None, vec![]),
         ("가운데로 스크롤", total / 2, None, vec![]),
@@ -188,12 +194,10 @@ fn bench_grid(wb: &mut Workbook, runs: usize) -> Result<()> {
         ("정렬 후 깊은 위치", total.saturating_sub(100), Some(Sort { column: "amount".into(), descending: true }), vec![]),
         ("정렬 후 임의 점프", total.saturating_mul(3) / 4, Some(Sort { column: "amount".into(), descending: true }), vec![]),
         ("오름차순 깊은 위치", total.saturating_mul(3) / 4, Some(Sort { column: "amount".into(), descending: false }), vec![]),
-        ("필터 지역=서울", 0, None, vec![f("region", "서울")]),
-        ("필터 지역=서울 깊은 위치", total / 2, None, vec![f("region", "서울")]),
-        ("필터 2개 + 정렬", 0, Some(Sort { column: "order_date".into(), descending: false }),
-            vec![f("region", "서울"), f("category", "*가전")]),
-        ("필터 + 정렬 깊은 위치", total / 2, Some(Sort { column: "order_date".into(), descending: false }),
-            vec![f("region", "서울"), f("category", "*가전")]),
+        ("필터 지역=서울", 0, None, region_filter.clone()),
+        ("필터 지역=서울 깊은 위치", region_total / 2, None, region_filter),
+        ("필터 2개 + 정렬", 0, Some(Sort { column: "order_date".into(), descending: false }), combined_filter.clone()),
+        ("필터 + 정렬 깊은 위치", combined_total / 2, Some(Sort { column: "order_date".into(), descending: false }), combined_filter),
     ];
     println!("\n{:<30} {:>12} {:>12} {:>12} {:>14}", "격자 작업", "첫 요청 ms", "중앙값 ms", "P95 ms", "일치 행");
     for (label, offset, sort, filters) in cases {
