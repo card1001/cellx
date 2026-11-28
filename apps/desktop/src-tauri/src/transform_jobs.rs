@@ -182,6 +182,7 @@ pub fn start_transform_job(
                         output_table: snapshot.output_table.clone(),
                         status: snapshot.status.clone(),
                         phase: snapshot.phase.clone(),
+                        incremental: snapshot.incremental,
                         result_rows: snapshot.result_rows,
                         error: snapshot.error.clone(),
                         started_at_ms: snapshot.started_at_ms,
