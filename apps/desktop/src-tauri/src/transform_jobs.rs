@@ -131,7 +131,7 @@ pub fn start_transform_job(
                         job.result = Some(table);
                         job.error = None;
                     }
-                    Err(error) if cancelled.load(Ordering::Acquire) => {
+                    Err(_error) if cancelled.load(Ordering::Acquire) => {
                         job.status = "cancelled".into();
                         job.phase = "취소됨".into();
                         job.error = None;
