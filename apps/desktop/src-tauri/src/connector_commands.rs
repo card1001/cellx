@@ -1,5 +1,6 @@
 //! Tauri commands for reusable, local-only file connectors.
 use std::path::Path;
+use std::time::UNIX_EPOCH;
 
 use cellx_core::data::TableInfo;
 use cellx_core::project::SavedConnector;
@@ -9,6 +10,15 @@ use crate::commands::AppState;
 
 type CmdResult<T> = Result<T, String>;
 
+fn file_fingerprint(path: &Path) -> CmdResult<String> {
+    let metadata = std::fs::metadata(path).map_err(|e| format!("로컬 파일 정보를 읽을 수 없습니다: {e}"))?;
+    let modified = metadata.modified().ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos().to_string())
+        .unwrap_or_else(|| "unknown".into());
+    Ok(format!("{}:{modified}", metadata.len()))
+}
+
 #[tauri::command]
 pub fn data_connectors(state: State<'_, AppState>) -> CmdResult<Vec<SavedConnector>> {
     let book = state.0.lock().map_err(|_| "내부 상태를 잠글 수 없습니다".to_string())?;
@@ -16,7 +26,7 @@ pub fn data_connectors(state: State<'_, AppState>) -> CmdResult<Vec<SavedConnect
 }
 
 #[tauri::command]
-pub fn save_data_connector(state: State<'_, AppState>, connector: SavedConnector) -> CmdResult<TableInfo> {
+pub fn save_data_connector(state: State<'_, AppState>, mut connector: SavedConnector) -> CmdResult<TableInfo> {
     if connector.id.trim().is_empty() || connector.id.len() > 80 {
         return Err("연결 ID가 올바르지 않습니다".into());
     }
@@ -27,6 +37,11 @@ pub fn save_data_connector(state: State<'_, AppState>, connector: SavedConnector
         return Err("로컬 파일 경로가 비어 있습니다".into());
     }
     let mut book = state.0.lock().map_err(|_| "내부 상태를 잠글 수 없습니다".to_string())?;
+    // Inspect the source before import and persist a baseline for future drift checks.
+    let schema = book.wb.data().inspect_file_schema(Path::new(&connector.path))
+        .map_err(|e| e.to_string())?;
+    connector.schema = schema.iter().map(|column| (column.name.clone(), column.sql_type.clone())).collect();
+    connector.fingerprint = file_fingerprint(Path::new(&connector.path))?;
     // The user-selected local path is passed to the existing parameterized import path.
     let table = book.wb.import_data_with_locale(
         Path::new(&connector.path),
@@ -45,16 +60,30 @@ pub fn save_data_connector(state: State<'_, AppState>, connector: SavedConnector
 }
 
 #[tauri::command]
-pub fn refresh_data_connector(state: State<'_, AppState>, id: String) -> CmdResult<TableInfo> {
+pub fn refresh_data_connector(state: State<'_, AppState>, id: String, accept_schema_change: bool) -> CmdResult<TableInfo> {
     let mut book = state.0.lock().map_err(|_| "내부 상태를 잠글 수 없습니다".to_string())?;
-    let connector = book.connectors.iter().find(|item| item.id == id)
+    let mut connector = book.connectors.iter().find(|item| item.id == id)
         .ok_or_else(|| "저장된 데이터 연결을 찾을 수 없습니다".to_string())?
         .clone();
+    let schema = book.wb.data().inspect_file_schema(Path::new(&connector.path))
+        .map_err(|e| e.to_string())?;
+    let current_schema = schema.iter().map(|column| (column.name.clone(), column.sql_type.clone())).collect::<Vec<_>>();
+    if !connector.schema.is_empty() && connector.schema != current_schema && !accept_schema_change {
+        return Err(format!(
+            "SCHEMA_DRIFT: 원본 파일의 열 구조가 변경되었습니다. 기존 {}개 열, 현재 {}개 열입니다. 구조 변경을 수락하고 새로 고치시겠습니까?",
+            connector.schema.len(), current_schema.len()
+        ));
+    }
+    connector.schema = current_schema;
+    connector.fingerprint = file_fingerprint(Path::new(&connector.path))?;
     let table = book.wb.import_data_with_locale(
         Path::new(&connector.path),
         &connector.table_name,
         &connector.locale,
     ).map_err(|e| e.to_string())?;
+    if let Some(saved) = book.connectors.iter_mut().find(|item| item.id == connector.id) {
+        *saved = connector;
+    }
     book.dirty = true;
     book.edits = book.edits.saturating_add(1);
     Ok(table)
