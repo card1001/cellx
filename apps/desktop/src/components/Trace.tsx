@@ -2,7 +2,7 @@
 
 import { tr } from "../i18n";
 import { useEffect, useRef, useState } from "react";
-import { api, type EvalStep, type TraceArea } from "../api";
+import { api, type EvalStep, type FormulaDependencyGraph, type FormulaNode, type TraceArea } from "../api";
 import type { OverlayGeometry } from "../grid/Grid";
 import { colName } from "../grid/model";
 import { Modal } from "./Dialogs";
@@ -165,6 +165,73 @@ export function EvaluateDialog(props: { sheet: number; sheetName: string; row: n
           )}
           <button onClick={props.onClose}>{tr("닫기")}</button>
         </div>
+      </div>
+    </Modal>
+  );
+}
+
+
+/** Bounded, read-only visualization of the calculation engine's formula graph. */
+export function FormulaGraphDialog(props: { onClose(): void }) {
+  const [graph, setGraph] = useState<FormulaDependencyGraph | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let live = true;
+    api.formulaDependencyGraph()
+      .then((value) => { if (live) setGraph(value); })
+      .catch((cause) => { if (live) setError(String(cause)); })
+      .finally(() => { if (live) setLoading(false); });
+    return () => { live = false; };
+  }, []);
+
+  const nodes = new Map((graph?.nodes ?? []).map((node) => [node.id, node]));
+  const visibleEdges = (graph?.edges ?? []).slice(0, 150);
+  const visibleNodes = (graph?.nodes ?? []).slice(0, 150);
+  const cellName = (node: FormulaNode) => `${colName(node.col)}${node.row}`;
+  const nodeLabel = (node: FormulaNode) => `시트 ${node.sheet + 1}! ${cellName(node)}`;
+
+  return (
+    <Modal title={tr("수식 의존성 그래프")} onClose={props.onClose}>
+      <div className="modal-body" style={{ minWidth: 560, maxWidth: "min(900px, 90vw)" }}>
+        {loading && <p>{tr("수식 의존성 분석 중…")}</p>}
+        {error && <p role="alert" style={{ color: "var(--danger, #b42318)" }}>{error}</p>}
+        {graph && <>
+          <p className="muted">
+            수식 {graph.nodes.length.toLocaleString()}개 · 의존 관계 {graph.edges.length.toLocaleString()}개
+            {graph.truncated ? " · 표시 한도에 도달하여 일부 생략됨" : ""}
+          </p>
+          <h4>참조 흐름 (선행 수식 → 종속 수식)</h4>
+          <div style={{ maxHeight: 320, overflow: "auto", border: "1px solid var(--border)", borderRadius: 6 }}>
+            {visibleEdges.length === 0
+              ? <p className="muted" style={{ padding: 12 }}>수식 셀 간 의존 관계가 없습니다. 상수 셀을 참조하는 관계는 그래프에 포함하지 않습니다.</p>
+              : visibleEdges.map((edge, index) => {
+                const from = nodes.get(edge.from);
+                const to = nodes.get(edge.to);
+                if (!from || !to) return null;
+                return <div key={`${edge.from}>${edge.to}:${index}`} style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 28px minmax(0, 1fr)", gap: 8, alignItems: "center", padding: "7px 10px", borderBottom: "1px solid var(--border)" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <strong>{nodeLabel(from)}</strong>
+                    <code style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{from.formula}</code>
+                  </div>
+                  <span aria-label="depends on" style={{ textAlign: "center", color: "var(--accent, #4f46e5)", fontWeight: 700 }}>→</span>
+                  <div style={{ minWidth: 0 }}>
+                    <strong>{nodeLabel(to)}</strong>
+                    <code style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{to.formula}</code>
+                  </div>
+                </div>;
+              })}
+            {graph.edges.length > visibleEdges.length && <p className="muted" style={{ padding: 8 }}>상위 150개 의존 관계만 표시합니다.</p>}
+          </div>
+          <h4>수식 셀 목록</h4>
+          <div style={{ maxHeight: 180, overflow: "auto", border: "1px solid var(--border)", borderRadius: 6 }}>
+            {visibleNodes.map((node) => <div key={node.id} style={{ display: "flex", gap: 12, padding: "5px 10px", borderBottom: "1px solid var(--border)" }}>
+              <strong style={{ minWidth: 110 }}>{nodeLabel(node)}</strong><code style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{node.formula}</code>
+            </div>)}
+            {graph.nodes.length > visibleNodes.length && <p className="muted" style={{ padding: 8 }}>상위 150개 수식 셀만 표시합니다.</p>}
+          </div>
+        </>}
+        <div className="actions"><button onClick={props.onClose}>{tr("닫기")}</button></div>
       </div>
     </Modal>
   );
