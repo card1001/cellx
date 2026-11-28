@@ -199,7 +199,7 @@ impl<'a> Model<'a> {
             }
         };
 
-        let t = dist.inverse_cdf(p);
+        let t = super::guarded_inverse(|| dist.inverse_cdf(p));
         if t.is_nan() || t.is_infinite() {
             return CalcResult::new_error(
                 Error::NUM,

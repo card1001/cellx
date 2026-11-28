@@ -1619,7 +1619,25 @@ impl Workbook {
     }
 
     pub fn import_data_with_locale(&mut self, path: &Path, table: &str, locale: &str) -> Result<TableInfo> {
-        let info = self.data.import_file_with_locale(path, table, locale)?;
+        self.import_data_with_encoding(path, table, locale, None)
+    }
+
+    pub fn import_data_with_encoding(&mut self, path: &Path, table: &str, locale: &str, encoding: Option<&str>) -> Result<TableInfo> {
+        let info = self.data.import_file_with_encoding(path, table, locale, encoding)?;
+        self.reclassify_bridges()?;
+        self.recalc()?;
+        Ok(info)
+    }
+
+    /// Imports a worksheet of an xlsx, xlsm, xlsb, xls or ods file as a data sheet.
+    pub fn import_spreadsheet_data(
+        &mut self,
+        path: &Path,
+        table: &str,
+        sheet: Option<&str>,
+        header: bool,
+    ) -> Result<TableInfo> {
+        let info = self.data.import_spreadsheet(path, table, sheet, header)?;
         self.reclassify_bridges()?;
         self.recalc()?;
         Ok(info)

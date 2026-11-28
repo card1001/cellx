@@ -22,8 +22,12 @@ pub enum CellxError {
     UnsafeSql(String),
     #[error("지원하지 않는 CSV 인코딩입니다: {0} (UTF-8 또는 UTF-16 파일을 사용하세요)")]
     CsvEncoding(String),
+    #[error("텍스트 인코딩 오류: {0}")]
+    TextEncoding(String),
     #[error("{0}")]
     Bridge(String),
+    #[error("작업이 취소되었습니다")]
+    Cancelled,
 }
 
 impl CellxError {
@@ -40,7 +44,9 @@ impl CellxError {
             Self::InvalidName(_) => "INVALID_NAME",
             Self::UnsafeSql(_) => "UNSAFE_SQL",
             Self::CsvEncoding(_) => "CSV_ENCODING",
+            Self::TextEncoding(_) => "TEXT_ENCODING",
             Self::Bridge(_) => "FORMULA_BRIDGE",
+            Self::Cancelled => "CANCELLED",
         }
     }
 
@@ -66,7 +72,9 @@ impl CellxError {
             Self::CsvEncoding(encoding) => format!("{}: {encoding}. {}",
                 message(locale, "지원하지 않는 CSV 인코딩입니다", "Unsupported CSV encoding", "サポートされていない CSV エンコーディングです", "不支持的 CSV 编码", "不支援的 CSV 編碼"),
                 message(locale, "UTF-8 또는 UTF-16 파일을 사용하세요", "Use a UTF-8 or UTF-16 encoded file", "UTF-8 または UTF-16 で保存されたファイルを使用してください", "请使用 UTF-8 或 UTF-16 编码的文件", "請使用 UTF-8 或 UTF-16 編碼的檔案")),
+            Self::TextEncoding(detail) => format!("{}: {detail}", message(locale, "텍스트 인코딩 오류", "Text encoding error", "テキスト エンコーディング エラー", "文本编码错误", "文字編碼錯誤")),
             Self::Bridge(detail) => format!("{}: {detail}", message(locale, "수식 연결 오류", "Formula bridge error", "数式ブリッジ エラー", "公式桥接错误", "公式橋接錯誤")),
+            Self::Cancelled => message(locale, "작업이 취소되었습니다", "The operation was cancelled", "操作はキャンセルされました", "操作已取消", "作業已取消").to_string(),
         }
     }
 }

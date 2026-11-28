@@ -232,7 +232,7 @@ impl<'a> Model<'a> {
             }
         };
 
-        let x = dist.inverse_cdf(p);
+        let x = super::guarded_inverse(|| dist.inverse_cdf(p));
         if x.is_nan() || x.is_infinite() || x < 0.0 {
             return CalcResult::new_error(Error::NUM, cell, "Invalid result for F.INV".to_string());
         }
@@ -286,7 +286,7 @@ impl<'a> Model<'a> {
         };
 
         // p is right-tail: p = P(F > x) = 1 - CDF(x)
-        let x = dist.inverse_cdf(1.0 - p);
+        let x = super::guarded_inverse(|| dist.inverse_cdf(1.0 - p));
         if x.is_nan() || x.is_infinite() || x < 0.0 {
             return CalcResult::new_error(
                 Error::NUM,

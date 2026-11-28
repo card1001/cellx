@@ -1,8 +1,10 @@
-import { getActiveLocale, tr } from "./i18n";
+import { formatLocaleNumber, getActiveLocale, tr } from "./i18n";
+import { DataJobProgress } from "./components/DataJobProgress";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  SPREADSHEET_EXTENSIONS,
   type AutoFilter,
   type BookInfo,
   type NameView,
@@ -69,6 +71,9 @@ import {
   PasswordDialog,
   ProtectDialog,
   SubtotalDialog,
+  ImportDataDialog,
+  type ImportChoice,
+  ExportEncodingDialog,
 } from "./components/DataDialogs";
 import { type FormatResult, FormatCellsDialog, PromptDialog } from "./components/Dialogs";
 import { type PrintJob, paginate, PrintPreviewDialog, PrintView } from "./components/Print";
@@ -102,6 +107,8 @@ export default function App() {
   const [selStats, setSelStats] = useState<SelectionStats | null>(null);
   const [message, setMessage] = useState<{ text: string; error?: boolean } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // A long data-sheet command (import, export, query) is running: shows the progress window.
+  const [dataJob, setDataJob] = useState(false);
   const [zoom, setZoom] = useState(1);
   const [showSql, setShowSql] = useState(false);
   const [dialog, setDialog] = useState<Dialog>(null);
@@ -206,6 +213,16 @@ export default function App() {
       return undefined;
     } finally {
       setBusy(null);
+    }
+  };
+
+  /** `run` for data-sheet commands that report progress and can be cancelled. */
+  const runDataJob = async <T,>(label: string, fn: () => Promise<T>): Promise<T | undefined> => {
+    setDataJob(true);
+    try {
+      return await run(label, fn);
+    } finally {
+      setDataJob(false);
     }
   };
 
@@ -1068,14 +1085,28 @@ export default function App() {
   };
 
   const importData = async () => {
-    const path = await openDialog({ multiple: false, filters: [{ name: tr("데이터 파일"), extensions: ["csv", "tsv", "txt", "parquet"] }] });
+    const path = await openDialog({
+      multiple: false,
+      filters: [
+        { name: tr("데이터 파일"), extensions: ["csv", "tsv", "txt", "parquet", ...SPREADSHEET_EXTENSIONS] },
+        { name: tr("Excel·OpenDocument 통합 문서"), extensions: SPREADSHEET_EXTENSIONS },
+      ],
+    });
     if (!path || Array.isArray(path)) return;
     const base = path.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "") ?? "data";
     const suggested = base.replace(/[^\p{L}\p{N}_]/gu, "_").replace(/^(\d)/, "_$1");
-    const name = await ask("데이터 시트 가져오기", `데이터 시트 이름 (수식에서 이름[열]로 참조합니다)\nCSV 파일은 UTF-8 또는 UTF-16 인코딩이어야 합니다.`, suggested);
-    if (!name) return;
+    const ext = path.split(".").pop()?.toLowerCase() ?? "";
+    const spreadsheet = (SPREADSHEET_EXTENSIONS as readonly string[]).includes(ext);
+    const csv = !spreadsheet && ext !== "parquet";
+    const choice = await new Promise<ImportChoice | null>((resolve) =>
+      setDialog({ kind: "importData", path, suggested, csv, spreadsheet, resolve }),
+    );
+    if (!choice) return;
+    const { name, encoding, sheet, header } = choice;
     const t = performance.now();
-    const table = await run("가져오는 중", () => api.importData(path, name, locale));
+    const table = await runDataJob("가져오는 중", () =>
+      spreadsheet ? api.importSpreadsheet(path, name, sheet, header) : api.importData(path, name, locale, encoding),
+    );
     if (!table) return;
     await refreshInfo();
     sources.current.delete(tabKey({ kind: "data", name: table.name }));
@@ -1095,7 +1126,13 @@ export default function App() {
       ],
     });
     if (!path) return;
-    const ok = await run("내보내는 중", () => api.exportTable(src.info.name, path, locale));
+    let encoding: string | null = null;
+    if (!/\.parquet$/i.test(path)) {
+      const picked = await new Promise<string | null | undefined>((resolve) => setDialog({ kind: "exportEncoding", resolve }));
+      if (picked === undefined) return;
+      encoding = picked;
+    }
+    const ok = await runDataJob("내보내는 중", () => api.exportTable(src.info.name, path, locale, encoding));
     if (ok !== undefined) say(`내보냈습니다: ${path}`);
   };
 
@@ -3068,7 +3105,7 @@ export default function App() {
               say(`${table.name}: ${formatCount(table.rows)}행`);
             }}
             onCreate={async (sql, name) => {
-              const table = await run("쿼리 실행 중", () => api.queryToTable(sql, name));
+              const table = await runDataJob("쿼리 실행 중", () => api.queryToTable(sql, name));
               if (!table) return;
               await refreshInfo();
               sources.current.delete(tabKey({ kind: "data", name: table.name }));
@@ -3217,6 +3254,31 @@ export default function App() {
       </footer>
 
       {menu && <ContextMenu x={menu.x} y={menu.y} items={menu.items} onClose={() => setMenu(null)} />}
+      <DataJobProgress active={dataJob} />
+      {dialog?.kind === "importData" && (
+        <ImportDataDialog
+          path={dialog.path}
+          suggested={dialog.suggested}
+          csv={dialog.csv}
+          spreadsheet={dialog.spreadsheet}
+          preview={(encoding) => api.previewDataFile(dialog.path, locale, encoding)}
+          sheets={() => api.spreadsheetSheets(dialog.path)}
+          onDone={(v) => {
+            dialog.resolve(v);
+            setDialog(null);
+            focusGrid();
+          }}
+        />
+      )}
+      {dialog?.kind === "exportEncoding" && (
+        <ExportEncodingDialog
+          onDone={(v) => {
+            dialog.resolve(v);
+            setDialog(null);
+            focusGrid();
+          }}
+        />
+      )}
       {dialog?.kind === "prompt" && (
         <PromptDialog
           title={dialog.title}

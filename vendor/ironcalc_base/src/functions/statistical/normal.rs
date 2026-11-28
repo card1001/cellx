@@ -100,7 +100,7 @@ impl<'a> Model<'a> {
             }
         };
 
-        let x = dist.inverse_cdf(p);
+        let x = super::guarded_inverse(|| dist.inverse_cdf(p));
 
         if !x.is_finite() {
             return CalcResult::Error {
@@ -182,7 +182,7 @@ impl<'a> Model<'a> {
             }
         };
 
-        let z = dist.inverse_cdf(p);
+        let z = super::guarded_inverse(|| dist.inverse_cdf(p));
 
         if !z.is_finite() {
             return CalcResult::Error {
@@ -243,7 +243,7 @@ impl<'a> Model<'a> {
             }
         };
 
-        let quantile = normal.inverse_cdf(1.0 - alpha / 2.0);
+        let quantile = super::guarded_inverse(|| normal.inverse_cdf(1.0 - alpha / 2.0));
         if !quantile.is_finite() {
             return CalcResult::Error {
                 error: Error::NUM,
@@ -310,7 +310,7 @@ impl<'a> Model<'a> {
         };
 
         // Two-sided CI => use 1 - alpha/2
-        let t_crit = t_dist.inverse_cdf(1.0 - alpha / 2.0);
+        let t_crit = super::guarded_inverse(|| t_dist.inverse_cdf(1.0 - alpha / 2.0));
         if !t_crit.is_finite() {
             return CalcResult::Error {
                 error: Error::NUM,

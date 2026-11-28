@@ -15,7 +15,11 @@ use serde::Serialize;
 
 use crate::error::{CellxError, Result};
 use crate::value::{from_duckdb, Scalar};
+use crate::job::{JobMonitor, JobPhase};
 use crate::transform::{TransformPipeline, TransformPlan, TransformStep, TransformValue};
+
+mod spreadsheet;
+pub use spreadsheet::{is_spreadsheet, spreadsheet_sheets, SPREADSHEET_EXTENSIONS};
 
 /// Column kind as the bridge needs it to translate Excel criteria.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -112,6 +116,22 @@ pub struct ColumnFilter {
 /// Hard cap for one grid request; callers cannot force unbounded result allocation.
 const MAX_PAGE_SIZE: u64 = 5_000;
 
+/// Pages of a sorted or filtered grid that end within this many rows are
+/// read with ORDER BY … LIMIT, which DuckDB answers with a cheap top-N.
+/// Deeper pages use a saved row order (see `PageView`).
+const TOP_N_ROWS: u64 = 20_000;
+
+/// The row order of one sort and filter of one table, saved in a temporary
+/// table (`pos` → `_rid`) the first time the grid scrolls past `TOP_N_ROWS`.
+/// Without it every page deep in a sorted 10-million-row sheet re-sorts the
+/// whole table (1.4 s a page; 24 s at 100 million rows).
+struct PageView {
+    key: String,
+    total: u64,
+}
+
+const PAGE_VIEW_TABLE: &str = "_cellx_page_view";
+
 pub struct DataStore {
     conn: Connection,
     schema_cache: HashMap<String, TableInfo>,
@@ -120,6 +140,12 @@ pub struct DataStore {
     /// Monotonic generation across table creation, replacement and deletion.
     /// Prevents a dropped/recreated table from reusing an old cache version.
     version_clock: u64,
+    /// Progress and cancellation of the long job running on this store.
+    monitor: Arc<JobMonitor>,
+    /// The saved row order of the grid's current sort and filter, if any.
+    page_view: Option<PageView>,
+    /// Matching-row count of the grid's current filter, by the same key.
+    page_count: Option<(String, u64)>,
 }
 
 pub fn quote_ident(name: &str) -> String {
@@ -152,7 +178,14 @@ impl DataStore {
             "SET autoinstall_known_extensions = false;
              SET autoload_known_extensions = false;",
         )?;
+        // Lets the UI show how far an import or export is. Failing to turn it
+        // on only loses the estimate.
+        let _ = conn.set_query_progress_tracking(true);
+        let monitor = Arc::new(JobMonitor::new(conn.interrupt_handle(), conn.progress_handle()));
         let mut store = DataStore {
+            monitor,
+            page_view: None,
+            page_count: None,
             conn,
             schema_cache: HashMap::new(),
             versions: HashMap::new(),
@@ -169,6 +202,22 @@ impl DataStore {
         Ok(self
             .conn
             .query_row("SELECT version()", [], |r| r.get::<_, String>(0))?)
+    }
+
+    /// Progress and cancellation for the long job running on this store; safe
+    /// to read and cancel from another thread while the job holds the store.
+    pub fn monitor(&self) -> Arc<JobMonitor> {
+        self.monitor.clone()
+    }
+
+    /// Runs `job` as one monitored job: an earlier cancel is cleared first,
+    /// and an interrupted query comes back as `Cancelled`.
+    fn monitored<T>(&mut self, job: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        let monitor = self.monitor.clone();
+        monitor.begin();
+        let result = job(self);
+        monitor.end();
+        monitor.map_err(result)
     }
 
     pub fn interrupt_handle(&self) -> Arc<InterruptHandle> {
@@ -210,98 +259,208 @@ impl DataStore {
         self.import_file_with_locale(path, table, "ko-KR")
     }
 
-    /// `_locale` is kept for the API: dates are detected from the file itself
-    /// (ISO, and the other common forms DuckDB recognises), not forced to the
-    /// UI language, so the same file imports the same way in every language.
-    pub fn import_file_with_locale(&mut self, path: &Path, table: &str, _locale: &str) -> Result<TableInfo> {
+    /// Dates are detected from the file itself (ISO and the other common
+    /// forms), not forced to the UI language, so a file imports the same way
+    /// in every language. A CSV that is not UTF-8 or UTF-16 is read in the
+    /// legacy encoding of `locale` (Korean: CP949/EUC-KR, Japanese:
+    /// Shift_JIS, Simplified Chinese: GBK, Traditional Chinese: Big5,
+    /// otherwise Windows-1252), the way Excel saves CSV files on Windows.
+    pub fn import_file_with_locale(&mut self, path: &Path, table: &str, locale: &str) -> Result<TableInfo> {
+        self.import_file_with_encoding(path, table, locale, None)
+    }
+
+    /// Imports with an explicit text encoding (`utf-8`, `utf-16`, `cp949`,
+    /// `shift_jis`, `gbk`, `big5`, `windows-1252`), or `None`/`auto` to detect it.
+    pub fn import_file_with_encoding(
+        &mut self,
+        path: &Path,
+        table: &str,
+        locale: &str,
+        encoding: Option<&str>,
+    ) -> Result<TableInfo> {
+        self.monitored(|store| store.import_inner(path, table, locale, encoding))
+    }
+
+    fn import_inner(
+        &mut self,
+        path: &Path,
+        table: &str,
+        locale: &str,
+        encoding: Option<&str>,
+    ) -> Result<TableInfo> {
         if !is_valid_table_name(table) {
             return Err(CellxError::InvalidName(table.to_string()));
         }
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        if ext == "parquet" {
+            return self.import_with_reader(path, table, "read_parquet(?)".to_string());
+        }
+        let csv_reader = |encoding: &str| {
+            let delimiter = if ext == "tsv" { ", delim = '\\t'" } else { "" };
+            format!(
+                "read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = '{encoding}', decimal_separator = '.'{delimiter})"
+            )
+        };
+        let chosen = match encoding.map(|e| e.trim().to_ascii_lowercase()) {
+            None => None,
+            Some(e) if e.is_empty() || e == "auto" => None,
+            Some(e) => Some(TextEncoding::from_name(&e).ok_or_else(|| CellxError::CsvEncoding(e.clone()))?),
+        };
+        match chosen.unwrap_or_else(|| TextEncoding::Auto) {
+            TextEncoding::Utf8 => return self.import_with_reader(path, table, csv_reader("utf-8")),
+            TextEncoding::Utf16 => return self.import_with_reader(path, table, csv_reader("utf-16")),
+            TextEncoding::Legacy(enc) => return self.import_transcoded(path, table, enc, csv_reader("utf-8")),
+            TextEncoding::Auto => {}
+        }
+
+        let mut head = Vec::with_capacity(64 * 1024);
+        File::open(path)?.take(64 * 1024).read_to_end(&mut head)?;
+        match detect_encoding(&head, locale)? {
+            TextEncoding::Utf16 => self.import_with_reader(path, table, csv_reader("utf-16")),
+            TextEncoding::Legacy(enc) => self.import_transcoded(path, table, enc, csv_reader("utf-8")),
+            _ => match self.import_with_reader(path, table, csv_reader("utf-8")) {
+                // The first 64 KB were UTF-8 but a later part is not: guess from that part.
+                Err(CellxError::CsvEncoding(_)) => {
+                    let sample = non_utf8_sample(path)?;
+                    let enc = match detect_encoding(&sample, locale)? {
+                        TextEncoding::Legacy(enc) => enc,
+                        _ => legacy_encoding(locale),
+                    };
+                    self.import_transcoded(path, table, enc, csv_reader("utf-8"))
+                }
+                other => other,
+            },
+        }
+    }
+
+    /// The first lines of a text file as they would be read with `encoding`
+    /// (or the detected one), for the import dialog's preview.
+    pub fn preview_file(path: &Path, locale: &str, encoding: Option<&str>, lines: usize) -> Result<FilePreview> {
+        let mut head = Vec::with_capacity(64 * 1024);
+        File::open(path)?.take(64 * 1024).read_to_end(&mut head)?;
+        let detected = match encoding.map(|e| e.trim().to_ascii_lowercase()) {
+            Some(e) if !e.is_empty() && e != "auto" => {
+                TextEncoding::from_name(&e).ok_or_else(|| CellxError::CsvEncoding(e.clone()))?
+            }
+            _ => detect_encoding(&head, locale)?,
+        };
+        let text = match detected {
+            TextEncoding::Utf16 => {
+                let (enc, skip) = encoding_rs::Encoding::for_bom(&head).unwrap_or((encoding_rs::UTF_16LE, 0));
+                enc.decode_without_bom_handling(&head[skip..]).0.into_owned()
+            }
+            TextEncoding::Legacy(enc) => enc.decode_without_bom_handling(&head).0.into_owned(),
+            _ => {
+                let body = head.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&head);
+                String::from_utf8_lossy(body).into_owned()
+            }
+        };
+        let mut out: Vec<String> = text.lines().take(lines + 1).map(str::to_string).collect();
+        // The last line of the sample may be cut off.
+        if out.len() > lines {
+            out.truncate(lines);
+        }
+        Ok(FilePreview { encoding: detected.name().to_string(), lines: out })
+    }
+
+    fn import_with_reader(&mut self, path: &Path, table: &str, reader: String) -> Result<TableInfo> {
         let path_text = path
             .to_str()
             .ok_or_else(|| CellxError::InvalidName(path.display().to_string()))?;
-
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-        let mut encoding = "utf-8";
-        if ext != "parquet" {
-            let mut file = File::open(path)?;
-            let mut bom = [0_u8; 4];
-            let count = file.read(&mut bom)?;
-            let utf16 = count >= 2 && ((bom[0] == 0xff && bom[1] == 0xfe) || (bom[0] == 0xfe && bom[1] == 0xff));
-            let utf32 = count >= 4 && ((bom == [0xff, 0xfe, 0x00, 0x00]) || (bom == [0x00, 0x00, 0xfe, 0xff]));
-            if utf32 {
-                return Err(CellxError::CsvEncoding("UTF-32".into()));
-            }
-            if utf16 {
-                encoding = "utf-16";
-            }
-        }
-
-        let reader = if ext == "parquet" {
-            "read_parquet(?)".to_string()
-        } else {
-            let delimiter = if ext == "tsv" { ", delim = '\\t'" } else { ", delim = ','" };
-            format!(
-                "read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = '{}', decimal_separator = '.'{})",
-                encoding, delimiter
-            )
-        };
         let sql = format!(
             "CREATE OR REPLACE TABLE {t} AS SELECT row_number() OVER () AS _rid, * FROM {reader}",
             t = quote_ident(table)
         );
-        match self.conn.execute(&sql, [path_text]) {
-            Ok(_) => {}
-            Err(error) => {
-                let diagnostic = error.to_string().to_ascii_lowercase();
-                if diagnostic.contains("utf-8") || diagnostic.contains("utf8") || diagnostic.contains("unicode") {
-                    return Err(CellxError::CsvEncoding("non-UTF-8 input".into()));
-                }
-                return Err(error.into());
+        self.monitor.check()?;
+        self.monitor.set_phase(JobPhase::Querying);
+        if let Err(error) = self.conn.execute(&sql, [path_text]) {
+            self.monitor.check()?;
+            let diagnostic = error.to_string().to_ascii_lowercase();
+            if diagnostic.contains("utf-8") || diagnostic.contains("utf8") || diagnostic.contains("unicode") {
+                return Err(CellxError::CsvEncoding("non-UTF-8 input".into()));
             }
+            return Err(error.into());
         }
+        self.monitor.set_phase(JobPhase::Finishing);
         self.touch(table);
         self.table_info(table)
     }
 
     /// Inspects a local CSV, TSV, or Parquet file without importing or mutating a data sheet.
     /// The schema is read directly from DuckDB's file readers using a bound path parameter.
-    pub fn inspect_file_schema(&self, path: &Path) -> Result<Vec<ColumnInfo>> {
-        let path_text = path
-            .to_str()
-            .ok_or_else(|| CellxError::InvalidName(path.display().to_string()))?;
+    /// The text encoding is detected as on import; a file in a legacy encoding is
+    /// read through a converted sample of its first 8 MB.
+    pub fn inspect_file_schema(&self, path: &Path, locale: &str) -> Result<Vec<ColumnInfo>> {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-        let sql = if ext == "parquet" {
-            "DESCRIBE SELECT * FROM read_parquet(?)".to_string()
-        } else {
-            let mut file = File::open(path)?;
-            let mut bom = [0_u8; 4];
-            let count = file.read(&mut bom)?;
-            let utf32 = count >= 4 && (bom == [0xff, 0xfe, 0x00, 0x00] || bom == [0x00, 0x00, 0xfe, 0xff]);
-            if utf32 {
-                return Err(CellxError::CsvEncoding("UTF-32".into()));
-            }
-            let utf16 = count >= 2 && ((bom[0] == 0xff && bom[1] == 0xfe) || (bom[0] == 0xfe && bom[1] == 0xff));
-            let encoding = if utf16 { "utf-16" } else { "utf-8" };
-            let delimiter = if ext == "tsv" { ", delim = '\\t'" } else { ", delim = ','" };
+        let describe = |file: &Path, reader: String| -> Result<Vec<ColumnInfo>> {
+            let path_text = file
+                .to_str()
+                .ok_or_else(|| CellxError::InvalidName(file.display().to_string()))?;
+            let mut stmt = self.conn.prepare(&format!("DESCRIBE SELECT * FROM {reader}"))?;
+            let columns = stmt
+                .query_map([path_text], |row| {
+                    let name: String = row.get(0)?;
+                    let sql_type: String = row.get(1)?;
+                    Ok(ColumnInfo { kind: ColumnKind::from_duckdb_type(&sql_type), name, sql_type })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(columns)
+        };
+        if ext == "parquet" {
+            return describe(path, "read_parquet(?)".to_string());
+        }
+        let csv_reader = |encoding: &str| {
+            let delimiter = if ext == "tsv" { ", delim = '\\t'" } else { "" };
             format!(
-                "DESCRIBE SELECT * FROM read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = '{}', decimal_separator = '.'{})",
-                encoding, delimiter
+                "read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = '{encoding}', decimal_separator = '.'{delimiter})"
             )
         };
-        let mut stmt = self.conn.prepare(&sql)?;
-        let columns = stmt
-            .query_map([path_text], |row| {
-                let name: String = row.get(0)?;
-                let sql_type: String = row.get(1)?;
-                Ok(ColumnInfo {
-                    kind: ColumnKind::from_duckdb_type(&sql_type),
-                    name,
-                    sql_type,
-                })
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(columns)
+        let mut head = Vec::with_capacity(64 * 1024);
+        File::open(path)?.take(64 * 1024).read_to_end(&mut head)?;
+        match detect_encoding(&head, locale)? {
+            TextEncoding::Utf16 => describe(path, csv_reader("utf-16")),
+            TextEncoding::Legacy(enc) => {
+                static INSPECT_ID: AtomicU64 = AtomicU64::new(1);
+                let id = INSPECT_ID.fetch_add(1, Ordering::Relaxed);
+                let temp = std::env::temp_dir().join(format!("cellx-inspect-{}-{id}.{ext}", std::process::id()));
+                let result = (|| -> Result<Vec<ColumnInfo>> {
+                    let mut sample = Vec::with_capacity(8 << 20);
+                    File::open(path)?.take(8 << 20).read_to_end(&mut sample)?;
+                    // Whole lines only.
+                    if let Some(end) = sample.iter().rposition(|&b| b == b'\n') {
+                        sample.truncate(end + 1);
+                    }
+                    let (text, _) = enc.decode_without_bom_handling(&sample);
+                    fs::write(&temp, text.as_bytes())?;
+                    describe(&temp, csv_reader("utf-8"))
+                })();
+                let _ = fs::remove_file(&temp);
+                result
+            }
+            _ => describe(path, csv_reader("utf-8")),
+        }
+    }
+
+    /// Converts a CSV from a legacy encoding to a temporary UTF-8 file, a
+    /// megabyte at a time, and imports that. Bytes that are not valid in the
+    /// encoding make it an encoding error rather than silent replacement.
+    fn import_transcoded(
+        &mut self,
+        path: &Path,
+        table: &str,
+        encoding: &'static encoding_rs::Encoding,
+        reader: String,
+    ) -> Result<TableInfo> {
+        static TRANSCODE_ID: AtomicU64 = AtomicU64::new(1);
+        let id = TRANSCODE_ID.fetch_add(1, Ordering::Relaxed);
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("csv");
+        let temp = std::env::temp_dir().join(format!("cellx-import-{}-{id}.{ext}", std::process::id()));
+        let result = (|| -> Result<TableInfo> {
+            transcode_to_utf8(path, &temp, encoding, &self.monitor)?;
+            self.import_with_reader(&temp, table, reader)
+        })();
+        let _ = fs::remove_file(&temp);
+        result
     }
 
     /// Creates a table from rows already in memory (used by tests and pasted data).
@@ -313,9 +472,13 @@ impl DataStore {
             "CREATE OR REPLACE TABLE {t} AS SELECT row_number() OVER () AS _rid, * FROM ({select_sql})",
             t = quote_ident(table)
         );
-        self.conn.execute_batch(&sql)?;
-        self.touch(table);
-        self.table_info(table)
+        self.monitored(|store| {
+            store.monitor.set_phase(JobPhase::Querying);
+            store.conn.execute_batch(&sql)?;
+            store.monitor.set_phase(JobPhase::Finishing);
+            store.touch(table);
+            store.table_info(table)
+        })
     }
 
     pub fn drop_table(&mut self, table: &str) -> Result<()> {
@@ -710,17 +873,55 @@ impl DataStore {
         };
         let cols: Vec<String> = info.columns.iter().map(|c| quote_ident(&c.name)).collect();
         let t = quote_ident(table);
-        let total = match self.scalar(
-            &format!("SELECT count(*) FROM {t} {where_clause}"),
-            &params,
-        )? {
-            Scalar::Number(n) => n as u64,
-            _ => 0,
-        };
-        let sql = format!(
-            "SELECT _rid, {cols} FROM {t} {where_clause} {order} LIMIT {limit} OFFSET {offset}",
-            cols = cols.join(", "),
+        let plain = sort.is_none() && where_sql.is_empty();
+        // Everything that decides which rows match and in what order.
+        let key = format!(
+            "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{:?}",
+            info.name,
+            self.version(&info.name),
+            where_clause,
+            order,
+            params
         );
+        let total = if plain {
+            info.rows
+        } else if let Some((_, n)) = self.page_count.as_ref().filter(|(k, _)| *k == key) {
+            *n
+        } else {
+            let n = match self.scalar(&format!("SELECT count(*) FROM {t} {where_clause}"), &params)? {
+                Scalar::Number(n) => n as u64,
+                _ => 0,
+            };
+            self.page_count = Some((key.clone(), n));
+            n
+        };
+        let deep = !plain && offset.saturating_add(limit) > TOP_N_ROWS;
+        let sql = if deep {
+            if self.page_view.as_ref().map(|v| v.key.as_str()) != Some(key.as_str()) {
+                self.page_view = None;
+                let view = quote_ident(PAGE_VIEW_TABLE);
+                // Insertion order is kept, so the temp table's rowid is the position.
+                self.conn.execute(
+                    &format!("CREATE OR REPLACE TEMP TABLE {view} AS SELECT _rid FROM {t} {where_clause} {order}"),
+                    params_from_iter(params.iter()),
+                )?;
+                self.page_view = Some(PageView { key: key.clone(), total });
+            }
+            let total = self.page_view.as_ref().map(|v| v.total).unwrap_or(total);
+            let end = offset.saturating_add(limit).min(total);
+            params.clear();
+            format!(
+                "SELECT t._rid, {cols} FROM (SELECT rowid AS pos, _rid FROM {view} WHERE rowid >= {offset} AND rowid < {end}) v \
+                 JOIN {t} t ON t._rid = v._rid ORDER BY v.pos",
+                cols = cols.iter().map(|c| format!("t.{c}")).collect::<Vec<_>>().join(", "),
+                view = quote_ident(PAGE_VIEW_TABLE),
+            )
+        } else {
+            format!(
+                "SELECT _rid, {cols} FROM {t} {where_clause} {order} LIMIT {limit} OFFSET {offset}",
+                cols = cols.join(", "),
+            )
+        };
         let (_, rows, _) = self.rows(&sql, &params, limit as usize)?;
         let mut row_ids = Vec::with_capacity(rows.len());
         let mut data = Vec::with_capacity(rows.len());
@@ -857,50 +1058,103 @@ impl DataStore {
     /// Dates are written as ISO (2025-05-04) whatever `_locale` is: a file
     /// exported in one language must import the same way in another.
     pub fn export_with_locale(&self, table: &str, path: &Path, _locale: &str) -> Result<()> {
+        self.export_with_encoding(table, path, None)
+    }
+
+    /// CSV in UTF-8 with BOM (`None`, `utf-8`), or in a legacy encoding such
+    /// as `cp949` for programs that cannot read UTF-8. A character the legacy
+    /// encoding cannot hold is an error, not a silent `?`.
+    pub fn export_with_encoding(&self, table: &str, path: &Path, encoding: Option<&str>) -> Result<()> {
+        let monitor = self.monitor.clone();
+        monitor.begin();
+        let result = monitor.map_err(self.export_inner(table, path, encoding));
+        monitor.end();
+        result
+    }
+
+    fn export_inner(&self, table: &str, path: &Path, encoding: Option<&str>) -> Result<()> {
+        let legacy = match encoding.map(|e| e.trim().to_ascii_lowercase()) {
+            None => None,
+            Some(e) if e.is_empty() || e == "auto" || e == "utf-8" || e == "utf8" => None,
+            Some(e) => match TextEncoding::from_name(&e) {
+                Some(TextEncoding::Legacy(enc)) => Some(enc),
+                _ => return Err(CellxError::CsvEncoding(e)),
+            },
+        };
+        let is_parquet = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("parquet"));
+        if let (Some(enc), false) = (legacy, is_parquet) {
+            static EXPORT_ID: AtomicU64 = AtomicU64::new(1);
+            let id = EXPORT_ID.fetch_add(1, Ordering::Relaxed);
+            let temp = std::env::temp_dir().join(format!("cellx-export-{}-{id}.csv", std::process::id()));
+            // The destination is only opened once the UTF-8 copy is complete,
+            // so a failure or cancel before that leaves an existing file alone.
+            let mut writing = false;
+            let result = (|| -> Result<()> {
+                self.export_utf8(table, &temp, false)?;
+                self.monitor.check()?;
+                writing = true;
+                transcode_from_utf8(&temp, path, enc, &self.monitor)
+            })();
+            let _ = fs::remove_file(&temp);
+            if result.is_err() && writing {
+                let _ = fs::remove_file(path);
+            }
+            return result;
+        }
+        self.export_utf8(table, path, true)
+    }
+
+    fn export_utf8(&self, table: &str, path: &Path, bom: bool) -> Result<()> {
         let path_text = path
             .to_str()
             .ok_or_else(|| CellxError::InvalidName(path.display().to_string()))?;
         let is_parquet = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("parquet"));
+        self.monitor.set_phase(JobPhase::Querying);
         if is_parquet {
             let escaped = path_text.replace('\'', "''");
-            self.conn.execute_batch(&format!(
+            if let Err(error) = self.conn.execute_batch(&format!(
                 "COPY (SELECT * EXCLUDE (_rid) FROM {t} ORDER BY _rid) TO '{escaped}' (FORMAT parquet)",
                 t = quote_ident(table)
-            ))?;
+            )) {
+                let _ = fs::remove_file(path);
+                return Err(error.into());
+            }
             return Ok(());
         }
 
-        static EXPORT_ID: AtomicU64 = AtomicU64::new(1);
-        let id = EXPORT_ID.fetch_add(1, Ordering::Relaxed);
-        let temp_path = path.with_file_name(format!(".cellx-export-{}-{id}.tmp", std::process::id()));
-        let temp_text = temp_path
-            .to_str()
-            .ok_or_else(|| CellxError::InvalidName(temp_path.display().to_string()))?
-            .replace('\'', "''");
-        let date_format = "%Y-%m-%d";
-        let timestamp_format = "%Y-%m-%d %H:%M:%S";
+        // The BOM and the header go in DuckDB's PREFIX (it cannot be combined
+        // with HEADER), so the file is written once, straight to its place.
+        let names = self.export_column_names(table)?;
+        let header = names.iter().map(|n| csv_field(n)).collect::<Vec<_>>().join(",");
+        // DuckDB writes PREFIX and SUFFIX around the rows; with no rows the
+        // file is just the header line, written here.
+        let empty = self.conn.query_row(
+            &format!("SELECT NOT EXISTS (SELECT 1 FROM {})", quote_ident(table)),
+            [],
+            |r| r.get::<_, bool>(0),
+        )?;
+        if empty {
+            fs::write(path, format!("{}{header}\n", if bom { "\u{feff}" } else { "" }))?;
+            return Ok(());
+        }
+        let bom = if bom { "\u{feff}" } else { "" };
+        let prefix = format!("{bom}{header}\n").replace('\'', "''");
+        let path_sql = path_text.replace('\'', "''");
         let sql = format!(
-            "COPY (SELECT * EXCLUDE (_rid) FROM {t} ORDER BY _rid) TO '{temp_text}' (FORMAT csv, HEADER true, DELIMITER ',', DATEFORMAT '{date_format}', TIMESTAMPFORMAT '{timestamp_format}')",
+            "COPY (SELECT * EXCLUDE (_rid) FROM {t} ORDER BY _rid) TO '{path_sql}' (FORMAT csv, HEADER false, DELIMITER ',', DATEFORMAT '%Y-%m-%d', TIMESTAMPFORMAT '%Y-%m-%d %H:%M:%S', PREFIX '{prefix}', SUFFIX '\n')",
             t = quote_ident(table)
         );
         if let Err(error) = self.conn.execute_batch(&sql) {
-            let _ = fs::remove_file(&temp_path);
+            let _ = fs::remove_file(path);
             return Err(error.into());
         }
+        Ok(())
+    }
 
-        let write_result = (|| -> Result<()> {
-            let mut source = File::open(&temp_path)?;
-            let mut destination = File::create(path)?;
-            destination.write_all(&[0xef, 0xbb, 0xbf])?;
-            std::io::copy(&mut source, &mut destination)?;
-            destination.sync_all()?;
-            Ok(())
-        })();
-        let _ = fs::remove_file(&temp_path);
-        if write_result.is_err() {
-            let _ = fs::remove_file(path);
-        }
-        write_result
+    fn export_column_names(&self, table: &str) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(&format!("SELECT * EXCLUDE (_rid) FROM {} LIMIT 0", quote_ident(table)))?;
+        stmt.execute([])?;
+        Ok(stmt.column_names())
     }
 
     /// Runs SQL written by CellX itself (never user input).
@@ -913,6 +1167,305 @@ impl DataStore {
         self.conn.execute_batch("CHECKPOINT")?;
         Ok(())
     }
+}
+
+/// A CSV field, quoted when it holds a comma, a quote or a line break.
+fn csv_field(text: &str) -> String {
+    if text.contains([',', '"', '\n', '\r']) {
+        format!("\"{}\"", text.replace('"', "\"\""))
+    } else {
+        text.to_string()
+    }
+}
+
+/// The text encoding of a CSV file.
+#[derive(Clone, Copy, Debug)]
+pub enum TextEncoding {
+    Auto,
+    Utf8,
+    Utf16,
+    Legacy(&'static encoding_rs::Encoding),
+}
+
+impl TextEncoding {
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name.to_ascii_lowercase().replace('_', "-").as_str() {
+            "auto" => Self::Auto,
+            "utf-8" | "utf8" => Self::Utf8,
+            "utf-16" | "utf16" => Self::Utf16,
+            "cp949" | "euc-kr" | "uhc" | "ks-c-5601-1987" => Self::Legacy(encoding_rs::EUC_KR),
+            "shift-jis" | "sjis" | "cp932" | "windows-31j" => Self::Legacy(encoding_rs::SHIFT_JIS),
+            "gbk" | "gb2312" | "cp936" | "gb18030" => Self::Legacy(encoding_rs::GB18030),
+            "big5" | "cp950" => Self::Legacy(encoding_rs::BIG5),
+            "windows-1252" | "cp1252" | "latin1" | "iso-8859-1" => Self::Legacy(encoding_rs::WINDOWS_1252),
+            _ => return None,
+        })
+    }
+
+    /// The name the UI shows and passes back.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Utf8 => "utf-8",
+            Self::Utf16 => "utf-16",
+            Self::Legacy(e) if *e == encoding_rs::EUC_KR => "cp949",
+            Self::Legacy(e) if *e == encoding_rs::SHIFT_JIS => "shift_jis",
+            Self::Legacy(e) if *e == encoding_rs::GB18030 || *e == encoding_rs::GBK => "gbk",
+            Self::Legacy(e) if *e == encoding_rs::BIG5 => "big5",
+            Self::Legacy(_) => "windows-1252",
+        }
+    }
+}
+
+/// What the import dialog shows of a file before it is imported.
+#[derive(Clone, Debug, Serialize)]
+pub struct FilePreview {
+    /// The encoding the lines were read with (see `TextEncoding::name`).
+    pub encoding: String,
+    pub lines: Vec<String>,
+}
+
+/// Guesses the encoding of the start of a file: a BOM, else UTF-8 when it is
+/// valid, else the legacy encoding whose script best fits the text, the UI
+/// language's own first on a tie.
+pub fn detect_encoding(head: &[u8], locale: &str) -> Result<TextEncoding> {
+    if head.starts_with(&[0xff, 0xfe, 0x00, 0x00]) || head.starts_with(&[0x00, 0x00, 0xfe, 0xff]) {
+        return Err(CellxError::CsvEncoding("UTF-32".into()));
+    }
+    if head.starts_with(&[0xff, 0xfe]) || head.starts_with(&[0xfe, 0xff]) {
+        return Ok(TextEncoding::Utf16);
+    }
+    if head.starts_with(&[0xef, 0xbb, 0xbf]) || is_utf8_prefix(head) {
+        return Ok(TextEncoding::Utf8);
+    }
+    let mut candidates = vec![legacy_encoding(locale)];
+    for e in [encoding_rs::EUC_KR, encoding_rs::SHIFT_JIS, encoding_rs::GBK, encoding_rs::BIG5, encoding_rs::WINDOWS_1252] {
+        if !candidates.contains(&e) {
+            candidates.push(e);
+        }
+    }
+    // The first candidate (the UI language's, then Korean, Japanese and the
+    // Chinese ones) that reads the text mostly as its own script wins: these
+    // encodings overlap (Korean bytes are valid GBK), so a prior is needed.
+    // Failing that, the best fit. The import dialog's preview shows the
+    // result, and the encoding can be chosen there.
+    let mut best: Option<(&'static encoding_rs::Encoding, f64)> = None;
+    for enc in candidates {
+        let mut decoder = enc.new_decoder_without_bom_handling();
+        let mut text = String::with_capacity(head.len() * 3);
+        let (result, _) = decoder.decode_to_string_without_replacement(head, &mut text, false);
+        if matches!(result, encoding_rs::DecoderResult::Malformed(..)) {
+            continue;
+        }
+        // Almost any bytes are valid Windows-1252, so it only wins when no
+        // multibyte encoding reads the text as its own script.
+        let weight = if enc == encoding_rs::WINDOWS_1252 { 0.5 } else { 1.0 };
+        let score = script_fit(enc, &text) * weight;
+        if score >= 0.8 {
+            return Ok(TextEncoding::Legacy(enc));
+        }
+        if best.is_none_or(|(_, b)| score > b) {
+            best = Some((enc, score));
+        }
+    }
+    Ok(TextEncoding::Legacy(best.map_or(legacy_encoding(locale), |(e, _)| e)))
+}
+
+/// The share of the non-ASCII characters of `text` that belong to the
+/// scripts the encoding is used for.
+fn script_fit(enc: &'static encoding_rs::Encoding, text: &str) -> f64 {
+    let fits = |c: char| -> bool {
+        let u = c as u32;
+        let cjk = (0x4E00..=0x9FFF).contains(&u) || (0x3000..=0x303F).contains(&u) || (0xFF00..=0xFFEF).contains(&u);
+        if enc == encoding_rs::EUC_KR {
+            // Korean text keeps to the 2,350 everyday syllables of KS X 1001
+            // (both bytes 0xA1..); text in another encoding read as CP949
+            // lands mostly in its rarely used extension.
+            let common = || {
+                let mut b = [0_u8; 4];
+                let bytes = encoding_rs::EUC_KR.encode(c.encode_utf8(&mut b)).0;
+                bytes.len() == 2 && bytes[0] >= 0xA1 && bytes[1] >= 0xA1
+            };
+            ((0xAC00..=0xD7A3).contains(&u) || (0x3130..=0x318F).contains(&u)) && common()
+        } else if enc == encoding_rs::SHIFT_JIS {
+            (0x3040..=0x30FF).contains(&u) || cjk
+        } else if enc == encoding_rs::GBK || enc == encoding_rs::BIG5 || enc == encoding_rs::GB18030 {
+            cjk
+        } else {
+            (0x00A0..=0x00FF).contains(&u) || (0x2010..=0x203A).contains(&u)
+        }
+    };
+    let (mut all, mut good) = (0usize, 0usize);
+    for c in text.chars().filter(|c| !c.is_ascii()) {
+        all += 1;
+        if fits(c) {
+            good += 1;
+        }
+    }
+    if all == 0 {
+        0.0
+    } else {
+        good as f64 / all as f64
+    }
+}
+
+/// 64 KB of a file from its first byte that is not UTF-8.
+fn non_utf8_sample(path: &Path) -> Result<Vec<u8>> {
+    let mut file = std::io::BufReader::with_capacity(1 << 20, File::open(path)?);
+    let mut buf = vec![0_u8; 1 << 20];
+    let mut carry: Vec<u8> = Vec::new();
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            return Ok(carry);
+        }
+        let mut chunk = std::mem::take(&mut carry);
+        chunk.extend_from_slice(&buf[..n]);
+        match std::str::from_utf8(&chunk) {
+            Ok(_) => {}
+            Err(e) if e.error_len().is_none() => carry = chunk[e.valid_up_to()..].to_vec(),
+            Err(e) => {
+                // Back up to the start of the line, so the sample starts cleanly.
+                let at = chunk[..e.valid_up_to()].iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+                let mut sample = chunk[at..].to_vec();
+                sample.truncate(64 * 1024);
+                if sample.len() < 64 * 1024 {
+                    let mut more = vec![0_u8; 64 * 1024 - sample.len()];
+                    let m = file.read(&mut more)?;
+                    sample.extend_from_slice(&more[..m]);
+                }
+                return Ok(sample);
+            }
+        }
+    }
+}
+
+fn transcode_from_utf8(
+    from: &Path,
+    to: &Path,
+    encoding: &'static encoding_rs::Encoding,
+    monitor: &JobMonitor,
+) -> Result<()> {
+    let total = fs::metadata(from).map(|m| m.len()).unwrap_or(0);
+    let mut done = 0_u64;
+    monitor.set_bytes(0, total);
+    monitor.set_phase(JobPhase::Converting);
+    let mut input = std::io::BufReader::with_capacity(1 << 20, File::open(from)?);
+    let mut output = std::io::BufWriter::with_capacity(1 << 20, File::create(to)?);
+    let mut encoder = encoding.new_encoder();
+    let mut inbuf = vec![0_u8; 1 << 20];
+    let mut carry: Vec<u8> = Vec::new();
+    let mut outbuf = vec![0_u8; 4 << 20];
+    loop {
+        monitor.check()?;
+        let n = input.read(&mut inbuf)?;
+        done += n as u64;
+        monitor.set_bytes(done, total);
+        let last = n == 0;
+        let mut chunk = std::mem::take(&mut carry);
+        chunk.extend_from_slice(&inbuf[..n]);
+        // Keep a character cut off at the end of the chunk for the next one.
+        let valid = match std::str::from_utf8(&chunk) {
+            Ok(_) => chunk.len(),
+            Err(e) if e.error_len().is_none() && !last => e.valid_up_to(),
+            Err(_) => return Err(CellxError::CsvEncoding("UTF-8".into())),
+        };
+        carry = chunk[valid..].to_vec();
+        let mut src = std::str::from_utf8(&chunk[..valid]).unwrap_or_default();
+        loop {
+            let (result, read, written) = encoder.encode_from_utf8_without_replacement(src, &mut outbuf, last);
+            output.write_all(&outbuf[..written])?;
+            src = &src[read..];
+            match result {
+                encoding_rs::EncoderResult::InputEmpty => break,
+                encoding_rs::EncoderResult::OutputFull => {}
+                encoding_rs::EncoderResult::Unmappable(c) => {
+                    return Err(CellxError::TextEncoding(format!(
+                        "'{c}' (U+{:04X}) 문자는 {}로 저장할 수 없습니다. UTF-8로 내보내세요",
+                        c as u32,
+                        TextEncoding::Legacy(encoding).name()
+                    )));
+                }
+            }
+        }
+        if last {
+            break;
+        }
+    }
+    output.flush()?;
+    Ok(())
+}
+
+/// The encoding Excel uses for CSV files on Windows in each UI language.
+fn legacy_encoding(locale: &str) -> &'static encoding_rs::Encoding {
+    let tag = locale.to_ascii_lowercase();
+    if tag.starts_with("ko") {
+        encoding_rs::EUC_KR // CP949 (Unified Hangul Code), a superset of EUC-KR
+    } else if tag.starts_with("ja") {
+        encoding_rs::SHIFT_JIS
+    } else if tag == "zh-tw" || tag.starts_with("zh-hant") || tag == "zh-hk" {
+        encoding_rs::BIG5
+    } else if tag.starts_with("zh") {
+        encoding_rs::GBK
+    } else {
+        encoding_rs::WINDOWS_1252
+    }
+}
+
+/// Whether `bytes` is UTF-8, allowing a character cut off at the end.
+fn is_utf8_prefix(bytes: &[u8]) -> bool {
+    match std::str::from_utf8(bytes) {
+        Ok(_) => true,
+        Err(e) => e.error_len().is_none() && bytes.len() - e.valid_up_to() < 4,
+    }
+}
+
+fn transcode_to_utf8(
+    from: &Path,
+    to: &Path,
+    encoding: &'static encoding_rs::Encoding,
+    monitor: &JobMonitor,
+) -> Result<()> {
+    let total = fs::metadata(from).map(|m| m.len()).unwrap_or(0);
+    let mut done = 0_u64;
+    monitor.set_bytes(0, total);
+    monitor.set_phase(JobPhase::Converting);
+    let mut input = std::io::BufReader::with_capacity(1 << 20, File::open(from)?);
+    let mut output = std::io::BufWriter::with_capacity(1 << 20, File::create(to)?);
+    let mut decoder = encoding.new_decoder_without_bom_handling();
+    let mut inbuf = vec![0_u8; 1 << 20];
+    let mut outbuf = String::with_capacity(3 << 20);
+    loop {
+        monitor.check()?;
+        let n = input.read(&mut inbuf)?;
+        done += n as u64;
+        monitor.set_bytes(done, total);
+        let last = n == 0;
+        let mut src = &inbuf[..n];
+        loop {
+            outbuf.clear();
+            let (result, read) = decoder.decode_to_string_without_replacement(src, &mut outbuf, last);
+            output.write_all(outbuf.as_bytes())?;
+            src = &src[read..];
+            match result {
+                encoding_rs::DecoderResult::InputEmpty => break,
+                encoding_rs::DecoderResult::OutputFull => {
+                    outbuf.reserve(outbuf.capacity());
+                }
+                encoding_rs::DecoderResult::Malformed(_, _) => {
+                    return Err(CellxError::TextEncoding(format!(
+                        "{}로 읽을 수 없는 바이트가 있습니다. 가져오기 창에서 다른 인코딩을 고르세요",
+                        TextEncoding::Legacy(encoding).name()
+                    )));
+                }
+            }
+        }
+        if last {
+            break;
+        }
+    }
+    output.flush()?;
+    Ok(())
 }
 
 fn json_contains_table_function(v: &serde_json::Value) -> bool {
@@ -931,6 +1484,190 @@ fn json_contains_table_function(v: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cancels the store's job from another thread once it reaches `phase`,
+    /// returning the largest progress fraction seen before that.
+    fn cancel_when(monitor: Arc<JobMonitor>, phase: JobPhase) -> std::thread::JoinHandle<f64> {
+        std::thread::spawn(move || {
+            let mut best = 0.0_f64;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while std::time::Instant::now() < deadline {
+                let snap = monitor.snapshot();
+                if let Some(f) = snap.fraction {
+                    best = best.max(f);
+                }
+                if snap.phase == phase {
+                    monitor.cancel();
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            best
+        })
+    }
+
+    #[test]
+    fn a_running_query_can_be_cancelled_and_the_store_still_works() {
+        let mut store = DataStore::open_in_memory().unwrap();
+        let canceller = cancel_when(store.monitor(), JobPhase::Querying);
+        let result = store.create_table_from_sql(
+            "huge",
+            "SELECT a.range * b.range AS x FROM range(200000) a, range(200000) b",
+        );
+        canceller.join().unwrap();
+        assert!(matches!(result, Err(CellxError::Cancelled)), "{result:?}");
+        assert!(!store.has_table("huge"));
+        assert!(!store.monitor().snapshot().cancelled || store.monitor().snapshot().phase == JobPhase::Idle);
+        // The next job starts clean.
+        let info = store.create_table_from_sql("small", "SELECT 1 AS x").unwrap();
+        assert_eq!(info.rows, 1);
+    }
+
+    #[test]
+    fn converting_a_legacy_csv_reports_progress_and_can_be_cancelled() {
+        let dir = std::env::temp_dir().join(format!("cellx-cancel-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.csv");
+        let mut text = String::from("지역,금액\n");
+        while text.len() < 24 << 20 {
+            text.push_str("서울특별시,12345\n부산광역시,67890\n");
+        }
+        let (bytes, _, _) = encoding_rs::EUC_KR.encode(&text);
+        fs::write(&path, &bytes).unwrap();
+        drop(text);
+
+        let mut store = DataStore::open_in_memory().unwrap();
+        let monitor = store.monitor();
+        // Cancel half-way through the conversion.
+        let watcher = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+            let mut seen = 0.0_f64;
+            while std::time::Instant::now() < deadline {
+                let snap = monitor.snapshot();
+                if snap.phase == JobPhase::Converting {
+                    if let Some(f) = snap.fraction {
+                        seen = seen.max(f);
+                        if f >= 0.3 {
+                            monitor.cancel();
+                            break;
+                        }
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+            seen
+        });
+        let result = store.import_file_with_encoding(&path, "big", "ko-KR", Some("cp949"));
+        let seen = watcher.join().unwrap();
+        assert!(matches!(result, Err(CellxError::Cancelled)), "{result:?}");
+        assert!((0.3..1.0).contains(&seen), "progress {seen}");
+        assert!(!store.has_table("big"));
+
+        let info = store.import_file_with_encoding(&path, "big", "ko-KR", Some("cp949")).unwrap();
+        assert!(info.rows > 1000);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_cancelled_export_leaves_an_existing_file_alone() {
+        let store = store_with_sales();
+        let path = std::env::temp_dir().join(format!("cellx-keep-{}.csv", std::process::id()));
+        fs::write(&path, "keep me").unwrap();
+        // A cancel requested before the export starts is cleared by it, so
+        // simulate the request landing mid-job: the job checks it at its
+        // first step and stops before opening the destination.
+        let monitor = store.monitor();
+        monitor.begin();
+        monitor.cancel();
+        let result = monitor.map_err(store.export_inner("sales", &path, Some("cp949")));
+        assert!(matches!(result, Err(CellxError::Cancelled)), "{result:?}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "keep me");
+        let _ = fs::remove_file(path);
+    }
+
+    /// `cargo test -p cellx-core --release -- --ignored --nocapture csv_import_progress`
+    #[test]
+    #[ignore]
+    fn csv_import_progress_advances() {
+        let path = std::env::temp_dir().join(format!("cellx-progress-{}.csv", std::process::id()));
+        {
+            let mut out = std::io::BufWriter::new(File::create(&path).unwrap());
+            writeln!(out, "id,region,amount,day").unwrap();
+            for i in 0..3_000_000u64 {
+                writeln!(out, "{i},region{},{}.25,2025-01-{:02}", i % 17, i % 1000, 1 + i % 28).unwrap();
+            }
+        }
+        let mut store = DataStore::open_in_memory().unwrap();
+        let monitor = store.monitor();
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = done.clone();
+        let watcher = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            while !flag.load(Ordering::Acquire) {
+                let snap = monitor.snapshot();
+                if let Some(f) = snap.fraction {
+                    if seen.last() != Some(&(f * 100.0).round()) {
+                        seen.push((f * 100.0).round());
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            seen
+        });
+        let start = std::time::Instant::now();
+        let info = store.import_file(&path, "big").unwrap();
+        done.store(true, Ordering::Release);
+        let seen = watcher.join().unwrap();
+        println!("rows {} in {:?}; progress samples {:?}", info.rows, start.elapsed(), seen);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn deep_pages_of_a_sorted_filtered_grid_match_a_direct_sort() {
+        let mut store = DataStore::open_in_memory().unwrap();
+        store
+            .create_table_from_sql(
+                "t",
+                "SELECT i AS id, (i * 7919) % 1000 AS v, CASE WHEN i % 3 = 0 THEN 'a' ELSE 'b' END AS g FROM range(60000) r(i)",
+            )
+            .unwrap();
+        let sort = Sort { column: "v".into(), descending: true };
+        let filters = [ColumnFilter { column: "g".into(), criterion: "b".into() }];
+        let ids = |p: &Page| p.rows.iter().map(|r| r[0].clone()).collect::<Vec<_>>();
+        let expected = |store: &DataStore, offset: u64| {
+            let (_, rows, _) = store
+                .rows(
+                    &format!("SELECT id FROM t WHERE g = 'b' ORDER BY v DESC NULLS LAST, _rid LIMIT 50 OFFSET {offset}"),
+                    &[],
+                    50,
+                )
+                .unwrap();
+            rows.into_iter().map(|mut r| r.remove(0)).collect::<Vec<_>>()
+        };
+        for offset in [0, 19_990, 25_000, 39_950] {
+            let page = store.page("t", offset, 50, Some(&sort), &filters).unwrap();
+            assert_eq!(page.total, 40_000);
+            assert_eq!(ids(&page), expected(&store, offset), "offset {offset}");
+        }
+        // The last page is short.
+        assert_eq!(store.page("t", 39_990, 50, Some(&sort), &filters).unwrap().rows.len(), 10);
+
+        // An edit changes the order: the saved order is rebuilt.
+        let first = store.page("t", 30_000, 1, Some(&sort), &filters).unwrap();
+        let rid = first.row_ids[0];
+        store.update_cell("t", rid, "v", "5000").unwrap();
+        let top = store.page("t", 0, 1, Some(&sort), &filters).unwrap();
+        assert_eq!(top.row_ids[0], rid);
+        let deep = store.page("t", 30_000, 50, Some(&sort), &filters).unwrap();
+        assert_eq!(ids(&deep), expected(&store, 30_000));
+        // Another sort direction is another order.
+        let asc = Sort { column: "v".into(), descending: false };
+        let deep = store.page("t", 25_000, 5, Some(&asc), &[]).unwrap();
+        let (_, rows, _) = store
+            .rows("SELECT id FROM t ORDER BY v ASC NULLS LAST, _rid LIMIT 5 OFFSET 25000", &[], 5)
+            .unwrap();
+        assert_eq!(ids(&deep), rows.into_iter().map(|mut r| r.remove(0)).collect::<Vec<_>>());
+    }
 
     fn store_with_sales() -> DataStore {
         let mut s = DataStore::open_in_memory().unwrap();
@@ -976,11 +1713,23 @@ mod tests {
         let path = std::env::temp_dir().join(format!("cellx-inspect-schema-{}.csv", std::process::id()));
         fs::write(&path, "region,amount\nSeoul,12.5\nBusan,7.25\n").unwrap();
         let store = DataStore::open_in_memory().unwrap();
-        let schema = store.inspect_file_schema(&path).unwrap();
+        let schema = store.inspect_file_schema(&path, "ko-KR").unwrap();
         assert_eq!(schema.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), vec!["region", "amount"]);
         assert_eq!(schema[0].kind, ColumnKind::Text);
         assert_eq!(schema[1].kind, ColumnKind::Number);
         assert!(!store.has_table("schema_preview"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn inspect_cp949_csv_schema_decodes_korean_headers() {
+        let path = std::env::temp_dir().join(format!("cellx-inspect-cp949-{}.csv", std::process::id()));
+        let (bytes, _, _) = encoding_rs::EUC_KR.encode("지역,금액\n서울,12\n부산,7\n");
+        fs::write(&path, &bytes).unwrap();
+        let store = DataStore::open_in_memory().unwrap();
+        let schema = store.inspect_file_schema(&path, "ko-KR").unwrap();
+        assert_eq!(schema.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["지역", "금액"]);
+        assert_eq!(schema[1].kind, ColumnKind::Number);
         let _ = fs::remove_file(path);
     }
 
@@ -993,7 +1742,7 @@ mod tests {
         }
         fs::write(&path, bytes).unwrap();
         let store = DataStore::open_in_memory().unwrap();
-        let schema = store.inspect_file_schema(&path).unwrap();
+        let schema = store.inspect_file_schema(&path, "ko-KR").unwrap();
         assert_eq!(schema.len(), 2);
         assert_eq!(schema[0].name, "name");
         let _ = fs::remove_file(path);
@@ -1299,4 +2048,145 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+
+    fn cp949(text: &str) -> Vec<u8> {
+        encoding_rs::EUC_KR.encode(text).0.into_owned()
+    }
+
+    #[test]
+    fn csv_import_reads_korean_excel_cp949_files() {
+        let path = std::env::temp_dir().join(format!("cellx-cp949-{}.csv", std::process::id()));
+        // 똠 and 펲 are in CP949 but not in plain EUC-KR.
+        fs::write(&path, cp949("지역,금액,메모\n서울,12,똠방각하\n부산,7,펲\n")).unwrap();
+        let mut store = DataStore::open_in_memory().unwrap();
+        let info = store.import_file_with_locale(&path, "cp949_data", "ko-KR").unwrap();
+        assert_eq!(info.rows, 2);
+        assert_eq!(info.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["지역", "금액", "메모"]);
+        let v = store.scalar("SELECT 메모 FROM cp949_data WHERE _rid = 1", &[]).unwrap();
+        assert_eq!(v, Scalar::Text("똠방각하".into()));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn csv_import_falls_back_when_korean_text_starts_late() {
+        // The first 64 KB are ASCII (valid UTF-8); the Korean text comes after.
+        let path = std::env::temp_dir().join(format!("cellx-cp949-late-{}.csv", std::process::id()));
+        let mut text = String::from("id,name\n");
+        for i in 0..10_000 {
+            text.push_str(&format!("{i},abc\n"));
+        }
+        text.push_str("10000,한글\n");
+        fs::write(&path, cp949(&text)).unwrap();
+        let mut store = DataStore::open_in_memory().unwrap();
+        let info = store.import_file_with_locale(&path, "late", "ko-KR").unwrap();
+        assert_eq!(info.rows, 10_001);
+        let v = store.scalar("SELECT name FROM late WHERE id = 10000", &[]).unwrap();
+        assert_eq!(v, Scalar::Text("한글".into()));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn csv_import_uses_the_encoding_of_the_ui_language() {
+        let path = std::env::temp_dir().join(format!("cellx-sjis-{}.csv", std::process::id()));
+        fs::write(&path, encoding_rs::SHIFT_JIS.encode("地域,金額\n東京,12\n").0).unwrap();
+        let mut store = DataStore::open_in_memory().unwrap();
+        let info = store.import_file_with_locale(&path, "sjis", "ja-JP").unwrap();
+        assert_eq!(info.columns[0].name, "地域");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn csv_export_quotes_header_names_and_handles_empty_tables() {
+        let mut store = DataStore::open_in_memory().unwrap();
+        store.create_table_from_sql("odd", "SELECT 1 AS \"a,b\", 'x' AS \"it's\" WHERE false").unwrap();
+        let path = std::env::temp_dir().join(format!("cellx-odd-{}.csv", std::process::id()));
+        store.export("odd", &path).unwrap();
+        let text = String::from_utf8(fs::read(&path).unwrap()).unwrap();
+        assert_eq!(text, "\u{feff}\"a,b\",it's\n");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn encoding_is_detected_whatever_the_ui_language() {
+        let korean = cp949("지역,금액\n서울특별시,12\n부산광역시,7\n");
+        let japanese = encoding_rs::SHIFT_JIS.encode("地域,金額\nとうきょう,12\nおおさか,7\n").0.into_owned();
+        assert_eq!(detect_encoding(&korean, "en-US").unwrap().name(), "cp949");
+        assert_eq!(detect_encoding(&korean, "ja-JP").unwrap().name(), "cp949");
+        assert_eq!(detect_encoding(&japanese, "ko-KR").unwrap().name(), "shift_jis");
+        let chinese = encoding_rs::GBK.encode("地区,金额,备注\n北京市,12,这是我们的数据\n上海市,7,销售额统计\n").0.into_owned();
+        assert_eq!(detect_encoding(&chinese, "ko-KR").unwrap().name(), "gbk");
+        assert_eq!(detect_encoding(&chinese, "zh-CN").unwrap().name(), "gbk");
+        let latin = encoding_rs::WINDOWS_1252.encode("name,city\nJosé,São Paulo\nRenée,Zürich\n").0.into_owned();
+        assert_eq!(detect_encoding(&latin, "ko-KR").unwrap().name(), "windows-1252");
+        assert_eq!(detect_encoding("a,b\n1,2\n".as_bytes(), "ko-KR").unwrap().name(), "utf-8");
+        assert_eq!(detect_encoding(&[0xff, 0xfe, b'a', 0], "ko-KR").unwrap().name(), "utf-16");
+    }
+
+    #[test]
+    fn import_preview_and_explicit_encoding() {
+        let path = std::env::temp_dir().join(format!("cellx-explicit-{}.csv", std::process::id()));
+        fs::write(&path, cp949("지역,금액\n서울,12\n")).unwrap();
+        let p = DataStore::preview_file(&path, "en-US", None, 10).unwrap();
+        assert_eq!(p.encoding, "cp949");
+        assert_eq!(p.lines, ["지역,금액", "서울,12"]);
+        // Read as UTF-8 on purpose: an encoding error, not garbage.
+        let mut store = DataStore::open_in_memory().unwrap();
+        let e = store.import_file_with_encoding(&path, "x", "ko-KR", Some("utf-8")).unwrap_err();
+        assert_eq!(e.code(), "CSV_ENCODING");
+        let info = store.import_file_with_encoding(&path, "x", "en-US", Some("cp949")).unwrap();
+        assert_eq!(info.columns[0].name, "지역");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn export_in_cp949_round_trips_and_refuses_unmappable_text() {
+        let mut store = DataStore::open_in_memory().unwrap();
+        store.create_table_from_sql("k", "SELECT '서울' AS 지역, 12 AS 금액").unwrap();
+        let path = std::env::temp_dir().join(format!("cellx-cp949-out-{}.csv", std::process::id()));
+        store.export_with_encoding("k", &path, Some("cp949")).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        assert!(!bytes.starts_with(&[0xef, 0xbb, 0xbf]));
+        assert_eq!(encoding_rs::EUC_KR.decode(&bytes).0, "지역,금액\n서울,12\n");
+        let info = store.import_file_with_locale(&path, "back", "ko-KR").unwrap();
+        assert_eq!(info.columns[0].name, "지역");
+
+        store.create_table_from_sql("emoji", "SELECT '😀' AS a").unwrap();
+        let e = store.export_with_encoding("emoji", &path, Some("cp949")).unwrap_err();
+        assert_eq!(e.code(), "TEXT_ENCODING");
+        assert!(!path.exists(), "a failed export leaves no file");
+    }
+
+    #[test]
+    #[ignore]
+    fn measure_big_csv() {
+        let Ok(src) = std::env::var("CELLX_BIG_CSV") else { return };
+        let src = Path::new(&src);
+        let t = std::time::Instant::now();
+        let mut s = DataStore::open_in_memory().unwrap();
+        s.import_file_with_locale(src, "o", "ko-KR").unwrap();
+        eprintln!("MEASURE utf8 import {:?}", t.elapsed());
+        let out = src.with_file_name("o_out.csv");
+        let t = std::time::Instant::now();
+        s.export("o", &out).unwrap();
+        eprintln!("MEASURE export (one pass) {:?}", t.elapsed());
+        let tmp = src.with_file_name("o_tmp.csv");
+        let t = std::time::Instant::now();
+        s.conn.execute_batch(&format!("COPY (SELECT * EXCLUDE (_rid) FROM o ORDER BY _rid) TO '{}' (FORMAT csv, HEADER true)", tmp.display())).unwrap();
+        let mut d = File::create(&out).unwrap();
+        d.write_all(&[0xef, 0xbb, 0xbf]).unwrap();
+        std::io::copy(&mut File::open(&tmp).unwrap(), &mut d).unwrap();
+        d.sync_all().unwrap();
+        eprintln!("MEASURE export (temp + copy, before) {:?}", t.elapsed());
+        let _ = fs::remove_file(&tmp);
+        let _ = fs::remove_file(&out);
+        let cp = src.with_file_name("o_cp949.csv");
+        let text = fs::read_to_string(src).unwrap();
+        fs::write(&cp, encoding_rs::EUC_KR.encode(&text).0).unwrap();
+        drop(text);
+        let t = std::time::Instant::now();
+        let mut s2 = DataStore::open_in_memory().unwrap();
+        s2.import_file_with_locale(&cp, "o", "ko-KR").unwrap();
+        eprintln!("MEASURE cp949 import {:?}", t.elapsed());
+        let _ = fs::remove_file(&cp);
+    }
 }

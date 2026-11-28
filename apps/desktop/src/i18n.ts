@@ -214,6 +214,17 @@ Object.assign(traditionalChinese, {
   "엑셀 호환 고성능 스프레드시트":"相容 Excel 的高效能試算表","찾기":"尋找","바꾸기":"取代","가로":"水平","세로":"垂直","위쪽":"上","왼쪽":"左","가운데":"置中","오른쪽":"右","아래쪽":"下","일반":"一般",
 });
 
+// Importing Excel and OpenDocument worksheets.
+Object.assign(english, { "시트 읽는 중":"Reading worksheet","첫 행을 열 이름으로 사용":"Use the first row as column names","열마다 값에 맞는 형식(숫자·날짜·텍스트)으로 가져옵니다. 섞여 있으면 텍스트가 됩니다.":"Each column gets the type its values have (number, date, text); mixed columns become text.","Excel·OpenDocument 통합 문서":"Excel/OpenDocument workbooks","CSV, TSV, Parquet, Excel 파일을 데이터 시트로 엽니다":"Opens a CSV, TSV, Parquet or Excel file as a data sheet" });
+Object.assign(japanese, { "시트 읽는 중":"シートを読み込み中","첫 행을 열 이름으로 사용":"先頭行を列名として使う","열마다 값에 맞는 형식(숫자·날짜·텍스트)으로 가져옵니다. 섞여 있으면 텍스트가 됩니다.":"列ごとに値に合った型 (数値・日付・テキスト) で読み込みます。混在する列はテキストになります。","Excel·OpenDocument 통합 문서":"Excel/OpenDocument ブック","CSV, TSV, Parquet, Excel 파일을 데이터 시트로 엽니다":"CSV・TSV・Parquet・Excel ファイルをデータ シートとして開きます" });
+Object.assign(simplifiedChinese, { "시트 읽는 중":"正在读取工作表","첫 행을 열 이름으로 사용":"将第一行用作列名","열마다 값에 맞는 형식(숫자·날짜·텍스트)으로 가져옵니다. 섞여 있으면 텍스트가 됩니다.":"每列按其值的类型（数字、日期、文本）导入；混合的列将作为文本。","Excel·OpenDocument 통합 문서":"Excel/OpenDocument 工作簿","CSV, TSV, Parquet, Excel 파일을 데이터 시트로 엽니다":"将 CSV、TSV、Parquet 或 Excel 文件作为数据工作表打开" });
+Object.assign(traditionalChinese, { "시트 읽는 중":"正在讀取工作表","첫 행을 열 이름으로 사용":"將第一列用作欄名","열마다 값에 맞는 형식(숫자·날짜·텍스트)으로 가져옵니다. 섞여 있으면 텍스트가 됩니다.":"每欄依其值的類型（數字、日期、文字）匯入；混合的欄將作為文字。","Excel·OpenDocument 통합 문서":"Excel/OpenDocument 活頁簿","CSV, TSV, Parquet, Excel 파일을 데이터 시트로 엽니다":"將 CSV、TSV、Parquet 或 Excel 檔案作為資料工作表開啟" });
+// Progress window for long data-sheet jobs.
+Object.assign(english, { "쿼리 실행 중":"Running query…","취소하는 중":"Cancelling…","텍스트 인코딩 변환 중":"Converting text encoding","파일 쓰는 중":"Writing file","데이터 읽는 중":"Reading data","마무리하는 중":"Finishing","준비하는 중":"Preparing","행 처리":"rows processed","경과":"Elapsed" });
+Object.assign(japanese, { "쿼리 실행 중":"クエリを実行中…","취소하는 중":"キャンセルしています…","텍스트 인코딩 변환 중":"文字コードを変換中","파일 쓰는 중":"ファイルを書き込み中","데이터 읽는 중":"データを読み込み中","마무리하는 중":"仕上げ中","준비하는 중":"準備中","행 처리":"行を処理","경과":"経過" });
+Object.assign(simplifiedChinese, { "쿼리 실행 중":"正在运行查询…","취소하는 중":"正在取消…","텍스트 인코딩 변환 중":"正在转换文本编码","파일 쓰는 중":"正在写入文件","데이터 읽는 중":"正在读取数据","마무리하는 중":"正在完成","준비하는 중":"正在准备","행 처리":"行已处理","경과":"已用时间" });
+Object.assign(traditionalChinese, { "쿼리 실행 중":"正在執行查詢…","취소하는 중":"正在取消…","텍스트 인코딩 변환 중":"正在轉換文字編碼","파일 쓰는 중":"正在寫入檔案","데이터 읽는 중":"正在讀取資料","마무리하는 중":"正在完成","준비하는 중":"正在準備","행 처리":"列已處理","경과":"經過時間" });
+
 
 Object.assign(english, {
   "시트를 옮길 위치":"Move the sheet to","미리 설정된":"Preset","숨김":"Hidden","(끝으로 이동)":"(Move to end)","밝게 1":"Light 1","밝게 9":"Light 9",
@@ -632,7 +643,7 @@ Object.assign(english, {
   "행 삽입":"Insert Rows","열 삽입":"Insert Columns","행 삭제":"Delete Rows","열 삭제":"Delete Columns","숨기기":"Hide","숨기기 취소":"Unhide",
   "찾기...":"Find...","바꾸기...":"Replace...","이동...":"Go To...","시트 삽입 (Shift+F11)":"Insert Sheet (Shift+F11)",
   "일러스트레이션":"Illustrations","그림 삽입 (PNG, JPEG, GIF, BMP). 스크린샷은 Ctrl+V로 붙여넣을 수 있습니다.":"Insert Picture (PNG, JPEG, GIF, BMP). Paste screenshots with Ctrl+V.",
-  "도형":"Shapes","링크":"Links","하이퍼링크 (Ctrl+K)":"Hyperlink (Ctrl+K)","CSV·Parquet을 데이터 시트로":"CSV/Parquet to Data Sheet",
+  "도형":"Shapes","링크":"Links","하이퍼링크 (Ctrl+K)":"Hyperlink (Ctrl+K)","CSV·Parquet·Excel을 데이터 시트로":"CSV/Parquet/Excel to Data Sheet",
   "빠른 채우기 (Ctrl+E)":"Flash Fill (Ctrl+E)","중복된 항목 제거":"Remove Duplicates","데이터 유효성 검사":"Data Validation",
   "목표값 찾기...":"Goal Seek...","시나리오 관리자...":"Scenario Manager...","데이터 표...":"Data Table...","그룹":"Group","그룹 해제":"Ungroup",
   "인쇄 영역":"Print Area","머리글과 바닥글 (페이지 번호, 날짜, 시트 이름…)":"Headers and Footers (page number, date, sheet name…)",
@@ -648,7 +659,7 @@ Object.assign(japanese, {
   "행 삽입":"行の挿入","열 삽입":"列の挿入","행 삭제":"行の削除","열 삭제":"列の削除","숨기기":"非表示","숨기기 취소":"再表示",
   "찾기...":"検索...","바꾸기...":"置換...","이동...":"ジャンプ...","시트 삽입 (Shift+F11)":"シートの挿入 (Shift+F11)",
   "일러스트레이션":"図","그림 삽입 (PNG, JPEG, GIF, BMP). 스크린샷은 Ctrl+V로 붙여넣을 수 있습니다.":"画像の挿入 (PNG、JPEG、GIF、BMP)。スクリーンショットは Ctrl+V で貼り付けできます。",
-  "도형":"図形","링크":"リンク","하이퍼링크 (Ctrl+K)":"ハイパーリンク (Ctrl+K)","CSV·Parquet을 데이터 시트로":"CSV/Parquet をデータシートに",
+  "도형":"図形","링크":"リンク","하이퍼링크 (Ctrl+K)":"ハイパーリンク (Ctrl+K)","CSV·Parquet·Excel을 데이터 시트로":"CSV/Parquet/Excel をデータシートに",
   "빠른 채우기 (Ctrl+E)":"フラッシュ フィル (Ctrl+E)","중복된 항목 제거":"重複の削除","데이터 유효성 검사":"データの入力規則",
   "목표값 찾기...":"ゴール シーク...","시나리오 관리자...":"シナリオの管理...","데이터 표...":"データ テーブル...","그룹":"グループ化","그룹 해제":"グループ解除",
   "인쇄 영역":"印刷範囲","머리글과 바닥글 (페이지 번호, 날짜, 시트 이름…)":"ヘッダーとフッター (ページ番号、日付、シート名…)","페이지 나누기":"改ページ",
@@ -663,7 +674,7 @@ Object.assign(simplifiedChinese, {
   "행 삽입":"插入行","열 삽입":"插入列","행 삭제":"删除行","열 삭제":"删除列","숨기기":"隐藏","숨기기 취소":"取消隐藏",
   "찾기...":"查找...","바꾸기...":"替换...","이동...":"定位...","시트 삽입 (Shift+F11)":"插入工作表 (Shift+F11)",
   "일러스트레이션":"插图","그림 삽입 (PNG, JPEG, GIF, BMP). 스크린샷은 Ctrl+V로 붙여넣을 수 있습니다.":"插入图片 (PNG、JPEG、GIF、BMP)。可使用 Ctrl+V 粘贴屏幕截图。",
-  "도형":"形状","링크":"链接","하이퍼링크 (Ctrl+K)":"超链接 (Ctrl+K)","CSV·Parquet을 데이터 시트로":"将 CSV/Parquet 导入数据工作表",
+  "도형":"形状","링크":"链接","하이퍼링크 (Ctrl+K)":"超链接 (Ctrl+K)","CSV·Parquet·Excel을 데이터 시트로":"将 CSV/Parquet/Excel 导入数据工作表",
   "빠른 채우기 (Ctrl+E)":"快速填充 (Ctrl+E)","중복된 항목 제거":"删除重复项","데이터 유효성 검사":"数据验证",
   "목표값 찾기...":"单变量求解...","시나리오 관리자...":"方案管理器...","데이터 표...":"模拟运算表...","그룹":"组合","그룹 해제":"取消组合",
   "인쇄 영역":"打印区域","머리글과 바닥글 (페이지 번호, 날짜, 시트 이름…)":"页眉和页脚（页码、日期、工作表名称…）","페이지 나누기":"分页符",
@@ -678,7 +689,7 @@ Object.assign(traditionalChinese, {
   "행 삽입":"插入列","열 삽입":"插入欄","행 삭제":"刪除列","열 삭제":"刪除欄","숨기기":"隱藏","숨기기 취소":"取消隱藏",
   "찾기...":"尋找...","바꾸기...":"取代...","이동...":"移至...","시트 삽입 (Shift+F11)":"插入工作表 (Shift+F11)",
   "일러스트레이션":"插圖","그림 삽입 (PNG, JPEG, GIF, BMP). 스크린샷은 Ctrl+V로 붙여넣을 수 있습니다.":"插入圖片 (PNG、JPEG、GIF、BMP)。可使用 Ctrl+V 貼上螢幕擷取畫面。",
-  "도형":"圖案","링크":"連結","하이퍼링크 (Ctrl+K)":"超連結 (Ctrl+K)","CSV·Parquet을 데이터 시트로":"將 CSV/Parquet 匯入資料工作表",
+  "도형":"圖案","링크":"連結","하이퍼링크 (Ctrl+K)":"超連結 (Ctrl+K)","CSV·Parquet·Excel을 데이터 시트로":"將 CSV/Parquet/Excel 匯入資料工作表",
   "빠른 채우기 (Ctrl+E)":"快速填入 (Ctrl+E)","중복된 항목 제거":"移除重複","데이터 유효성 검사":"資料驗證",
   "목표값 찾기...":"目標搜尋...","시나리오 관리자...":"案例管理員...","데이터 표...":"資料表...","그룹":"群組","그룹 해제":"取消群組",
   "인쇄 영역":"列印範圍","머리글과 바닥글 (페이지 번호, 날짜, 시트 이름…)":"頁首及頁尾（頁碼、日期、工作表名稱…）","페이지 나누기":"分頁符號",
@@ -715,6 +726,18 @@ Object.assign(simplifiedChinese, {
 });
 Object.assign(traditionalChinese, {
   "데이터 시트 이름 (수식에서 이름[열]로 참조합니다)\nCSV 파일은 UTF-8 또는 UTF-16 인코딩이어야 합니다.": "資料工作表名稱（在公式中以 name[column] 參照）\nCSV 檔案必須使用 UTF-8 或 UTF-16 編碼。",
+});
+Object.assign(english, {
+  "파일 인코딩":"File encoding","자동 감지":"Detect automatically","미리 보기":"Preview","글자가 깨져 보이면 다른 인코딩을 고르세요.":"If the text looks garbled, choose another encoding.","가져오기":"Import","CSV로 내보내기":"Export as CSV","권장":"recommended","내보내기":"Export","UTF-8은 Excel을 포함한 대부분의 프로그램에서 열립니다. 오래된 프로그램이 한글을 읽지 못할 때만 CP949를 고르세요.":"UTF-8 opens in most programs, Excel included. Choose a legacy encoding only for older programs that cannot read UTF-8."
+});
+Object.assign(japanese, {
+  "파일 인코딩":"ファイルのエンコード","자동 감지":"自動検出","미리 보기":"プレビュー","글자가 깨져 보이면 다른 인코딩을 고르세요.":"文字化けしている場合は、別のエンコードを選択してください。","가져오기":"インポート","CSV로 내보내기":"CSV にエクスポート","권장":"推奨","내보내기":"エクスポート","UTF-8은 Excel을 포함한 대부분의 프로그램에서 열립니다. 오래된 프로그램이 한글을 읽지 못할 때만 CP949를 고르세요.":"UTF-8 は Excel を含むほとんどのプログラムで開けます。UTF-8 を読めない古いプログラム向けの場合のみ Shift_JIS などを選択してください。"
+});
+Object.assign(simplifiedChinese, {
+  "파일 인코딩":"文件编码","자동 감지":"自动检测","미리 보기":"预览","글자가 깨져 보이면 다른 인코딩을 고르세요.":"如果文字显示为乱码，请选择其他编码。","가져오기":"导入","CSV로 내보내기":"导出为 CSV","권장":"推荐","내보내기":"导出","UTF-8은 Excel을 포함한 대부분의 프로그램에서 열립니다. 오래된 프로그램이 한글을 읽지 못할 때만 CP949를 고르세요.":"UTF-8 可在包括 Excel 在内的大多数程序中打开。仅当旧程序无法读取 UTF-8 时才选择 GBK 等编码。"
+});
+Object.assign(traditionalChinese, {
+  "파일 인코딩":"檔案編碼","자동 감지":"自動偵測","미리 보기":"預覽","글자가 깨져 보이면 다른 인코딩을 고르세요.":"如果文字顯示為亂碼，請選擇其他編碼。","가져오기":"匯入","CSV로 내보내기":"匯出為 CSV","권장":"建議","내보내기":"匯出","UTF-8은 Excel을 포함한 대부분의 프로그램에서 열립니다. 오래된 프로그램이 한글을 읽지 못할 때만 CP949를 고르세요.":"UTF-8 可在包括 Excel 在內的大多數程式中開啟。僅在舊程式無法讀取 UTF-8 時才選擇 Big5 等編碼。"
 });
 const dictionary: Record<Locale, Record<string, string>> = {
   "ko-KR": {},

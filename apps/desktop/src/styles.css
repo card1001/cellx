@@ -449,3 +449,16 @@ input.tiny { width: 28px !important; min-width: 0 !important; height: 20px; marg
 .data-bar input { max-width: min(240px, 42vw); }
 .statusbar { min-width: 0; }
 .statusbar .msg { min-width: 0; }
+.import-preview { font: 12px/1.45 ui-monospace, "Cascadia Mono", Consolas, "D2Coding", monospace; background: #fafafa; border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; max-height: 220px; min-height: 80px; overflow: auto; white-space: pre; margin: 4px 0; }
+.import-preview .error { color: #b91c1c; white-space: normal; }
+.modal-body .hint { color: #71717a; font-size: 12px; margin: 2px 0 6px; }
+
+/* Progress window for long data-sheet jobs */
+.job-progress { width: 420px; }
+.job-progress .job-label { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-progress .job-phase { font-size: 12px; }
+.job-bar { height: 10px; border: 1px solid var(--border); background: #f4f4f5; overflow: hidden; position: relative; }
+.job-bar > div { height: 100%; width: 0; background: #16a34a; transition: width .2s linear; }
+.job-bar.indeterminate > div { position: absolute; width: 30%; animation: job-slide 1.2s ease-in-out infinite; }
+@keyframes job-slide { from { left: -30%; } to { left: 100%; } }
+@media (prefers-reduced-motion: reduce) { .job-bar.indeterminate > div { animation: none; width: 100%; opacity: .4; } }

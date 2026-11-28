@@ -8,6 +8,7 @@ import type {
   SparklineGroup,
 } from "./api";
 import type { Range } from "./grid/model";
+import type { ImportChoice } from "./components/DataDialogs";
 
 export type Dialog =
   | { kind: "prompt"; title: string; label: string; value: string; resolve(v: string | null): void }
@@ -39,6 +40,8 @@ export type Dialog =
   | { kind: "print" }
   | { kind: "subtotal"; range: Range }
   | { kind: "createTable"; range: Range; header: boolean; style: string }
+  | { kind: "importData"; path: string; suggested: string; csv: boolean; spreadsheet: boolean; resolve(v: ImportChoice | null): void }
+  | { kind: "exportEncoding"; resolve(v: string | null | undefined): void }
   | { kind: "protect" }
   | { kind: "unprotect" }
   | null;

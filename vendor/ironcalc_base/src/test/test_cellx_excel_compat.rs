@@ -168,3 +168,64 @@ fn relative_names_and_their_dependencies() {
     assert_eq!(m._get_text("B3"), *"8");
     assert_eq!(m._get_text("B4"), *"12");
 }
+
+#[test]
+fn times_and_date_times_typed_into_cells() {
+    let mut model = new_empty_model();
+    model.set_user_input(0, 1, 1, "13:30".to_string()).unwrap();
+    model.set_user_input(0, 2, 1, "6:05:10".to_string()).unwrap();
+    model.set_user_input(0, 3, 1, "1:30 PM".to_string()).unwrap();
+    model.set_user_input(0, 4, 1, "2025-05-04 13:30".to_string()).unwrap();
+    model.set_user_input(0, 5, 1, "2025-13-04 13:30".to_string()).unwrap();
+    model._set("B1", "=A1*24&\"\"");
+    model._set("B3", "=A3*24&\"\"");
+    model._set("B4", "=A4&\"\"");
+    model._set("B5", "=ISTEXT(A5)");
+    model.evaluate();
+    assert_eq!(model.get_style_for_cell(0, 1, 1).unwrap().num_fmt, "h:mm");
+    assert_eq!(model.get_style_for_cell(0, 2, 1).unwrap().num_fmt, "h:mm:ss");
+    assert_eq!(model.get_style_for_cell(0, 3, 1).unwrap().num_fmt, "h:mm AM/PM");
+    assert_eq!(model.get_style_for_cell(0, 4, 1).unwrap().num_fmt, "yyyy-mm-dd h:mm");
+    assert_eq!(model._get_text("B1"), *"13.5");
+    assert_eq!(model._get_text("B3"), *"13.5");
+    assert_eq!(model._get_text("A1"), *"13:30");
+    assert_eq!(model._get_text("A3"), *"1:30 PM");
+    assert_eq!(model._get_text("A4"), *"2025-05-04 13:30");
+    assert_eq!(model._get_text("B4"), *"45781.5625");
+    assert_eq!(model._get_text("B5"), *"TRUE");
+}
+
+#[test]
+fn t_inverse_in_the_far_tails_does_not_stop_the_engine() {
+    // T_INV_issue_1807.xlsx: statrs panicked on T.INV(1E-300,1).
+    let mut model = new_empty_model();
+    model._set("A1", "=T.INV(1E-300,1)");
+    model._set("A2", "=T.INV(0.975,1)");
+    model._set("A3", "=T.INV(0.975,10)");
+    model._set("A4", "=T.INV(0,1)");
+    model._set("A5", "=T.INV(0,2)");
+    model._set("A6", "=T.INV.2T(1.1,1)");
+    model._set("A7", "=T.INV.2T(0.05,1.9)");
+    model._set("A8", "=TINV(0,1)");
+    model._set("A9", "=T.INV(0.5,10000000000)");
+    model._set("A10", "=T.INV(1E-300,5)");
+    model._set("A11", "=BETA.INV(1E-300,0.001,1000)");
+    model._set("B1", "=ROUND(A1/-3.183098861837907E+299,12)");
+    model._set("B2", "=ROUND(A2-12.706204736174692,9)");
+    model._set("B3", "=ROUND(A3-2.2281388519862744,9)");
+    model._set("B6", "=ROUND(A6+0.15838444032453658,12)");
+    model._set("B7", "=ROUND(A7-12.706204736174703,9)");
+    model.evaluate();
+    assert_eq!(model._get_text("B1"), *"1");
+    assert_eq!(model._get_text("B2"), *"0");
+    assert_eq!(model._get_text("B3"), *"0");
+    assert_eq!(model._get_text("A4"), *"#DIV/0!");
+    assert_eq!(model._get_text("A5"), *"#NUM!");
+    assert_eq!(model._get_text("B6"), *"0");
+    assert_eq!(model._get_text("B7"), *"0");
+    assert_eq!(model._get_text("A8"), *"#DIV/0!");
+    assert_eq!(model._get_text("A9"), *"0");
+    // No crash, whatever the value.
+    let _ = model._get_text("A10");
+    let _ = model._get_text("A11");
+}

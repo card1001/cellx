@@ -32,7 +32,7 @@ pub struct TransformJobSnapshot {
     pub error: Option<String>,
 }
 
-struct JobControl {
+pub(crate) struct JobControl {
     snapshot: TransformJobSnapshot,
     cancelled: Arc<AtomicBool>,
     interrupt: Arc<dyn Fn() + Send + Sync>,

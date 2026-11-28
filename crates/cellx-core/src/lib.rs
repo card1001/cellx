@@ -13,6 +13,7 @@ pub mod data;
 pub mod datatools;
 pub mod error;
 pub mod extras;
+pub mod job;
 pub mod objects;
 pub mod outline;
 pub mod audit;
