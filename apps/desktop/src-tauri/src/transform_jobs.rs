@@ -125,7 +125,7 @@ pub fn start_transform_job(
         .spawn(move || {
             update_job(&worker_jobs, &worker_id, |job| {
                 job.status = "running".into();
-                job.phase = "데이터 변환 실행 중".into();
+                job.phase = if incremental { "증분 데이터 처리 중".into() } else { "전체 데이터 변환 중".into() };
             });
 
             let result = if cancelled.load(Ordering::Acquire) {
