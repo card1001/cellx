@@ -4138,8 +4138,13 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
     setSaved(list);
     setSelectedId(id);
   });
-  const runPipeline = async (pipelineId: string, outputTable: string, incremental = false) => {
-    const started = await api.startTransformJob(pipelineId, outputTable, incremental);
+  const runPipeline = async (
+    pipelineId: string,
+    outputTable: string,
+    incremental = false,
+    pipelineOverride: TransformPipeline | null = null,
+  ) => {
+    const started = await api.startTransformJob(pipelineId, outputTable, incremental, pipelineOverride);
     setJob(started);
     let latest = started;
     while (latest.status === "queued" || latest.status === "running" || latest.status === "cancelling") {
@@ -4386,8 +4391,8 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
               <td>{item.output_table}</td><td>{item.incremental ? "증분" : "전체"}</td><td>{item.status}</td>
               <td>{(item.result_rows ?? item.result?.rows)?.toLocaleString() ?? "—"}</td>
               <td>{item.error ?? "—"}</td>
-              <td><button disabled={busy || item.status === "queued" || item.status === "running" || item.status === "cancelling" || !saved.some((entry) => entry.id === item.pipeline_id)}
-                onClick={() => void runBusy(() => runPipeline(item.pipeline_id, item.output_table, item.incremental))}>다시 실행</button></td>
+              <td><button disabled={busy || item.status === "queued" || item.status === "running" || item.status === "cancelling" || !item.pipeline}
+                onClick={() => void runBusy(() => runPipeline(item.pipeline_id, item.output_table, item.incremental, item.pipeline))}>다시 실행</button></td>
             </tr>)}</tbody>
           </table>
         </div>
