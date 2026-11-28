@@ -3981,6 +3981,9 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   const [columnsText, setColumnsText] = useState(props.tables[0]?.columns.map((c) => c.name).join(", ") ?? "");
   const [filterColumn, setFilterColumn] = useState("");
   const [filterValue, setFilterValue] = useState("");
+  const [filterOperator, setFilterOperator] = useState<import("./api").CompareOperator>("equal");
+  const [filterValueType, setFilterValueType] = useState<"text" | "number" | "boolean">("text");
+  const [filterMode, setFilterMode] = useState<"compare" | "is_null" | "is_not_null">("compare");
   const [joinTable, setJoinTable] = useState("");
   const [joinLeft, setJoinLeft] = useState("");
   const [joinRight, setJoinRight] = useState("");
@@ -4050,11 +4053,25 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   const buildPipeline = (): TransformPipeline => {
     if (!source) throw new Error("원본 데이터 시트를 선택하세요.");
     const steps: TransformPipeline["steps"] = [];
-    if (filterColumn && filterValue.trim()) {
-      steps.push({
-        type: "filter",
-        predicate: { op: "compare", column: filterColumn, operator: "equal", value: { type: "text", value: filterValue } },
-      });
+    if (filterColumn && (filterMode !== "compare" || filterValue.trim())) {
+      const predicate: import("./api").FilterExpr = filterMode === "is_null"
+        ? { op: "is_null", column: filterColumn, negated: false }
+        : filterMode === "is_not_null"
+          ? { op: "is_null", column: filterColumn, negated: true }
+          : {
+              op: "compare",
+              column: filterColumn,
+              operator: filterOperator,
+              value: filterValueType === "number"
+                ? { type: "number", value: Number(filterValue) }
+                : filterValueType === "boolean"
+                  ? { type: "boolean", value: filterValue === "true" }
+                  : { type: "text", value: filterValue },
+            };
+      if (filterMode === "compare" && filterValueType === "number" && !Number.isFinite(Number(filterValue))) {
+        throw new Error("숫자 비교 값은 유효한 숫자여야 합니다.");
+      }
+      steps.push({ type: "filter", predicate });
     }
     if (joinTable) {
       if (!joinLeft || !joinRight) throw new Error("조인 기준 열을 모두 선택하세요.");
@@ -4148,10 +4165,20 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
     const select = item.pipeline.steps.find((step) => step.type === "select_columns");
     if (select?.type === "select_columns") setColumnsText(select.columns.join(", "));
     const filter = item.pipeline.steps.find((step) => step.type === "filter");
-    if (filter?.type === "filter" && filter.predicate.op === "compare" && filter.predicate.value.type === "text") {
+    if (filter?.type === "filter" && filter.predicate.op === "compare") {
+      setFilterMode("compare");
       setFilterColumn(filter.predicate.column);
-      setFilterValue(filter.predicate.value.value);
+      setFilterOperator(filter.predicate.operator);
+      setFilterValueType(filter.predicate.value.type);
+      setFilterValue(String(filter.predicate.value.value));
+    } else if (filter?.type === "filter" && filter.predicate.op === "is_null") {
+      setFilterColumn(filter.predicate.column);
+      setFilterMode(filter.predicate.negated ? "is_not_null" : "is_null");
+      setFilterValue("");
     } else {
+      setFilterMode("compare");
+      setFilterOperator("equal");
+      setFilterValueType("text");
       setFilterValue("");
     }
     const join = item.pipeline.steps.find((step) => step.type === "join");
@@ -4225,14 +4252,55 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
       <label>출력 열 (쉼표로 구분)
         <input value={columnsText} onChange={(e) => setColumnsText(e.target.value)} placeholder="열 이름, 열 이름" />
       </label>
-      <label>같음 조건 열
-        <select value={filterColumn} onChange={(e) => setFilterColumn(e.target.value)}>
-          {(current?.columns ?? []).map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
-        </select>
-      </label>
-      <label>필터 값
-        <input value={filterValue} onChange={(e) => setFilterValue(e.target.value)} placeholder="비우면 필터 미적용" />
-      </label>
+      <details>
+        <summary>고급 필터</summary>
+        <label>조건 열
+          <select value={filterColumn} onChange={(e) => setFilterColumn(e.target.value)}>
+            <option value="">필터 사용 안 함</option>
+            {(current?.columns ?? []).map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+          </select>
+        </label>
+        <label>조건 유형
+          <select value={filterMode} onChange={(e) => setFilterMode(e.target.value as typeof filterMode)}>
+            <option value="compare">값 비교</option>
+            <option value="is_null">NULL인 값</option>
+            <option value="is_not_null">NULL이 아닌 값</option>
+          </select>
+        </label>
+        {filterMode === "compare" && <>
+          <label>비교 연산자
+            <select value={filterOperator} onChange={(e) => setFilterOperator(e.target.value as import("./api").CompareOperator)}>
+              <option value="equal">같음 (=)</option>
+              <option value="not_equal">다름 (≠)</option>
+              <option value="greater_than">초과 (&gt;)</option>
+              <option value="greater_than_or_equal">이상 (≥)</option>
+              <option value="less_than">미만 (&lt;)</option>
+              <option value="less_than_or_equal">이하 (≤)</option>
+            </select>
+          </label>
+          <label>값 형식
+            <select value={filterValueType} onChange={(e) => {
+              const next = e.target.value as typeof filterValueType;
+              setFilterValueType(next);
+              setFilterValue(next === "boolean" ? "true" : "");
+            }}>
+              <option value="text">문자열</option>
+              <option value="number">숫자</option>
+              <option value="boolean">논리값</option>
+            </select>
+          </label>
+          {filterValueType === "boolean"
+            ? <label>필터 값
+                <select value={filterValue} onChange={(e) => setFilterValue(e.target.value)}>
+                  <option value="true">TRUE</option><option value="false">FALSE</option>
+                </select>
+              </label>
+            : <label>필터 값
+                <input type={filterValueType === "number" ? "number" : "text"} value={filterValue}
+                  onChange={(e) => setFilterValue(e.target.value)} placeholder="비우면 필터 미적용" />
+              </label>}
+        </>}
+      </details>
       <details>
         <summary>테이블 조인</summary>
         <label>조인할 데이터 시트
