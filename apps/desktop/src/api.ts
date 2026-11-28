@@ -76,6 +76,25 @@ export interface EvalStep {
   value: string;
 }
 
+export interface FormulaNode {
+  id: string;
+  sheet: number;
+  row: number;
+  col: number;
+  formula: string;
+}
+
+export interface FormulaEdge {
+  from: string;
+  to: string;
+}
+
+export interface FormulaDependencyGraph {
+  nodes: FormulaNode[];
+  edges: FormulaEdge[];
+  truncated: boolean;
+}
+
 export type ShapeKind =
   | "rect"
   | "roundRect"
@@ -507,7 +526,13 @@ export type TransformStep =
   | { type: "join"; table: string; left_column: string; right_column: string; kind: JoinKind; suffix: string }
   | { type: "group_by"; columns: string[]; aggregates: AggregateSpec[] };
 export interface TransformPipeline { source_table: string; steps: TransformStep[] }
-export interface SavedPipeline { id: string; name: string; pipeline: TransformPipeline }
+export interface SavedPipeline {
+  id: string;
+  name: string;
+  pipeline: TransformPipeline;
+  last_incremental_source_rid?: number | null;
+  incremental_output_table?: string | null;
+}
 export interface SavedConnector {
   id: string; name: string; path: string; table_name: string; locale: string;
   schema: [string, string][];
@@ -531,6 +556,13 @@ export interface TableProfile {
 }
 export interface TransformJobSnapshot {
   id: string;
+  pipeline_id: string;
+  output_table: string;
+  incremental: boolean;
+  pipeline: TransformPipeline | null;
+  started_at_ms: number;
+  finished_at_ms: number | null;
+  result_rows: number | null;
   status: "queued" | "running" | "cancelling" | "completed" | "cancelled" | "failed";
   phase: string;
   result: TableInfo | null;
@@ -637,6 +669,7 @@ export const api = {
   deleteCustomView: (name: string) => invoke<void>("delete_custom_view", { name }),
   showCustomView: (name: string) => invoke<number>("show_custom_view", { name }),
   formulaSteps: (sheet: number, row: number, col: number) => invoke<EvalStep[]>("formula_steps", { sheet, row, col }),
+  formulaDependencyGraph: () => invoke<FormulaDependencyGraph>("formula_dependency_graph"),
   cellDetail: (sheet: number, row: number, col: number) => invoke<CellDetail>("cell_detail", { sheet, row, col }),
   selectionStats: (sheet: number, range: Range) => invoke<SelectionStats>("selection_stats", { sheet, range }),
   navigateEdge: (sheet: number, row: number, col: number, dir: Direction) =>
@@ -792,8 +825,12 @@ export const api = {
   previewTransform: (pipeline: TransformPipeline) => invoke<TransformPreview>("preview_transform", { pipeline }),
   executeTransformPipeline: (id: string, outputTable: string) =>
     invoke<TableInfo>("execute_transform_pipeline", { id, outputTable }),
-  startTransformJob: (pipelineId: string, outputTable: string) =>
-    invoke<TransformJobSnapshot>("start_transform_job", { pipelineId, outputTable }),
+  startTransformJob: (
+    pipelineId: string,
+    outputTable: string,
+    incremental = false,
+    pipelineOverride: TransformPipeline | null = null,
+  ) => invoke<TransformJobSnapshot>("start_transform_job", { pipelineId, outputTable, incremental, pipelineOverride }),
   getTransformJob: (id: string) => invoke<TransformJobSnapshot>("get_transform_job", { id }),
   listTransformJobs: () => invoke<TransformJobSnapshot[]>("list_transform_jobs"),
   cancelTransformJob: (id: string) => invoke<TransformJobSnapshot>("cancel_transform_job", { id }),
@@ -805,6 +842,9 @@ export const api = {
   deleteDataConnector: (id: string) => invoke<SavedConnector[]>("delete_data_connector", { id }),
   dataPage: (table: string, offset: number, limit: number, sort: Sort | null, filters: ColumnFilter[]) =>
     invoke<Page>("data_page", { table, offset, limit, sort, filters }),
+  /** Large-table sequential scan; cursor is the last stable _rid from the previous page. */
+  dataPageAfterRid: (table: string, afterRid: number | null, limit: number, filters: ColumnFilter[]) =>
+    invoke<Page>("data_page_after_rid", { table, afterRid, limit, filters }),
   updateDataCell: (table: string, rid: number, column: string, text: string) =>
     invoke<RecalcStats>("update_data_cell", { table, rid, column, text }),
   exportTable: (table: string, path: string, locale: string, encoding: string | null = null) =>

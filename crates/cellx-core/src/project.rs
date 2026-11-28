@@ -29,6 +29,16 @@ pub struct SavedPipeline {
     pub id: String,
     pub name: String,
     pub pipeline: TransformPipeline,
+    /// Last processed source row ID for append-only incremental execution.
+    #[serde(default)]
+    pub last_incremental_source_rid: Option<i64>,
+    /// Output table associated with the incremental checkpoint.
+    #[serde(default)]
+    pub incremental_output_table: Option<String>,
+    /// `DataStore::source_signature` at the checkpoint; a mismatch means the
+    /// source was replaced or edited and the next run rebuilds the output.
+    #[serde(default)]
+    pub incremental_source_signature: Option<String>,
 }
 
 /// A reusable local file source. Paths are intentionally local to the machine
@@ -46,6 +56,26 @@ pub struct SavedConnector {
     /// Metadata fingerprint (file size + modification time); not a content hash.
     #[serde(default)]
     pub fingerprint: String,
+}
+
+/// Persisted summary of a transformation execution. Large result data stays in DuckDB;
+/// this record stores only metadata needed for history and reruns.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SavedTransformRun {
+    pub id: String,
+    pub pipeline_id: String,
+    pub output_table: String,
+    /// Exact recipe used by this run, retained so a rerun is reproducible.
+    #[serde(default)]
+    pub pipeline: Option<TransformPipeline>,
+    pub status: String,
+    pub phase: String,
+    #[serde(default)]
+    pub incremental: bool,
+    pub result_rows: Option<u64>,
+    pub error: Option<String>,
+    pub started_at_ms: u64,
+    pub finished_at_ms: Option<u64>,
 }
 
 pub const FORMAT_VERSION: u32 = 1;
@@ -92,6 +122,16 @@ pub fn save_project_with_assets(
     pipelines: &[SavedPipeline],
     connectors: &[SavedConnector],
 ) -> Result<()> {
+    save_project_with_execution_history(wb, path, pipelines, connectors, &[])
+}
+
+pub fn save_project_with_execution_history(
+    wb: &mut Workbook,
+    path: &Path,
+    pipelines: &[SavedPipeline],
+    connectors: &[SavedConnector],
+    transform_runs: &[SavedTransformRun],
+) -> Result<()> {
     if wb.data_path().is_none() {
         let dir = new_work_dir()?;
         wb.persist_data_to(&dir.join("data.duckdb"))?;
@@ -130,6 +170,9 @@ pub fn save_project_with_assets(
         zip_err(zip.start_file("connectors.json", opts))?;
         zip.write_all(&serde_json::to_vec_pretty(connectors).map_err(json_err)?)?;
 
+        zip_err(zip.start_file("transform_runs.json", opts))?;
+        zip.write_all(&serde_json::to_vec_pretty(transform_runs).map_err(json_err)?)?;
+
         let bridges: Vec<StoredBridge> = wb
             .bridges()
             .iter()
@@ -162,6 +205,11 @@ pub fn open_project_with_pipelines(path: &Path) -> Result<(Workbook, Vec<SavedPi
 }
 
 pub fn open_project_with_assets(path: &Path) -> Result<(Workbook, Vec<SavedPipeline>, Vec<SavedConnector>)> {
+    let (wb, pipelines, connectors, _) = open_project_with_execution_history(path)?;
+    Ok((wb, pipelines, connectors))
+}
+
+pub fn open_project_with_execution_history(path: &Path) -> Result<(Workbook, Vec<SavedPipeline>, Vec<SavedConnector>, Vec<SavedTransformRun>)> {
     let file = File::open(path)?;
     let mut zip = zip_err(zip::ZipArchive::new(file))?;
 
@@ -205,7 +253,7 @@ pub fn open_project_with_assets(path: &Path) -> Result<(Workbook, Vec<SavedPipel
         wb.set_pivots(pivots);
     }
     wb.recalc()?;
-    // Pipelines were added after the initial .cellx format; older projects remain valid.
+    // Older projects may not contain pipelines, connectors, or run history.
     let pipelines = if zip.file_names().any(|name| name.is_ok_and(|entry| entry == "pipelines.json")) {
         serde_json::from_slice(&read_entry(&mut zip, "pipelines.json")?).map_err(json_err)?
     } else {
@@ -216,7 +264,12 @@ pub fn open_project_with_assets(path: &Path) -> Result<(Workbook, Vec<SavedPipel
     } else {
         Vec::new()
     };
-    Ok((wb, pipelines, connectors))
+    let transform_runs = if zip.file_names().any(|name| name.is_ok_and(|entry| entry == "transform_runs.json")) {
+        serde_json::from_slice(&read_entry(&mut zip, "transform_runs.json")?).map_err(json_err)?
+    } else {
+        Vec::new()
+    };
+    Ok((wb, pipelines, connectors, transform_runs))
 }
 
 // Upper bounds for untrusted project archives. These limits are intentionally
@@ -311,6 +364,9 @@ mod tests {
                 source_table: "sales".into(),
                 steps: vec![],
             },
+            last_incremental_source_rid: Some(2),
+            incremental_output_table: Some("clean_sales".into()),
+            incremental_source_signature: None,
         };
         let saved_connector = SavedConnector {
             id: "connector-1".into(),
@@ -321,11 +377,31 @@ mod tests {
             schema: vec![("region".into(), "VARCHAR".into()), ("amount".into(), "DOUBLE".into())],
             fingerprint: "123:456".into(),
         };
-        save_project_with_assets(&mut wb, &path, &[saved_pipeline.clone()], &[saved_connector.clone()]).unwrap();
+        let saved_run = SavedTransformRun {
+            id: "transform-1".into(),
+            pipeline_id: "pipeline-1".into(),
+            output_table: "clean_sales".into(),
+            pipeline: Some(saved_pipeline.pipeline.clone()),
+            status: "completed".into(),
+            phase: "완료".into(),
+            incremental: true,
+            result_rows: Some(2),
+            error: None,
+            started_at_ms: 1_700_000_000_000,
+            finished_at_ms: Some(1_700_000_001_000),
+        };
+        save_project_with_execution_history(
+            &mut wb,
+            &path,
+            &[saved_pipeline.clone()],
+            &[saved_connector.clone()],
+            &[saved_run.clone()],
+        ).unwrap();
 
-        let (mut reopened, pipelines, connectors) = open_project_with_assets(&path).unwrap();
+        let (mut reopened, pipelines, connectors, runs) = open_project_with_execution_history(&path).unwrap();
         assert_eq!(pipelines, vec![saved_pipeline]);
         assert_eq!(connectors, vec![saved_connector]);
+        assert_eq!(runs, vec![saved_run]);
         assert_eq!(reopened.value(0, 1, 2).unwrap(), Scalar::Number(40.0));
         assert_eq!(reopened.input(0, 1, 1).unwrap(), "=SUM(sales[v])");
         // The data sheet came back and the bridge still works against it.

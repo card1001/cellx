@@ -23,7 +23,107 @@ pub struct EvalStep {
     pub value: String,
 }
 
+/// One formula cell in a bounded dependency-graph snapshot.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct FormulaNode {
+    pub id: String,
+    pub sheet: u32,
+    pub row: i32,
+    pub col: i32,
+    pub formula: String,
+}
+
+/// A directed edge from a formula precedent to the formula that consumes it.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct FormulaEdge {
+    pub from: String,
+    pub to: String,
+}
+
+/// A bounded snapshot backed by the calculation engine's dependency index.
+#[derive(Serialize, Clone, Debug, PartialEq)]
+pub struct FormulaDependencyGraph {
+    pub nodes: Vec<FormulaNode>,
+    pub edges: Vec<FormulaEdge>,
+    pub truncated: bool,
+}
+
 impl Workbook {
+    /// Returns a bounded formula dependency graph using IronCalc's parsed
+    /// dependency index. Range precedents are expanded only up to the edge cap.
+    pub fn formula_dependency_graph(&self) -> Result<FormulaDependencyGraph> {
+        use std::collections::HashMap;
+
+        const MAX_NODES: usize = 5_000;
+        const MAX_EDGES: usize = 20_000;
+        let mut nodes = Vec::new();
+        let mut truncated = false;
+        let cells = self.model().get_all_cells();
+
+        // Inspect one formula beyond the output cap so an exactly-full graph
+        // is not incorrectly reported as truncated.
+        for cell in cells {
+            if let Some(formula) = self.model().get_cell_formula(cell.index, cell.row, cell.column)? {
+                if nodes.len() == MAX_NODES {
+                    truncated = true;
+                    break;
+                }
+                nodes.push(FormulaNode {
+                    id: format!("{}!{}:{}", cell.index, cell.row, cell.column),
+                    sheet: cell.index,
+                    row: cell.row,
+                    col: cell.column,
+                    formula,
+                });
+            }
+        }
+
+        let node_ids = nodes.iter().map(|node| ((node.sheet, node.row, node.col), node.id.clone()))
+            .collect::<HashMap<_, _>>();
+        let mut edges = Vec::new();
+
+        // A precedent range larger than the number of formulas (A:A is a
+        // million cells) is matched against the formula list instead of
+        // being walked cell by cell.
+        let mut by_sheet: HashMap<u32, Vec<&FormulaNode>> = HashMap::new();
+        for node in &nodes {
+            by_sheet.entry(node.sheet).or_default().push(node);
+        }
+        'formula: for node in &nodes {
+            for area in self.model().cell_precedents(node.sheet, node.row, node.col) {
+                let cells = (i64::from(area.row2) - i64::from(area.row1) + 1)
+                    .saturating_mul(i64::from(area.column2) - i64::from(area.column1) + 1);
+                let mut sources: Vec<&String> = Vec::new();
+                if cells > nodes.len() as i64 {
+                    for other in by_sheet.get(&area.sheet).into_iter().flatten() {
+                        if (area.row1..=area.row2).contains(&other.row)
+                            && (area.column1..=area.column2).contains(&other.col)
+                        {
+                            sources.push(&other.id);
+                        }
+                    }
+                } else {
+                    for row in area.row1..=area.row2 {
+                        for col in area.column1..=area.column2 {
+                            if let Some(from) = node_ids.get(&(area.sheet, row, col)) {
+                                sources.push(from);
+                            }
+                        }
+                    }
+                }
+                for from in sources {
+                    if edges.len() >= MAX_EDGES {
+                        truncated = true;
+                        break 'formula;
+                    }
+                    edges.push(FormulaEdge { from: from.clone(), to: node.id.clone() });
+                }
+            }
+        }
+
+        Ok(FormulaDependencyGraph { nodes, edges, truncated })
+    }
+
     /// The viewport with formulas shown in place of their values (수식 표시,
     /// Ctrl+`): formula cells show their input, left-aligned as text.
     pub fn viewport_formulas(&self, sheet: u32, row0: i32, col0: i32, row1: i32, col1: i32) -> Result<crate::workbook::Viewport> {
@@ -68,6 +168,48 @@ impl Workbook {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dependency_graph_links_formula_precedents() {
+        let mut wb = Workbook::new().unwrap();
+        wb.set_input(0, 1, 1, "10").unwrap();
+        wb.set_input(0, 1, 2, "=A1*2").unwrap();
+        wb.set_input(0, 1, 3, "=B1+1").unwrap();
+
+        let graph = wb.formula_dependency_graph().unwrap();
+        assert_eq!(graph.nodes.len(), 2);
+        assert!(graph.edges.iter().any(|edge| edge.from == "0!1:2" && edge.to == "0!1:3"));
+        assert!(!graph.truncated);
+    }
+
+    #[test]
+    fn dependency_graph_handles_whole_column_references_quickly() {
+        let mut wb = Workbook::new().unwrap();
+        for r in 1..=200 {
+            wb.set_input(0, r, 1, &format!("={r}*2")).unwrap();
+            wb.set_input(0, r, 2, "=SUM(A:A)").unwrap();
+        }
+        let start = std::time::Instant::now();
+        let graph = wb.formula_dependency_graph().unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "{:?}", start.elapsed());
+        assert_eq!(graph.nodes.len(), 400);
+        assert_eq!(graph.edges.len(), 20_000); // the edge cap
+        assert!(graph.truncated);
+    }
+
+    #[test]
+    fn dependency_graph_expands_formula_ranges_into_edges() {
+        let mut wb = Workbook::new().unwrap();
+        wb.set_input(0, 1, 1, "=1+1").unwrap();
+        wb.set_input(0, 2, 1, "=2+2").unwrap();
+        wb.set_input(0, 1, 2, "=SUM(A1:A2)").unwrap();
+
+        let graph = wb.formula_dependency_graph().unwrap();
+        assert_eq!(graph.nodes.len(), 3);
+        assert!(graph.edges.iter().any(|edge| edge.from == "0!1:1" && edge.to == "0!1:2"));
+        assert!(graph.edges.iter().any(|edge| edge.from == "0!2:1" && edge.to == "0!1:2"));
+        assert!(!graph.truncated);
+    }
 
     #[test]
     fn steps_and_traces() {

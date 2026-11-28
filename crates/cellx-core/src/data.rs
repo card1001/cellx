@@ -16,7 +16,7 @@ use serde::Serialize;
 use crate::error::{CellxError, Result};
 use crate::value::{from_duckdb, Scalar};
 use crate::job::{JobMonitor, JobPhase};
-use crate::transform::{TransformPipeline, TransformPlan, TransformValue};
+use crate::transform::{TransformPipeline, TransformPlan, TransformStep, TransformValue};
 
 mod spreadsheet;
 pub use spreadsheet::{is_spreadsheet, spreadsheet_sheets, SPREADSHEET_EXTENSIONS};
@@ -131,6 +131,18 @@ struct PageView {
 }
 
 const PAGE_VIEW_TABLE: &str = "_cellx_page_view";
+
+/// The outcome of an incremental transformation run.
+#[derive(Debug, Clone)]
+pub struct IncrementalRun {
+    pub table: TableInfo,
+    /// Largest source `_rid` processed; the next run starts after it.
+    pub watermark: i64,
+    /// `source_signature` at the watermark, to validate the next run.
+    pub signature: String,
+    /// The output was rebuilt from the whole source (first run, or the source changed).
+    pub full: bool,
+}
 
 pub struct DataStore {
     conn: Connection,
@@ -682,6 +694,115 @@ impl DataStore {
         self.table_info(output_table)
     }
 
+    /// Returns the largest stable source row ID. CellX imports assign monotonically
+    /// increasing _rid values, which are used as the append-only incremental watermark.
+    pub fn max_row_id(&self, table: &str) -> Result<i64> {
+        if !self.has_table(table) {
+            return Err(CellxError::UnknownTable(table.to_string()));
+        }
+        let value: i64 = self.conn.query_row(
+            &format!("SELECT COALESCE(MAX({}), 0)::BIGINT FROM {}", quote_ident("_rid"), quote_ident(table)),
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(value)
+    }
+
+    /// A signature of the rows of `table` with `_rid <= up_to_rid`: their count
+    /// and the XOR of their row hashes. An incremental checkpoint is only valid
+    /// while this is unchanged — re-importing the source renumbers `_rid`, and
+    /// an edit changes a row that was already processed.
+    pub fn source_signature(&self, table: &str, up_to_rid: i64) -> Result<String> {
+        if !self.has_table(table) {
+            return Err(CellxError::UnknownTable(table.to_string()));
+        }
+        let (count, digest): (i64, String) = self.conn.query_row(
+            &format!(
+                "SELECT count(*)::BIGINT, CAST(COALESCE(bit_xor(hash(s)), 0) AS VARCHAR) FROM {} AS s WHERE s._rid <= ?",
+                quote_ident(table)
+            ),
+            [up_to_rid],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(format!("{up_to_rid}:{count}:{digest}"))
+    }
+
+    /// Appends only rows with source _rid greater than the saved watermark.
+    ///
+    /// Incremental execution is intentionally restricted to row-preserving,
+    /// append-only pipelines. Joins, aggregates, sorting, and limits need a full
+    /// recomputation because a new source row can change existing output rows.
+    pub fn execute_transform_incremental(
+        &mut self,
+        output_table: &str,
+        pipeline: &TransformPipeline,
+        last_source_rid: Option<i64>,
+        last_signature: Option<&str>,
+    ) -> Result<IncrementalRun> {
+        if !is_valid_table_name(output_table) {
+            return Err(CellxError::InvalidName(output_table.to_string()));
+        }
+        if output_table.eq_ignore_ascii_case(&pipeline.source_table)
+            || pipeline.required_join_tables().iter().any(|table| output_table.eq_ignore_ascii_case(table))
+        {
+            return Err(CellxError::Bridge("변환 결과를 원본 또는 조인 입력 데이터 시트에 덮어쓸 수 없습니다".into()));
+        }
+        if pipeline.steps.iter().any(|step| matches!(
+            step,
+            TransformStep::Join { .. } | TransformStep::GroupBy { .. } |
+            TransformStep::Sort { .. } | TransformStep::Limit { .. }
+        )) {
+            return Err(CellxError::Bridge(
+                "증분 실행은 행 단위 필터·열 선택·이름 변경·형 변환만 지원합니다. 조인, 집계, 정렬, 행 제한은 전체 실행을 사용하세요".into()
+            ));
+        }
+        let source_watermark = self.max_row_id(&pipeline.source_table)?;
+        // The rows already processed must be exactly as they were; otherwise
+        // the source was replaced or edited and the output is rebuilt.
+        let checkpoint = match (last_source_rid, last_signature) {
+            (Some(rid), Some(signature))
+                if self.has_table(output_table)
+                    && self.source_signature(&pipeline.source_table, rid)? == signature =>
+            {
+                Some(rid)
+            }
+            _ => None,
+        };
+        let Some(last_rid) = checkpoint else {
+            let table = self.execute_transform(output_table, pipeline)?;
+            let signature = self.source_signature(&pipeline.source_table, source_watermark)?;
+            return Ok(IncrementalRun { table, watermark: source_watermark, signature, full: true });
+        };
+        if !self.has_table(output_table) {
+            return Err(CellxError::Bridge("증분 실행 대상 시트가 없습니다. 먼저 전체 실행으로 기준 데이터를 생성하세요".into()));
+        }
+        let plan = self.plan_transform(pipeline)?;
+        let existing = self.table_info(output_table)?;
+        let expected = plan.output_columns.iter().map(|name| name.to_ascii_lowercase()).collect::<Vec<_>>();
+        let actual = existing.columns.iter().map(|column| column.name.to_ascii_lowercase()).collect::<Vec<_>>();
+        if expected != actual {
+            return Err(CellxError::Bridge("증분 실행 대상 시트의 열 구조가 현재 파이프라인과 다릅니다. 전체 실행으로 다시 생성하세요".into()));
+        }
+        let mut parameters = plan.parameters.iter().map(|value| match value {
+            TransformValue::Text(value) => duckdb::types::Value::Text(value.clone()),
+            TransformValue::Number(value) => duckdb::types::Value::Double(*value),
+            TransformValue::Boolean(value) => duckdb::types::Value::Boolean(*value),
+        }).collect::<Vec<_>>();
+        parameters.push(duckdb::types::Value::BigInt(last_rid));
+        let sql = format!(
+            "INSERT INTO {} SELECT * FROM ({}) AS {} WHERE {} > ?",
+            quote_ident(output_table),
+            plan.sql,
+            quote_ident("_cellx_incremental"),
+            quote_ident("_rid")
+        );
+        self.conn.execute(&sql, params_from_iter(parameters.iter()))?;
+        self.touch(output_table);
+        let table = self.table_info(output_table)?;
+        let signature = self.source_signature(&pipeline.source_table, source_watermark)?;
+        Ok(IncrementalRun { table, watermark: source_watermark, signature, full: false })
+    }
+
     /// Runs a query that returns one value.
     pub fn scalar(&self, sql: &str, params: &[duckdb::types::Value]) -> Result<Scalar> {
         let mut stmt = self.conn.prepare(sql)?;
@@ -859,6 +980,99 @@ impl DataStore {
         }
         Ok(Page {
             columns: info.columns.iter().map(|c| c.name.clone()).collect(),
+            row_ids,
+            rows: data,
+            total,
+        })
+    }
+
+    /// Keyset-paginated page for large tables. The cursor is the last returned
+    /// stable row id; unlike OFFSET, query cost does not grow with page depth.
+    /// This API intentionally uses natural row order and filters, not a mutable
+    /// user sort, so inserts before the cursor cannot shift already-read rows.
+    pub fn page_after_rid(
+        &mut self,
+        table: &str,
+        after_rid: Option<i64>,
+        limit: u64,
+        filters: &[ColumnFilter],
+    ) -> Result<Page> {
+        let info = self.table_info(table)?;
+        let limit = limit.clamp(1, MAX_PAGE_SIZE);
+        let mut where_sql = Vec::new();
+        let mut params = Vec::new();
+        for filter in filters {
+            if filter.criterion.trim().is_empty() { continue; }
+            let column = self.column(table, &filter.column)?;
+            let (sql, mut values) = crate::criteria::criterion_sql(
+                &column,
+                &Scalar::Text(filter.criterion.clone()),
+            );
+            where_sql.push(sql);
+            params.append(&mut values);
+        }
+        let filter_clause = if where_sql.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", where_sql.join(" AND "))
+        };
+        // Same count cache as `page`: one count per filter, not one per page.
+        let key = format!(
+            "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{:?}",
+            info.name,
+            self.version(&info.name),
+            filter_clause,
+            "ORDER BY _rid",
+            params
+        );
+        let total = if filter_clause.is_empty() {
+            info.rows
+        } else if let Some((_, n)) = self.page_count.as_ref().filter(|(k, _)| *k == key) {
+            *n
+        } else {
+            let n = match self.scalar(
+                &format!("SELECT count(*) FROM {} {}", quote_ident(table), filter_clause),
+                &params,
+            )? {
+                Scalar::Number(value) if value.is_finite() && value >= 0.0 => value as u64,
+                _ => 0,
+            };
+            self.page_count = Some((key, n));
+            n
+        };
+
+        let mut page_params = params.clone();
+        let cursor_clause = if let Some(cursor) = after_rid {
+            page_params.push(duckdb::types::Value::BigInt(cursor));
+            if filter_clause.is_empty() {
+                "WHERE _rid > ?".to_string()
+            } else {
+                format!("{filter_clause} AND _rid > ?")
+            }
+        } else {
+            filter_clause
+        };
+        let columns = info.columns.iter().map(|column| quote_ident(&column.name)).collect::<Vec<_>>();
+        let sql = format!(
+            "SELECT _rid, {} FROM {} {} ORDER BY _rid LIMIT {}",
+            columns.join(", "),
+            quote_ident(table),
+            cursor_clause,
+            limit
+        );
+        let (_, rows, _) = self.rows(&sql, &page_params, limit as usize)?;
+        let mut row_ids = Vec::with_capacity(rows.len());
+        let mut data = Vec::with_capacity(rows.len());
+        for mut row in rows {
+            let rid = match row.remove(0) {
+                Scalar::Number(value) => value as i64,
+                _ => 0,
+            };
+            row_ids.push(rid);
+            data.push(row);
+        }
+        Ok(Page {
+            columns: info.columns.iter().map(|column| column.name.clone()).collect(),
             row_ids,
             rows: data,
             total,
@@ -1594,6 +1808,107 @@ mod tests {
         assert_eq!(schema.len(), 2);
         assert_eq!(schema[0].name, "name");
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn incremental_transform_appends_only_new_source_rows() {
+        let mut store = DataStore::open_in_memory().unwrap();
+        store.create_table_from_sql(
+            "sales",
+            "SELECT * FROM (VALUES ('a', 10), ('b', 20)) AS t(region, amount)",
+        ).unwrap();
+        let pipeline = TransformPipeline {
+            source_table: "sales".into(),
+            steps: vec![TransformStep::SelectColumns { columns: vec!["region".into(), "amount".into()] }],
+        };
+        let first = store.execute_transform_incremental("clean_sales", &pipeline, None, None).unwrap();
+        assert_eq!(first.table.rows, 2);
+        assert_eq!(first.watermark, 2);
+        assert!(first.full);
+
+        store.conn.execute("INSERT INTO sales VALUES (3, 'c', 30)", []).unwrap();
+        let second = store
+            .execute_transform_incremental("clean_sales", &pipeline, Some(first.watermark), Some(&first.signature))
+            .unwrap();
+        assert_eq!(second.table.rows, 3);
+        assert_eq!(second.watermark, 3);
+        assert!(!second.full);
+        let (columns, rows, _) = store.rows(
+            "SELECT _rid, region, amount FROM clean_sales ORDER BY _rid",
+            &[],
+            10,
+        ).unwrap();
+        assert_eq!(columns, vec!["_rid", "region", "amount"]);
+        assert_eq!(rows.len(), 3);
+    }
+
+    #[test]
+    fn incremental_transform_rebuilds_when_the_source_was_replaced_or_edited() {
+        let mut store = DataStore::open_in_memory().unwrap();
+        store.create_table_from_sql("sales", "SELECT * FROM (VALUES ('a', 10), ('b', 20)) AS t(region, amount)").unwrap();
+        let pipeline = TransformPipeline {
+            source_table: "sales".into(),
+            steps: vec![TransformStep::SelectColumns { columns: vec!["region".into(), "amount".into()] }],
+        };
+        let first = store.execute_transform_incremental("out", &pipeline, None, None).unwrap();
+        // Re-imported with three different rows: _rid starts at 1 again.
+        store
+            .create_table_from_sql("sales", "SELECT * FROM (VALUES ('x', 1), ('y', 2), ('z', 3)) AS t(region, amount)")
+            .unwrap();
+        let second = store
+            .execute_transform_incremental("out", &pipeline, Some(first.watermark), Some(&first.signature))
+            .unwrap();
+        assert!(second.full, "a replaced source must not be appended to the old output");
+        assert_eq!(second.table.rows, 3);
+        assert_eq!(store.scalar("SELECT count(*) FROM out WHERE region IN ('a', 'b')", &[]).unwrap(), Scalar::Number(0.0));
+
+        // An edit to an already processed row also rebuilds.
+        store.conn.execute("UPDATE sales SET amount = 99 WHERE _rid = 1", []).unwrap();
+        let third = store
+            .execute_transform_incremental("out", &pipeline, Some(second.watermark), Some(&second.signature))
+            .unwrap();
+        assert!(third.full);
+        assert_eq!(store.scalar("SELECT amount FROM out WHERE _rid = 1", &[]).unwrap(), Scalar::Number(99.0));
+
+        // Unchanged: appends only.
+        let fourth = store
+            .execute_transform_incremental("out", &pipeline, Some(third.watermark), Some(&third.signature))
+            .unwrap();
+        assert!(!fourth.full);
+        assert_eq!(fourth.table.rows, 3);
+    }
+
+    #[test]
+    fn incremental_transform_rejects_aggregates_and_order_sensitive_steps() {
+        let mut store = DataStore::open_in_memory().unwrap();
+        store.create_table_from_sql("sales", "SELECT * FROM (VALUES ('a', 10)) AS t(region, amount)").unwrap();
+        let pipeline = TransformPipeline {
+            source_table: "sales".into(),
+            steps: vec![TransformStep::GroupBy { columns: vec!["region".into()], aggregates: vec![] }],
+        };
+        let error = store.execute_transform_incremental("summary", &pipeline, None, None).unwrap_err();
+        assert!(error.to_string().contains("증분 실행"));
+    }
+
+    #[test]
+    fn keyset_page_advances_by_stable_row_id_without_offset() {
+        let mut store = store_with_sales();
+        let first = store.page_after_rid("sales", None, 2, &[]).unwrap();
+        assert_eq!(first.row_ids, vec![1, 2]);
+        assert_eq!(first.total, 4);
+
+        let second = store.page_after_rid("sales", first.row_ids.last().copied(), 2, &[]).unwrap();
+        assert_eq!(second.row_ids, vec![3, 4]);
+        assert_eq!(second.total, 4);
+
+        let filtered = store.page_after_rid(
+            "sales",
+            None,
+            10,
+            &[ColumnFilter { column: "region".into(), criterion: "서울".into() }],
+        ).unwrap();
+        assert_eq!(filtered.total, 2);
+        assert_eq!(filtered.rows.len(), 2);
     }
 
     #[test]

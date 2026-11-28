@@ -360,21 +360,36 @@ export class DataSource extends Emitter implements GridSource {
     }
   }
 
+  /**
+   * An unsorted page right after a loaded one continues from that page's last
+   * `_rid` (keyset: cost does not grow with depth). Any other page — a sorted
+   * view, or a jump with the scroll bar — is read by position, so reaching
+   * row 5,000,000 never means reading the rows before it.
+   */
   private async fetchPage(p: number, gen: number) {
     try {
       const t = performance.now();
-      const page = await api.dataPage(this.info.name, p * PAGE, PAGE, this.sort, this.filters);
+      const before = p > 0 ? this.pages.get(p - 1) : undefined;
+      const cursor = before?.row_ids.length === PAGE ? before.row_ids[PAGE - 1] : undefined;
+      const page =
+        !this.sort && (p === 0 || cursor !== undefined)
+          ? await api.dataPageAfterRid(this.info.name, p === 0 ? null : cursor!, PAGE, this.filters)
+          : await api.dataPage(this.info.name, p * PAGE, PAGE, this.sort, this.filters);
       if (gen !== this.generation) return;
       this.lastQueryMs = performance.now() - t;
-      if (page.total !== this.total) {
-        this.total = page.total;
-        this.rows.count = Math.max(1, page.total);
-      }
-      this.pages.set(p, page);
-      this.emit();
+      this.applyPage(p, page);
     } finally {
       this.inflight.delete(p);
     }
+  }
+
+  private applyPage(p: number, page: Page) {
+    if (page.total !== this.total) {
+      this.total = page.total;
+      this.rows.count = Math.max(1, page.total);
+    }
+    this.pages.set(p, page);
+    this.emit();
   }
 
   setView(sort: Sort | null, filters: ColumnFilter[]) {

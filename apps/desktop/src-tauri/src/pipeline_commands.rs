@@ -42,7 +42,18 @@ pub fn save_transform_pipeline(state: State<'_, AppState>, saved: SavedPipeline)
     // Validate the complete recipe against the live source schema before persisting it.
     book.wb.data().plan_transform(&saved.pipeline).map_err(|e| e.to_string())?;
     if let Some(existing) = book.pipelines.iter_mut().find(|item| item.id == saved.id) {
-        *existing = saved;
+        let mut replacement = saved;
+        if existing.pipeline == replacement.pipeline {
+            replacement.last_incremental_source_rid = existing.last_incremental_source_rid;
+            replacement.incremental_source_signature = existing.incremental_source_signature.clone();
+            replacement.incremental_output_table = existing.incremental_output_table.clone();
+        } else {
+            // A changed recipe invalidates the old row watermark.
+            replacement.last_incremental_source_rid = None;
+            replacement.incremental_source_signature = None;
+            replacement.incremental_output_table = None;
+        }
+        *existing = replacement;
     } else {
         book.pipelines.push(saved);
     }

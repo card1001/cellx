@@ -1,4 +1,4 @@
-import { formatLocaleNumber, getActiveLocale, tr } from "./i18n";
+import { getActiveLocale, tr } from "./i18n";
 import { DataJobProgress } from "./components/DataJobProgress";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -18,10 +18,8 @@ import {
   type Picture,
   type Shape,
   type ShapeKind,
-  type Slicer,
   type SlicerView,
   type SparkKind,
-  type SparklineGroup,
   type SparklineView,
   type RecoveredFile,
   type Direction,
@@ -41,14 +39,14 @@ import {
   type TableProfile,
   type TransformJobSnapshot,
 } from "./api";
-import { colorScaleRule, dataBarRule, highlightRule, type HighlightKind, ICON_SETS, iconSetRule, ratingRule } from "./cf";
+import { colorScaleRule, dataBarRule, highlightRule, ICON_SETS, iconSetRule, ratingRule } from "./cf";
 import { CHART_KINDS, ChartLayer } from "./components/Chart";
 import { PictureLayer, pictureUrl } from "./components/Picture";
 import { ShapeFormatDialog, ShapeLayer } from "./components/Shape";
 import { BookProtectDialog, CustomViewsDialog, DataTableDialog, ScenarioDialog } from "./components/WhatIf";
 import { SlicerInsertDialog, SlicerLayer, SlicerSettingsDialog } from "./components/Slicer";
 import { SparklineCreateDialog, SparklineLayer, SparklineStyleDialog } from "./components/Sparkline";
-import { arrowKey, EvaluateDialog, TraceLayer, type TraceArrow } from "./components/Trace";
+import { arrowKey, EvaluateDialog, FormulaGraphDialog, TraceLayer, type TraceArrow } from "./components/Trace";
 import { RecoveryDialog, SaveChangesDialog, type SaveChoice } from "./components/FileDialogs";
 import { useI18n, type Locale } from "./i18n";
 import { HeaderFooterDialog, MoveCopyDialog, UnhideDialog } from "./components/SheetDialogs";
@@ -84,87 +82,18 @@ import { FormulaText } from "./components/FormulaText";
 import { ContextMenu, type MenuItem } from "./components/Menu";
 import { Ribbon, type RibbonActions } from "./components/Ribbon";
 import { decreaseDecimals, increaseDecimals } from "./formats";
-import { canPointAt, completeFunctions, cycleAbsolute, functionPrefixAt, insertRef, type PointRef, quoteSheet, refSpans } from "./formula";
+import { canPointAt, completeFunctions, cycleAbsolute, functionPrefixAt, insertRef, quoteSheet, refSpans } from "./formula";
 import { fontCss, Grid, type Hit, type RefBox, type Selection } from "./grid/Grid";
 import { addr, colName, normalize, parseAddr, type Pos, type Range, rangeLabel, toTsv } from "./grid/model";
 import { DataSource, SheetSource } from "./grid/sources";
-
-type Tab = { kind: "sheet"; index: number } | { kind: "data"; name: string };
-const tabKey = (t: Tab) => (t.kind === "sheet" ? `s:${t.index}` : `d:${t.name}`);
-const START: Selection = { anchor: { r: 1, c: 1 }, focus: { r: 1, c: 1 } };
-
-interface Session {
-  tab: Tab;
-  pos: Pos;
-  text: string;
-  /** Text before editing, to skip writes that change nothing. */
-  original: string;
-  caret: number;
-  /** enter: arrows leave the cell (or point); edit (F2): arrows move the caret. */
-  mode: "enter" | "edit";
-  origin: "cell" | "bar";
-  point: PointRef | null;
-}
-
-type Dialog =
-  | { kind: "prompt"; title: string; label: string; value: string; resolve(v: string | null): void }
-  | { kind: "format" }
-  | { kind: "pasteSpecial" }
-  | { kind: "highlight"; cf: HighlightKind }
-  | { kind: "cfManager" }
-  | { kind: "pivot"; def: PivotDef }
-  | { kind: "chart"; chart: Chart }
-  | { kind: "sort"; range: Range; header: boolean }
-  | { kind: "textToColumns"; range: Range; samples: string[] }
-  | { kind: "duplicates"; range: Range; header: boolean }
-  | { kind: "validation"; current: import("./api").Validation | null }
-  | { kind: "names"; list: NameView[]; startNew: boolean }
-  | { kind: "hyperlink"; text: string; current: { target: string; internal: boolean } | null }
-  | { kind: "goalSeek" }
-  | { kind: "evaluate"; sheet: number; row: number; col: number }
-  | { kind: "shapeFormat"; shape: Shape }
-  | { kind: "sparkCreate"; spark: SparkKind; data: string; location: string }
-  | { kind: "sparkStyle"; group: SparklineGroup }
-  | { kind: "slicerInsert"; table: string; columns: string[] }
-  | { kind: "dataTable"; range: Range }
-  | { kind: "bookProtect" }
-  | { kind: "bookUnprotect" }
-  | { kind: "customViews" }
-  | { kind: "scenarios"; selection: string }
-  | { kind: "slicerSettings"; slicer: Slicer }
-  | { kind: "print" }
-  | { kind: "subtotal"; range: Range }
-  | { kind: "createTable"; range: Range; header: boolean; style: string }
-  | { kind: "importData"; path: string; suggested: string; csv: boolean; spreadsheet: boolean; resolve(v: ImportChoice | null): void }
-  | { kind: "exportEncoding"; resolve(v: string | null | undefined): void }
-  | { kind: "protect" }
-  | { kind: "unprotect" }
-  | null;
+import { START, tabKey, type Session, type Tab } from "./appTypes";
+import type { Dialog } from "./appDialogs";
+import { editorWidth, formatCount, formatNumber } from "./appUtils";
 
 const ARROWS: Record<string, Direction> = { ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right" };
 const DELTA: Record<Direction, [number, number]> = { Up: [-1, 0], Down: [1, 0], Left: [0, -1], Right: [0, 1] };
 const PROTECTED_MSG = "변경하려는 셀이나 차트가 보호된 시트에 있습니다. 변경하려면 검토 탭에서 시트 보호를 해제하세요. 암호를 입력해야 할 수도 있습니다.";
 const FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72];
-
-const measureCtx = typeof document !== "undefined" ? document.createElement("canvas").getContext("2d") : null;
-
-/** The cell editor grows to the right with its text, as in Excel. */
-function editorWidth(text: string, font: string, min: number): number {
-  if (!measureCtx) return min;
-  measureCtx.font = font;
-  const longest = Math.max(...text.split("\n").map((l) => measureCtx.measureText(l).width));
-  return Math.max(min, Math.ceil(longest + 14));
-}
-
-function formatCount(n: number): string {
-  return formatLocaleNumber(n, getActiveLocale(), { maximumFractionDigits: 0 });
-}
-
-function formatNumber(n: number): string {
-  // Status-bar formatting follows the UI locale; workbook cell formats remain unchanged.
-  const options = Number.isInteger(n) ? undefined : { maximumSignificantDigits: 10 };
-  return formatLocaleNumber(n, getActiveLocale(), options);
-}
 
 export default function App() {
   const { locale, setLocale, t } = useI18n();
@@ -2555,6 +2484,7 @@ export default function App() {
       if (!d?.input.startsWith("=")) return say("수식이 있는 셀을 선택하세요", true);
       setDialog({ kind: "evaluate", sheet: t.index, row: f.r, col: f.c });
     },
+    formulaGraph: () => setDialog({ kind: "formulaGraph" }),
     nameManager: async () => setDialog({ kind: "names", list: await api.names().catch(() => []), startNew: false }),
     defineName: async () => setDialog({ kind: "names", list: await api.names().catch(() => []), startNew: true }),
     print: () => void openPrint(),
@@ -3698,6 +3628,14 @@ export default function App() {
           }}
         />
       )}
+      {dialog?.kind === "formulaGraph" && (
+        <FormulaGraphDialog
+          onClose={() => {
+            setDialog(null);
+            focusGrid();
+          }}
+        />
+      )}
       {dialog?.kind === "goalSeek" && (
         <GoalSeekDialog
           setCell={addr(selection.focus)}
@@ -4045,6 +3983,9 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   const [columnsText, setColumnsText] = useState(props.tables[0]?.columns.map((c) => c.name).join(", ") ?? "");
   const [filterColumn, setFilterColumn] = useState("");
   const [filterValue, setFilterValue] = useState("");
+  const [filterOperator, setFilterOperator] = useState<import("./api").CompareOperator>("equal");
+  const [filterValueType, setFilterValueType] = useState<"text" | "number" | "boolean">("text");
+  const [filterMode, setFilterMode] = useState<"compare" | "is_null" | "is_not_null">("compare");
   const [joinTable, setJoinTable] = useState("");
   const [joinLeft, setJoinLeft] = useState("");
   const [joinRight, setJoinRight] = useState("");
@@ -4054,6 +3995,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   const [aggregateFunction, setAggregateFunction] = useState<AggregateFunction>("sum");
   const [name, setName] = useState("정제 파이프라인");
   const [output, setOutput] = useState("clean_result");
+  const [incrementalMode, setIncrementalMode] = useState(false);
   const [saved, setSaved] = useState<SavedPipeline[]>([]);
   const [connectors, setConnectors] = useState<SavedConnector[]>([]);
   const [connectorStatuses, setConnectorStatuses] = useState<ConnectorStatus[]>([]);
@@ -4114,11 +4056,25 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   const buildPipeline = (): TransformPipeline => {
     if (!source) throw new Error("원본 데이터 시트를 선택하세요.");
     const steps: TransformPipeline["steps"] = [];
-    if (filterColumn && filterValue.trim()) {
-      steps.push({
-        type: "filter",
-        predicate: { op: "compare", column: filterColumn, operator: "equal", value: { type: "text", value: filterValue } },
-      });
+    if (filterColumn && (filterMode !== "compare" || filterValue.trim())) {
+      const predicate: import("./api").FilterExpr = filterMode === "is_null"
+        ? { op: "is_null", column: filterColumn, negated: false }
+        : filterMode === "is_not_null"
+          ? { op: "is_null", column: filterColumn, negated: true }
+          : {
+              op: "compare",
+              column: filterColumn,
+              operator: filterOperator,
+              value: filterValueType === "number"
+                ? { type: "number", value: Number(filterValue) }
+                : filterValueType === "boolean"
+                  ? { type: "boolean", value: filterValue === "true" }
+                  : { type: "text", value: filterValue },
+            };
+      if (filterMode === "compare" && filterValueType === "number" && !Number.isFinite(Number(filterValue))) {
+        throw new Error("숫자 비교 값은 유효한 숫자여야 합니다.");
+      }
+      steps.push({ type: "filter", predicate });
     }
     if (joinTable) {
       if (!joinLeft || !joinRight) throw new Error("조인 기준 열을 모두 선택하세요.");
@@ -4184,9 +4140,13 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
     setSaved(list);
     setSelectedId(id);
   });
-  const executeNow = () => runBusy(async () => {
-    if (!selectedId) throw new Error("먼저 파이프라인을 저장하세요.");
-    const started = await api.startTransformJob(selectedId, output.trim());
+  const runPipeline = async (
+    pipelineId: string,
+    outputTable: string,
+    incremental = false,
+    pipelineOverride: TransformPipeline | null = null,
+  ) => {
+    const started = await api.startTransformJob(pipelineId, outputTable, incremental, pipelineOverride);
     setJob(started);
     let latest = started;
     while (latest.status === "queued" || latest.status === "running" || latest.status === "cancelling") {
@@ -4194,11 +4154,15 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
       latest = await api.getTransformJob(started.id);
       setJob(latest);
     }
+    setJobHistory(await api.listTransformJobs());
     if (latest.status === "failed") throw new Error(latest.error || "데이터 변환 작업에 실패했습니다.");
     if (latest.status === "cancelled") return;
     if (!latest.result) throw new Error("작업 결과를 찾을 수 없습니다.");
     await props.onExecuted(latest.result);
-    setJobHistory(await api.listTransformJobs());
+  };
+  const executeNow = () => runBusy(async () => {
+    if (!selectedId) throw new Error("먼저 파이프라인을 저장하세요.");
+    await runPipeline(selectedId, output.trim(), incrementalMode);
   });
   const loadSaved = (id: string) => {
     setSelectedId(id);
@@ -4209,10 +4173,20 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
     const select = item.pipeline.steps.find((step) => step.type === "select_columns");
     if (select?.type === "select_columns") setColumnsText(select.columns.join(", "));
     const filter = item.pipeline.steps.find((step) => step.type === "filter");
-    if (filter?.type === "filter" && filter.predicate.op === "compare" && filter.predicate.value.type === "text") {
+    if (filter?.type === "filter" && filter.predicate.op === "compare") {
+      setFilterMode("compare");
       setFilterColumn(filter.predicate.column);
-      setFilterValue(filter.predicate.value.value);
+      setFilterOperator(filter.predicate.operator);
+      setFilterValueType(filter.predicate.value.type);
+      setFilterValue(String(filter.predicate.value.value));
+    } else if (filter?.type === "filter" && filter.predicate.op === "is_null") {
+      setFilterColumn(filter.predicate.column);
+      setFilterMode(filter.predicate.negated ? "is_not_null" : "is_null");
+      setFilterValue("");
     } else {
+      setFilterMode("compare");
+      setFilterOperator("equal");
+      setFilterValueType("text");
       setFilterValue("");
     }
     const join = item.pipeline.steps.find((step) => step.type === "join");
@@ -4286,14 +4260,55 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
       <label>출력 열 (쉼표로 구분)
         <input value={columnsText} onChange={(e) => setColumnsText(e.target.value)} placeholder="열 이름, 열 이름" />
       </label>
-      <label>같음 조건 열
-        <select value={filterColumn} onChange={(e) => setFilterColumn(e.target.value)}>
-          {(current?.columns ?? []).map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
-        </select>
-      </label>
-      <label>필터 값
-        <input value={filterValue} onChange={(e) => setFilterValue(e.target.value)} placeholder="비우면 필터 미적용" />
-      </label>
+      <details>
+        <summary>고급 필터</summary>
+        <label>조건 열
+          <select value={filterColumn} onChange={(e) => setFilterColumn(e.target.value)}>
+            <option value="">필터 사용 안 함</option>
+            {(current?.columns ?? []).map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+          </select>
+        </label>
+        <label>조건 유형
+          <select value={filterMode} onChange={(e) => setFilterMode(e.target.value as typeof filterMode)}>
+            <option value="compare">값 비교</option>
+            <option value="is_null">NULL인 값</option>
+            <option value="is_not_null">NULL이 아닌 값</option>
+          </select>
+        </label>
+        {filterMode === "compare" && <>
+          <label>비교 연산자
+            <select value={filterOperator} onChange={(e) => setFilterOperator(e.target.value as import("./api").CompareOperator)}>
+              <option value="equal">같음 (=)</option>
+              <option value="not_equal">다름 (≠)</option>
+              <option value="greater_than">초과 (&gt;)</option>
+              <option value="greater_than_or_equal">이상 (≥)</option>
+              <option value="less_than">미만 (&lt;)</option>
+              <option value="less_than_or_equal">이하 (≤)</option>
+            </select>
+          </label>
+          <label>값 형식
+            <select value={filterValueType} onChange={(e) => {
+              const next = e.target.value as typeof filterValueType;
+              setFilterValueType(next);
+              setFilterValue(next === "boolean" ? "true" : "");
+            }}>
+              <option value="text">문자열</option>
+              <option value="number">숫자</option>
+              <option value="boolean">논리값</option>
+            </select>
+          </label>
+          {filterValueType === "boolean"
+            ? <label>필터 값
+                <select value={filterValue} onChange={(e) => setFilterValue(e.target.value)}>
+                  <option value="true">TRUE</option><option value="false">FALSE</option>
+                </select>
+              </label>
+            : <label>필터 값
+                <input type={filterValueType === "number" ? "number" : "text"} value={filterValue}
+                  onChange={(e) => setFilterValue(e.target.value)} placeholder="비우면 필터 미적용" />
+              </label>}
+        </>}
+      </details>
       <details>
         <summary>테이블 조인</summary>
         <label>조인할 데이터 시트
@@ -4344,12 +4359,19 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
       <label>결과 데이터 시트 이름
         <input value={output} onChange={(e) => setOutput(e.target.value)} />
       </label>
+      <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <input type="checkbox" checked={incrementalMode} onChange={(e) => setIncrementalMode(e.target.checked)} />
+        추가된 행만 증분 실행
+      </label>
+      {incrementalMode && <p className="muted">
+        첫 실행은 전체 결과를 생성하고 이후에는 새로 추가된 행만 처리합니다. 기존 행의 수정·삭제, 파일 재가져오기·새로 고침, 조인·집계·정렬·행 제한은 반영하지 않으므로 해당 변경이 있으면 전체 실행을 사용하세요.
+      </p>}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         <button disabled={busy || !source} onClick={() => void profileNow()}>데이터 프로파일</button>
         <button disabled={busy || !source} onClick={() => void previewNow()}>미리보기</button>
         <button disabled={busy || !source} onClick={() => void previewStepsNow()}>단계별 미리보기</button>
         <button disabled={busy || !source} onClick={() => void saveNow()}>저장</button>
-        <button disabled={busy || !selectedId} onClick={() => void executeNow()}>새 데이터 시트로 실행</button>
+        <button disabled={busy || !selectedId} onClick={() => void executeNow()}>{incrementalMode ? "증분 실행" : "새 데이터 시트로 실행"}</button>
         {job && (job.status === "queued" || job.status === "running" || job.status === "cancelling") && <button onClick={() => {
           void api.cancelTransformJob(job.id).then(setJob).catch((e) => setError(errorText(e)));
         }}>실행 취소</button>}
@@ -4362,13 +4384,17 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
       {job && <p className="muted" role="status">백그라운드 작업: {job.phase}{job.status === "failed" && job.error ? ` · ${job.error}` : ""}</p>}
       {jobHistory.length > 0 && <details>
         <summary>최근 변환 실행 이력 ({jobHistory.length})</summary>
-        <div style={{ overflow: "auto", maxHeight: 180 }}>
+        <div style={{ overflow: "auto", maxHeight: 220 }}>
           <table>
-            <thead><tr><th>작업 ID</th><th>상태</th><th>결과 행</th><th>오류</th></tr></thead>
+            <thead><tr><th>실행 시각</th><th>파이프라인</th><th>대상 시트</th><th>실행 방식</th><th>상태</th><th>결과 행</th><th>오류</th><th>작업</th></tr></thead>
             <tbody>{jobHistory.map((item) => <tr key={item.id}>
-              <td>{item.id}</td><td>{item.status}</td>
-              <td>{item.result?.rows.toLocaleString() ?? "—"}</td>
+              <td>{new Date(item.started_at_ms).toLocaleString()}</td>
+              <td>{saved.find((entry) => entry.id === item.pipeline_id)?.name ?? item.pipeline_id}</td>
+              <td>{item.output_table}</td><td>{item.incremental ? "증분" : "전체"}</td><td>{item.status}</td>
+              <td>{(item.result_rows ?? item.result?.rows)?.toLocaleString() ?? "—"}</td>
               <td>{item.error ?? "—"}</td>
+              <td><button disabled={busy || item.status === "queued" || item.status === "running" || item.status === "cancelling" || !item.pipeline}
+                onClick={() => void runBusy(() => runPipeline(item.pipeline_id, item.output_table, item.incremental, item.pipeline))}>다시 실행</button></td>
             </tr>)}</tbody>
           </table>
         </div>

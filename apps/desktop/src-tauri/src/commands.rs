@@ -14,7 +14,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::recovery::RecoveryState;
-use cellx_core::project::{SavedConnector, SavedPipeline};
+use cellx_core::project::{SavedConnector, SavedPipeline, SavedTransformRun};
 
 pub struct Book {
     pub(crate) wb: Workbook,
@@ -24,21 +24,22 @@ pub struct Book {
     pub(crate) edits: u64,
     pub(crate) pipelines: Vec<SavedPipeline>,
     pub(crate) connectors: Vec<SavedConnector>,
+    pub(crate) transform_runs: Vec<SavedTransformRun>,
 }
 
 impl Book {
     pub fn new() -> cellx_core::Result<Self> {
-        Ok(Book { wb: Workbook::new()?, path: None, dirty: false, edits: 0, pipelines: Vec::new(), connectors: Vec::new() })
+        Ok(Book { wb: Workbook::new()?, path: None, dirty: false, edits: 0, pipelines: Vec::new(), connectors: Vec::new(), transform_runs: Vec::new() })
     }
 
     pub fn open(path: &Path) -> cellx_core::Result<Self> {
-        let (mut wb, pipelines, connectors) = if is_project(path) {
-            project::open_project_with_assets(path)?
+        let (mut wb, pipelines, connectors, transform_runs) = if is_project(path) {
+            project::open_project_with_execution_history(path)?
         } else {
-            (Workbook::open_xlsx(path)?, Vec::new(), Vec::new())
+            (Workbook::open_xlsx(path)?, Vec::new(), Vec::new(), Vec::new())
         };
         wb.recalc()?;
-        Ok(Book { wb, path: Some(path.to_path_buf()), dirty: false, edits: 0, pipelines, connectors })
+        Ok(Book { wb, path: Some(path.to_path_buf()), dirty: false, edits: 0, pipelines, connectors, transform_runs })
     }
 }
 
@@ -187,7 +188,8 @@ pub async fn save_file(state: State<'_, AppState>, recovery: State<'_, RecoveryS
     if is_project(&p) {
         let pipelines = book.pipelines.clone();
         let connectors = book.connectors.clone();
-        project::save_project_with_assets(&mut book.wb, &p, &pipelines, &connectors).map_err(err)?;
+        let transform_runs = book.transform_runs.clone();
+        project::save_project_with_execution_history(&mut book.wb, &p, &pipelines, &connectors, &transform_runs).map_err(err)?;
     } else {
         book.wb.save_xlsx(&p).map_err(err)?;
     }
@@ -502,6 +504,17 @@ pub async fn data_page(
     filters: Vec<ColumnFilter>,
 ) -> CmdResult<Page> {
     read(&state, |wb| wb.data_page(&table, offset, limit.min(5000), sort.as_ref(), &filters))
+}
+
+#[tauri::command]
+pub async fn data_page_after_rid(
+    state: State<'_, AppState>,
+    table: String,
+    after_rid: Option<i64>,
+    limit: u64,
+    filters: Vec<ColumnFilter>,
+) -> CmdResult<Page> {
+    read(&state, |wb| wb.data_page_after_rid(&table, after_rid, limit.min(5000), &filters))
 }
 
 #[tauri::command]
@@ -997,6 +1010,13 @@ pub fn reset_page_breaks(state: State<'_, AppState>, sheet: u32) -> CmdResult<()
 }
 
 use cellx_core::audit::{EvalStep, TraceArea};
+
+#[tauri::command]
+pub async fn formula_dependency_graph(
+    state: State<'_, AppState>,
+) -> CmdResult<cellx_core::audit::FormulaDependencyGraph> {
+    read(&state, |wb| wb.formula_dependency_graph())
+}
 
 #[tauri::command]
 pub fn trace_precedents(state: State<'_, AppState>, sheet: u32, row: i32, col: i32) -> CmdResult<Vec<TraceArea>> {
