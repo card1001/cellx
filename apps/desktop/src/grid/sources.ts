@@ -13,7 +13,7 @@ import {
 } from "../api";
 import { Axis } from "./axis";
 import { colName, MAX_COLS, MAX_ROWS } from "./model";
-import { estimateSerializedBytes, selectPagesToEvict } from "./performance";
+import { estimateSerializedBytes, isCurrentPageRequest, selectPagesToEvict } from "./performance";
 
 export interface CellData {
   text: string;
@@ -290,6 +290,7 @@ export class DataSource extends Emitter implements GridSource {
   private pagePromises = new Map<number, Promise<void>>();
   private pageCursors = new Map<number, number>();
   private pageAccess = new Map<number, number>();
+  private pageBytes = new Map<number, number>();
   private visiblePages = new Set<number>();
   private accessClock = 0;
   private requestSequence = 0;
@@ -390,13 +391,13 @@ export class DataSource extends Emitter implements GridSource {
       if (!this.sort && p > 0 && !this.pageCursors.has(p - 1)) {
         await this.pagePromises.get(p - 1)?.catch(() => undefined);
       }
-      if (gen !== this.generation || this.inflight.get(p) !== token) return;
+      if (!isCurrentPageRequest(this.generation, gen, this.inflight.get(p), token)) return;
       const started = performance.now();
       const cursor = p > 0 ? this.pageCursors.get(p - 1) : undefined;
       const page = !this.sort && (p === 0 || cursor !== undefined)
         ? await api.dataPageAfterRid(this.info.name, p === 0 ? null : cursor!, PAGE, this.filters)
         : await api.dataPage(this.info.name, p * PAGE, PAGE, this.sort, this.filters);
-      if (gen !== this.generation || this.inflight.get(p) !== token) return;
+      if (!isCurrentPageRequest(this.generation, gen, this.inflight.get(p), token)) return;
       this.lastQueryMs = performance.now() - started;
       this.applyPage(p, page);
     } finally {
@@ -411,6 +412,7 @@ export class DataSource extends Emitter implements GridSource {
     }
     this.pages.set(p, page);
     this.pageAccess.set(p, ++this.accessClock);
+    this.pageBytes.set(p, estimateSerializedBytes(page));
     const lastRid = page.row_ids[page.row_ids.length - 1];
     if (lastRid !== undefined) this.pageCursors.set(p, lastRid);
     this.prunePages();
@@ -422,15 +424,16 @@ export class DataSource extends Emitter implements GridSource {
     for (const page of candidates) {
       this.pages.delete(page);
       this.pageAccess.delete(page);
+      this.pageBytes.delete(page);
     }
   }
 
   getPerformanceSnapshot() {
     let cachedRows = 0;
     let estimatedBytes = 0;
-    for (const page of this.pages.values()) {
+    for (const [pageNumber, page] of this.pages) {
       cachedRows += page.rows.length;
-      estimatedBytes += estimateSerializedBytes(page);
+      estimatedBytes += this.pageBytes.get(pageNumber) ?? 0;
     }
     return {
       cachedPages: this.pages.size,
@@ -454,6 +457,7 @@ export class DataSource extends Emitter implements GridSource {
     this.pagePromises.clear();
     this.pageCursors.clear();
     this.pageAccess.clear();
+    this.pageBytes.clear();
     this.visiblePages.clear();
     this.lastQueryMs = 0;
     this.request(1, 1, PAGE);
