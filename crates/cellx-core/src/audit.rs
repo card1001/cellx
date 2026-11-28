@@ -52,18 +52,22 @@ impl Workbook {
     /// Returns a bounded formula dependency graph using IronCalc's parsed
     /// dependency index. Range precedents are expanded only up to the edge cap.
     pub fn formula_dependency_graph(&self) -> Result<FormulaDependencyGraph> {
-        use std::collections::{HashMap, HashSet};
+        use std::collections::HashMap;
 
         const MAX_NODES: usize = 5_000;
         const MAX_EDGES: usize = 20_000;
         let mut nodes = Vec::new();
-        let mut formula_cells = HashSet::new();
+        let mut truncated = false;
         let cells = self.model().get_all_cells();
 
+        // Inspect one formula beyond the output cap so an exactly-full graph
+        // is not incorrectly reported as truncated.
         for cell in cells {
-            if nodes.len() >= MAX_NODES { break; }
             if let Some(formula) = self.model().get_cell_formula(cell.index, cell.row, cell.column)? {
-                formula_cells.insert((cell.index, cell.row, cell.column));
+                if nodes.len() == MAX_NODES {
+                    truncated = true;
+                    break;
+                }
                 nodes.push(FormulaNode {
                     id: format!("{}!{}:{}", cell.index, cell.row, cell.column),
                     sheet: cell.index,
@@ -77,7 +81,6 @@ impl Workbook {
         let node_ids = nodes.iter().map(|node| ((node.sheet, node.row, node.col), node.id.clone()))
             .collect::<HashMap<_, _>>();
         let mut edges = Vec::new();
-        let mut truncated = nodes.len() >= MAX_NODES;
 
         'formula: for node in &nodes {
             for area in self.model().cell_precedents(node.sheet, node.row, node.col) {
@@ -95,8 +98,6 @@ impl Workbook {
             }
         }
 
-        // Formula cells beyond the node cap may still exist in the workbook.
-        if formula_cells.len() >= MAX_NODES { truncated = true; }
         Ok(FormulaDependencyGraph { nodes, edges, truncated })
     }
 
@@ -155,6 +156,20 @@ mod tests {
         let graph = wb.formula_dependency_graph().unwrap();
         assert_eq!(graph.nodes.len(), 2);
         assert!(graph.edges.iter().any(|edge| edge.from == "0!1:2" && edge.to == "0!1:3"));
+        assert!(!graph.truncated);
+    }
+
+    #[test]
+    fn dependency_graph_expands_formula_ranges_into_edges() {
+        let mut wb = Workbook::new().unwrap();
+        wb.set_input(0, 1, 1, "=1+1").unwrap();
+        wb.set_input(0, 2, 1, "=2+2").unwrap();
+        wb.set_input(0, 1, 2, "=SUM(A1:A2)").unwrap();
+
+        let graph = wb.formula_dependency_graph().unwrap();
+        assert_eq!(graph.nodes.len(), 3);
+        assert!(graph.edges.iter().any(|edge| edge.from == "0!1:1" && edge.to == "0!1:2"));
+        assert!(graph.edges.iter().any(|edge| edge.from == "0!2:1" && edge.to == "0!1:2"));
         assert!(!graph.truncated);
     }
 
