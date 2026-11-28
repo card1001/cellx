@@ -3208,7 +3208,7 @@ export default function App() {
           const cache = source.getDiagnosticsSnapshot();
           const heapBytes = (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize;
           return <span className="grid-diagnostics" title="개발 전용 진단 정보입니다. JS 힙은 WebView가 제공할 때만 표시됩니다.">
-            캐시 {cache.cachedPages}/{cache.maxCachedPages}p · {formatCount(cache.cachedRows)}행 · 진행 중 {cache.inflightPages}p{heapBytes ? ` · JS 힙 ${(heapBytes / 1024 / 1024).toFixed(1)} MB` : ""} · 그리드 렌더 {gridPerf.current.renderMs.toFixed(1)} ms · {gridPerf.current.commits}회
+            캐시 {cache.cachedPages}/{cache.maxCachedPages}p · {(cache.cachedBytes / 1024 / 1024).toFixed(1)}/{(cache.maxCachedBytes / 1024 / 1024).toFixed(0)} MB · {formatCount(cache.cachedRows)}행 · 진행 중 {cache.inflightPages}p{heapBytes ? ` · JS 힙 ${(heapBytes / 1024 / 1024).toFixed(1)} MB` : ""} · 그리드 렌더 {gridPerf.current.renderMs.toFixed(1)} ms · {gridPerf.current.commits}회
           </span>;
         })()}
         {stats && onSheetTab && stats.bridge_calls > 0 && <span title={tr("데이터 엔진 계산 시간")}>데이터 엔진 {stats.bridge_ms.toFixed(0)} ms</span>}
