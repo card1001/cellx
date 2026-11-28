@@ -764,6 +764,7 @@ export const api = {
   startTransformJob: (pipelineId: string, outputTable: string) =>
     invoke<TransformJobSnapshot>("start_transform_job", { pipelineId, outputTable }),
   getTransformJob: (id: string) => invoke<TransformJobSnapshot>("get_transform_job", { id }),
+  listTransformJobs: () => invoke<TransformJobSnapshot[]>("list_transform_jobs"),
   cancelTransformJob: (id: string) => invoke<TransformJobSnapshot>("cancel_transform_job", { id }),
   dataConnectors: () => invoke<SavedConnector[]>("data_connectors"),
   saveDataConnector: (connector: SavedConnector) => invoke<TableInfo>("save_data_connector", { connector }),
