@@ -286,6 +286,12 @@ export class DataSource extends Emitter implements GridSource {
   private pages = new Map<number, Page>();
   private inflight = new Set<number>();
   private generation = 0;
+  // Unsorted scans use stable _rid cursors. Requests for a later viewport page
+  // advance sequentially so the virtual row index remains deterministic.
+  private keysetRequested = new Set<number>();
+  private keysetLoading = false;
+  private keysetNextPage = 0;
+  private keysetCursor: number | null = null;
   total: number;
   sort: Sort | null = null;
   filters: ColumnFilter[] = [];
@@ -353,27 +359,70 @@ export class DataSource extends Emitter implements GridSource {
   request(r0: number, _c0: number, r1: number) {
     const p0 = Math.floor((r0 - 1) / PAGE);
     const p1 = Math.floor((r1 - 1) / PAGE);
+    if (!this.sort) {
+      for (let p = p0; p <= p1; p++) {
+        if (!this.pages.has(p) && p >= this.keysetNextPage) this.keysetRequested.add(p);
+      }
+      void this.drainKeysetPages(this.generation);
+      return;
+    }
     for (let p = p0; p <= p1; p++) {
       if (this.pages.has(p) || this.inflight.has(p)) continue;
       this.inflight.add(p);
-      void this.fetchPage(p, this.generation);
+      void this.fetchOffsetPage(p, this.generation);
     }
   }
 
-  private async fetchPage(p: number, gen: number) {
+  private async fetchOffsetPage(p: number, gen: number) {
     try {
       const t = performance.now();
       const page = await api.dataPage(this.info.name, p * PAGE, PAGE, this.sort, this.filters);
       if (gen !== this.generation) return;
       this.lastQueryMs = performance.now() - t;
-      if (page.total !== this.total) {
-        this.total = page.total;
-        this.rows.count = Math.max(1, page.total);
-      }
-      this.pages.set(p, page);
-      this.emit();
+      this.applyPage(p, page);
     } finally {
       this.inflight.delete(p);
+    }
+  }
+
+  private applyPage(p: number, page: Page) {
+    if (page.total !== this.total) {
+      this.total = page.total;
+      this.rows.count = Math.max(1, page.total);
+    }
+    this.pages.set(p, page);
+    this.emit();
+  }
+
+  private async drainKeysetPages(gen: number) {
+    if (this.keysetLoading) return;
+    this.keysetLoading = true;
+    try {
+      while (gen === this.generation && this.keysetRequested.size) {
+        const target = Math.max(...this.keysetRequested);
+        if (this.pages.has(this.keysetNextPage)) {
+          this.keysetNextPage++;
+          continue;
+        }
+        const pageNumber = this.keysetNextPage;
+        const t = performance.now();
+        const page = await api.dataPageAfterRid(this.info.name, this.keysetCursor, PAGE, this.filters);
+        if (gen !== this.generation) return;
+        this.lastQueryMs = performance.now() - t;
+        this.applyPage(pageNumber, page);
+        this.keysetRequested.delete(pageNumber);
+        this.keysetCursor = page.row_ids.length ? page.row_ids[page.row_ids.length - 1] : this.keysetCursor;
+        this.keysetNextPage++;
+        if (page.rows.length < PAGE) {
+          // No further rows exist; avoid repeatedly querying beyond the end.
+          this.keysetRequested.clear();
+          break;
+        }
+        if (pageNumber >= target && !this.keysetRequested.size) break;
+      }
+    } finally {
+      this.keysetLoading = false;
+      if (gen === this.generation && this.keysetRequested.size) void this.drainKeysetPages(gen);
     }
   }
 
@@ -387,6 +436,10 @@ export class DataSource extends Emitter implements GridSource {
     this.generation++;
     this.pages.clear();
     this.inflight.clear();
+    this.keysetRequested.clear();
+    this.keysetLoading = false;
+    this.keysetNextPage = 0;
+    this.keysetCursor = null;
     this.request(1, 1, PAGE);
     this.emit();
   }
