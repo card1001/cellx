@@ -132,6 +132,18 @@ struct PageView {
 
 const PAGE_VIEW_TABLE: &str = "_cellx_page_view";
 
+/// The outcome of an incremental transformation run.
+#[derive(Debug, Clone)]
+pub struct IncrementalRun {
+    pub table: TableInfo,
+    /// Largest source `_rid` processed; the next run starts after it.
+    pub watermark: i64,
+    /// `source_signature` at the watermark, to validate the next run.
+    pub signature: String,
+    /// The output was rebuilt from the whole source (first run, or the source changed).
+    pub full: bool,
+}
+
 pub struct DataStore {
     conn: Connection,
     schema_cache: HashMap<String, TableInfo>,
@@ -696,6 +708,25 @@ impl DataStore {
         Ok(value)
     }
 
+    /// A signature of the rows of `table` with `_rid <= up_to_rid`: their count
+    /// and the XOR of their row hashes. An incremental checkpoint is only valid
+    /// while this is unchanged — re-importing the source renumbers `_rid`, and
+    /// an edit changes a row that was already processed.
+    pub fn source_signature(&self, table: &str, up_to_rid: i64) -> Result<String> {
+        if !self.has_table(table) {
+            return Err(CellxError::UnknownTable(table.to_string()));
+        }
+        let (count, digest): (i64, String) = self.conn.query_row(
+            &format!(
+                "SELECT count(*)::BIGINT, CAST(COALESCE(bit_xor(hash(s)), 0) AS VARCHAR) FROM {} AS s WHERE s._rid <= ?",
+                quote_ident(table)
+            ),
+            [up_to_rid],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok(format!("{up_to_rid}:{count}:{digest}"))
+    }
+
     /// Appends only rows with source _rid greater than the saved watermark.
     ///
     /// Incremental execution is intentionally restricted to row-preserving,
@@ -706,7 +737,8 @@ impl DataStore {
         output_table: &str,
         pipeline: &TransformPipeline,
         last_source_rid: Option<i64>,
-    ) -> Result<(TableInfo, i64)> {
+        last_signature: Option<&str>,
+    ) -> Result<IncrementalRun> {
         if !is_valid_table_name(output_table) {
             return Err(CellxError::InvalidName(output_table.to_string()));
         }
@@ -725,9 +757,21 @@ impl DataStore {
             ));
         }
         let source_watermark = self.max_row_id(&pipeline.source_table)?;
-        let Some(last_rid) = last_source_rid else {
-            let result = self.execute_transform(output_table, pipeline)?;
-            return Ok((result, source_watermark));
+        // The rows already processed must be exactly as they were; otherwise
+        // the source was replaced or edited and the output is rebuilt.
+        let checkpoint = match (last_source_rid, last_signature) {
+            (Some(rid), Some(signature))
+                if self.has_table(output_table)
+                    && self.source_signature(&pipeline.source_table, rid)? == signature =>
+            {
+                Some(rid)
+            }
+            _ => None,
+        };
+        let Some(last_rid) = checkpoint else {
+            let table = self.execute_transform(output_table, pipeline)?;
+            let signature = self.source_signature(&pipeline.source_table, source_watermark)?;
+            return Ok(IncrementalRun { table, watermark: source_watermark, signature, full: true });
         };
         if !self.has_table(output_table) {
             return Err(CellxError::Bridge("증분 실행 대상 시트가 없습니다. 먼저 전체 실행으로 기준 데이터를 생성하세요".into()));
@@ -754,8 +798,9 @@ impl DataStore {
         );
         self.conn.execute(&sql, params_from_iter(parameters.iter()))?;
         self.touch(output_table);
-        let result = self.table_info(output_table)?;
-        Ok((result, source_watermark))
+        let table = self.table_info(output_table)?;
+        let signature = self.source_signature(&pipeline.source_table, source_watermark)?;
+        Ok(IncrementalRun { table, watermark: source_watermark, signature, full: false })
     }
 
     /// Runs a query that returns one value.
@@ -1759,14 +1804,18 @@ mod tests {
             source_table: "sales".into(),
             steps: vec![TransformStep::SelectColumns { columns: vec!["region".into(), "amount".into()] }],
         };
-        let (first, watermark) = store.execute_transform_incremental("clean_sales", &pipeline, None).unwrap();
-        assert_eq!(first.rows, 2);
-        assert_eq!(watermark, 2);
+        let first = store.execute_transform_incremental("clean_sales", &pipeline, None, None).unwrap();
+        assert_eq!(first.table.rows, 2);
+        assert_eq!(first.watermark, 2);
+        assert!(first.full);
 
         store.conn.execute("INSERT INTO sales VALUES (3, 'c', 30)", []).unwrap();
-        let (second, next_watermark) = store.execute_transform_incremental("clean_sales", &pipeline, Some(watermark)).unwrap();
-        assert_eq!(second.rows, 3);
-        assert_eq!(next_watermark, 3);
+        let second = store
+            .execute_transform_incremental("clean_sales", &pipeline, Some(first.watermark), Some(&first.signature))
+            .unwrap();
+        assert_eq!(second.table.rows, 3);
+        assert_eq!(second.watermark, 3);
+        assert!(!second.full);
         let (columns, rows, _) = store.rows(
             "SELECT _rid, region, amount FROM clean_sales ORDER BY _rid",
             &[],
@@ -1777,6 +1826,42 @@ mod tests {
     }
 
     #[test]
+    fn incremental_transform_rebuilds_when_the_source_was_replaced_or_edited() {
+        let mut store = DataStore::open_in_memory().unwrap();
+        store.create_table_from_sql("sales", "SELECT * FROM (VALUES ('a', 10), ('b', 20)) AS t(region, amount)").unwrap();
+        let pipeline = TransformPipeline {
+            source_table: "sales".into(),
+            steps: vec![TransformStep::SelectColumns { columns: vec!["region".into(), "amount".into()] }],
+        };
+        let first = store.execute_transform_incremental("out", &pipeline, None, None).unwrap();
+        // Re-imported with three different rows: _rid starts at 1 again.
+        store
+            .create_table_from_sql("sales", "SELECT * FROM (VALUES ('x', 1), ('y', 2), ('z', 3)) AS t(region, amount)")
+            .unwrap();
+        let second = store
+            .execute_transform_incremental("out", &pipeline, Some(first.watermark), Some(&first.signature))
+            .unwrap();
+        assert!(second.full, "a replaced source must not be appended to the old output");
+        assert_eq!(second.table.rows, 3);
+        assert_eq!(store.scalar("SELECT count(*) FROM out WHERE region IN ('a', 'b')", &[]).unwrap(), Scalar::Number(0.0));
+
+        // An edit to an already processed row also rebuilds.
+        store.conn.execute("UPDATE sales SET amount = 99 WHERE _rid = 1", []).unwrap();
+        let third = store
+            .execute_transform_incremental("out", &pipeline, Some(second.watermark), Some(&second.signature))
+            .unwrap();
+        assert!(third.full);
+        assert_eq!(store.scalar("SELECT amount FROM out WHERE _rid = 1", &[]).unwrap(), Scalar::Number(99.0));
+
+        // Unchanged: appends only.
+        let fourth = store
+            .execute_transform_incremental("out", &pipeline, Some(third.watermark), Some(&third.signature))
+            .unwrap();
+        assert!(!fourth.full);
+        assert_eq!(fourth.table.rows, 3);
+    }
+
+    #[test]
     fn incremental_transform_rejects_aggregates_and_order_sensitive_steps() {
         let mut store = DataStore::open_in_memory().unwrap();
         store.create_table_from_sql("sales", "SELECT * FROM (VALUES ('a', 10)) AS t(region, amount)").unwrap();
@@ -1784,7 +1869,7 @@ mod tests {
             source_table: "sales".into(),
             steps: vec![TransformStep::GroupBy { columns: vec!["region".into()], aggregates: vec![] }],
         };
-        let error = store.execute_transform_incremental("summary", &pipeline, None).unwrap_err();
+        let error = store.execute_transform_incremental("summary", &pipeline, None, None).unwrap_err();
         assert!(error.to_string().contains("증분 실행"));
     }
 

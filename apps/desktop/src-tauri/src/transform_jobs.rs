@@ -77,7 +77,7 @@ pub fn start_transform_job(
         let checkpoint = if incremental && saved.is_some_and(|item|
             item.pipeline == pipeline && item.incremental_output_table.as_deref() == Some(output_table.as_str())
         ) {
-            saved.and_then(|item| item.last_incremental_source_rid)
+            saved.and_then(|item| item.last_incremental_source_rid.zip(item.incremental_source_signature.clone()))
         } else {
             None
         };
@@ -162,15 +162,25 @@ pub fn start_transform_job(
                             Err("작업이 취소되었습니다".to_string())
                         } else {
                             let execution = if incremental {
-                                book.wb.data().execute_transform_incremental(&output_table, &pipeline, checkpoint)
+                                let (rid, signature) = match &checkpoint {
+                                    Some((rid, signature)) => (Some(*rid), Some(signature.as_str())),
+                                    None => (None, None),
+                                };
+                                book.wb.data().execute_transform_incremental(&output_table, &pipeline, rid, signature)
                             } else {
-                                book.wb.data().execute_transform(&output_table, &pipeline)
-                                    .and_then(|table| book.wb.data().max_row_id(&pipeline.source_table).map(|watermark| (table, watermark)))
+                                let data = book.wb.data();
+                                data.execute_transform(&output_table, &pipeline).and_then(|table| {
+                                    let watermark = data.max_row_id(&pipeline.source_table)?;
+                                    let signature = data.source_signature(&pipeline.source_table, watermark)?;
+                                    Ok(cellx_core::data::IncrementalRun { table, watermark, signature, full: true })
+                                })
                             };
-                            execution.map_err(|e| e.to_string()).map(|(table, watermark)| {
+                            execution.map_err(|e| e.to_string()).map(|run| {
+                                let table = run.table;
                                 if let Some(saved) = book.pipelines.iter_mut().find(|item| item.id == pipeline_id) {
                                     saved.incremental_output_table = Some(output_table.clone());
-                                    saved.last_incremental_source_rid = Some(watermark);
+                                    saved.last_incremental_source_rid = Some(run.watermark);
+                                    saved.incremental_source_signature = Some(run.signature);
                                 }
                                 book.dirty = true;
                                 book.edits = book.edits.saturating_add(1);

@@ -35,6 +35,10 @@ pub struct SavedPipeline {
     /// Output table associated with the incremental checkpoint.
     #[serde(default)]
     pub incremental_output_table: Option<String>,
+    /// `DataStore::source_signature` at the checkpoint; a mismatch means the
+    /// source was replaced or edited and the next run rebuilds the output.
+    #[serde(default)]
+    pub incremental_source_signature: Option<String>,
 }
 
 /// A reusable local file source. Paths are intentionally local to the machine
@@ -362,6 +366,7 @@ mod tests {
             },
             last_incremental_source_rid: Some(2),
             incremental_output_table: Some("clean_sales".into()),
+            incremental_source_signature: None,
         };
         let saved_connector = SavedConnector {
             id: "connector-1".into(),

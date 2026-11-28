@@ -45,10 +45,12 @@ pub fn save_transform_pipeline(state: State<'_, AppState>, saved: SavedPipeline)
         let mut replacement = saved;
         if existing.pipeline == replacement.pipeline {
             replacement.last_incremental_source_rid = existing.last_incremental_source_rid;
+            replacement.incremental_source_signature = existing.incremental_source_signature.clone();
             replacement.incremental_output_table = existing.incremental_output_table.clone();
         } else {
             // A changed recipe invalidates the old row watermark.
             replacement.last_incremental_source_rid = None;
+            replacement.incremental_source_signature = None;
             replacement.incremental_output_table = None;
         }
         *existing = replacement;
