@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use cellx_core::data::TableInfo;
 use cellx_core::project::SavedTransformRun;
+use cellx_core::transform::TransformPipeline;
 use serde::Serialize;
 use tauri::State;
 
@@ -19,6 +20,7 @@ pub struct TransformJobSnapshot {
     pub pipeline_id: String,
     pub output_table: String,
     pub incremental: bool,
+    pub pipeline: Option<TransformPipeline>,
     pub started_at_ms: u64,
     pub finished_at_ms: Option<u64>,
     pub result_rows: Option<u64>,
@@ -56,14 +58,20 @@ pub fn start_transform_job(
     pipeline_id: String,
     output_table: String,
     incremental: bool,
+    pipeline_override: Option<TransformPipeline>,
 ) -> Result<TransformJobSnapshot, String> {
     let (pipeline, interrupt, checkpoint) = {
         let mut book = state.0.lock().map_err(|_| "통합 문서 상태를 잠글 수 없습니다".to_string())?;
-        let saved = book.pipelines.iter().find(|item| item.id == pipeline_id)
-            .ok_or_else(|| "저장된 파이프라인을 찾을 수 없습니다".to_string())?;
-        let pipeline = saved.pipeline.clone();
-        let checkpoint = if incremental && saved.incremental_output_table.as_deref() == Some(output_table.as_str()) {
-            saved.last_incremental_source_rid
+        let saved = book.pipelines.iter().find(|item| item.id == pipeline_id);
+        let pipeline = match pipeline_override {
+            Some(override_pipeline) => override_pipeline,
+            None => saved.map(|item| item.pipeline.clone())
+                .ok_or_else(|| "저장된 파이프라인을 찾을 수 없습니다".to_string())?,
+        };
+        let checkpoint = if incremental && saved.is_some_and(|item|
+            item.pipeline == pipeline && item.incremental_output_table.as_deref() == Some(output_table.as_str())
+        ) {
+            saved.and_then(|item| item.last_incremental_source_rid)
         } else {
             None
         };
@@ -83,6 +91,7 @@ pub fn start_transform_job(
         pipeline_id: pipeline_id.clone(),
         output_table: output_table.clone(),
         incremental,
+        pipeline: Some(pipeline.clone()),
         started_at_ms: timestamp as u64,
         finished_at_ms: None,
         result_rows: None,
@@ -180,6 +189,7 @@ pub fn start_transform_job(
                         id: snapshot.id.clone(),
                         pipeline_id: snapshot.pipeline_id.clone(),
                         output_table: snapshot.output_table.clone(),
+                        pipeline: snapshot.pipeline.clone(),
                         status: snapshot.status.clone(),
                         phase: snapshot.phase.clone(),
                         incremental: snapshot.incremental,
@@ -229,6 +239,7 @@ pub fn list_transform_jobs(
                 pipeline_id: saved.pipeline_id.clone(),
                 output_table: saved.output_table.clone(),
                 incremental: saved.incremental,
+                pipeline: saved.pipeline.clone(),
                 started_at_ms: saved.started_at_ms,
                 finished_at_ms: saved.finished_at_ms,
                 result_rows: saved.result_rows,
@@ -261,6 +272,7 @@ pub fn get_transform_job(
         pipeline_id: saved.pipeline_id.clone(),
         output_table: saved.output_table.clone(),
         incremental: saved.incremental,
+        pipeline: saved.pipeline.clone(),
         started_at_ms: saved.started_at_ms,
         finished_at_ms: saved.finished_at_ms,
         result_rows: saved.result_rows,
