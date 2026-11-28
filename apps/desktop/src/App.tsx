@@ -1,4 +1,4 @@
-import { formatLocaleNumber, getActiveLocale, tr } from "./i18n";
+import { tr } from "./i18n";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -84,65 +84,13 @@ import { fontCss, Grid, type Hit, type RefBox, type Selection } from "./grid/Gri
 import { addr, colName, normalize, parseAddr, type Pos, type Range, rangeLabel, toTsv } from "./grid/model";
 import { DataSource, SheetSource } from "./grid/sources";
 import { START, tabKey, type Session, type Tab } from "./appTypes";
-
-type Dialog =
-  | { kind: "prompt"; title: string; label: string; value: string; resolve(v: string | null): void }
-  | { kind: "format" }
-  | { kind: "pasteSpecial" }
-  | { kind: "highlight"; cf: HighlightKind }
-  | { kind: "cfManager" }
-  | { kind: "pivot"; def: PivotDef }
-  | { kind: "chart"; chart: Chart }
-  | { kind: "sort"; range: Range; header: boolean }
-  | { kind: "textToColumns"; range: Range; samples: string[] }
-  | { kind: "duplicates"; range: Range; header: boolean }
-  | { kind: "validation"; current: import("./api").Validation | null }
-  | { kind: "names"; list: NameView[]; startNew: boolean }
-  | { kind: "hyperlink"; text: string; current: { target: string; internal: boolean } | null }
-  | { kind: "goalSeek" }
-  | { kind: "evaluate"; sheet: number; row: number; col: number }
-  | { kind: "formulaGraph" }
-  | { kind: "shapeFormat"; shape: Shape }
-  | { kind: "sparkCreate"; spark: SparkKind; data: string; location: string }
-  | { kind: "sparkStyle"; group: SparklineGroup }
-  | { kind: "slicerInsert"; table: string; columns: string[] }
-  | { kind: "dataTable"; range: Range }
-  | { kind: "bookProtect" }
-  | { kind: "bookUnprotect" }
-  | { kind: "customViews" }
-  | { kind: "scenarios"; selection: string }
-  | { kind: "slicerSettings"; slicer: Slicer }
-  | { kind: "print" }
-  | { kind: "subtotal"; range: Range }
-  | { kind: "createTable"; range: Range; header: boolean; style: string }
-  | { kind: "protect" }
-  | { kind: "unprotect" }
-  | null;
+import type { Dialog } from "./appDialogs";
+import { editorWidth, formatCount, formatNumber } from "./appUtils";
 
 const ARROWS: Record<string, Direction> = { ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right" };
 const DELTA: Record<Direction, [number, number]> = { Up: [-1, 0], Down: [1, 0], Left: [0, -1], Right: [0, 1] };
 const PROTECTED_MSG = "변경하려는 셀이나 차트가 보호된 시트에 있습니다. 변경하려면 검토 탭에서 시트 보호를 해제하세요. 암호를 입력해야 할 수도 있습니다.";
 const FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72];
-
-const measureCtx = typeof document !== "undefined" ? document.createElement("canvas").getContext("2d") : null;
-
-/** The cell editor grows to the right with its text, as in Excel. */
-function editorWidth(text: string, font: string, min: number): number {
-  if (!measureCtx) return min;
-  measureCtx.font = font;
-  const longest = Math.max(...text.split("\n").map((l) => measureCtx.measureText(l).width));
-  return Math.max(min, Math.ceil(longest + 14));
-}
-
-function formatCount(n: number): string {
-  return formatLocaleNumber(n, getActiveLocale(), { maximumFractionDigits: 0 });
-}
-
-function formatNumber(n: number): string {
-  // Status-bar formatting follows the UI locale; workbook cell formats remain unchanged.
-  const options = Number.isInteger(n) ? undefined : { maximumSignificantDigits: 10 };
-  return formatLocaleNumber(n, getActiveLocale(), options);
-}
 
 export default function App() {
   const { locale, setLocale, t } = useI18n();
