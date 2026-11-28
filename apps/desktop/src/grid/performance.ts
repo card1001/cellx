@@ -13,15 +13,6 @@ export function selectPagesToEvict(
     .map(([page]) => page);
 }
 
-/** Approximate retained payload size; this is not a JavaScript heap measurement. */
-export function estimateSerializedBytes(value: unknown): number {
-  try {
-    return JSON.stringify(value).length * 2;
-  } catch {
-    return 0;
-  }
-}
-
 /** A response may update cache state only while both generation and request token match. */
 export function isCurrentPageRequest(
   currentGeneration: number,
