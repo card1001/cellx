@@ -29,6 +29,12 @@ pub struct SavedPipeline {
     pub id: String,
     pub name: String,
     pub pipeline: TransformPipeline,
+    /// Last processed source row ID for append-only incremental execution.
+    #[serde(default)]
+    pub last_incremental_source_rid: Option<i64>,
+    /// Output table associated with the incremental checkpoint.
+    #[serde(default)]
+    pub incremental_output_table: Option<String>,
 }
 
 /// A reusable local file source. Paths are intentionally local to the machine
@@ -349,6 +355,8 @@ mod tests {
                 source_table: "sales".into(),
                 steps: vec![],
             },
+            last_incremental_source_rid: Some(2),
+            incremental_output_table: Some("clean_sales".into()),
         };
         let saved_connector = SavedConnector {
             id: "connector-1".into(),
