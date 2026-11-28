@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cellx_core::data::{TableInfo};
-use duckdb::InterruptHandle;
 use serde::Serialize;
 use tauri::State;
 
@@ -25,7 +24,7 @@ pub struct TransformJobSnapshot {
 struct JobControl {
     snapshot: TransformJobSnapshot,
     cancelled: Arc<AtomicBool>,
-    interrupt: Arc<InterruptHandle>,
+    interrupt: Arc<dyn Fn() + Send + Sync>,
 }
 
 #[derive(Default)]
@@ -56,7 +55,8 @@ pub fn start_transform_job(
             .ok_or_else(|| "저장된 파이프라인을 찾을 수 없습니다".to_string())?;
         let pipeline = saved.pipeline.clone();
         book.wb.data().plan_transform(&pipeline).map_err(|e| e.to_string())?;
-        let interrupt = book.wb.data().interrupt_handle();
+        let handle = book.wb.data().interrupt_handle();
+        let interrupt: Arc<dyn Fn() + Send + Sync> = Arc::new(move || handle.interrupt());
         (pipeline, interrupt)
     };
 
@@ -173,7 +173,7 @@ pub fn cancel_transform_job(
         record.cancelled.store(true, Ordering::Release);
         record.snapshot.status = "cancelling".into();
         record.snapshot.phase = "취소 요청됨".into();
-        record.interrupt.interrupt();
+        (record.interrupt)();
     }
     Ok(record.snapshot.clone())
 }
