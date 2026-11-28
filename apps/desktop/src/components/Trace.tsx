@@ -211,12 +211,12 @@ export function FormulaGraphDialog(props: { onClose(): void; onSelectCell(sheet:
                 if (!from || !to) return null;
                 return <div key={`${edge.from}>${edge.to}:${index}`} style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 28px minmax(0, 1fr)", gap: 8, alignItems: "center", padding: "7px 10px", borderBottom: "1px solid var(--border)" }}>
                   <div style={{ minWidth: 0 }}>
-                    <button type="button" className="link-button" style={{ border: 0, background: "transparent", color: "var(--accent, #4f46e5)", textDecoration: "underline", cursor: "pointer", padding: 0, font: "inherit" }} onClick={() => props.onSelectCell(from.sheet, from.row, from.col)}>{nodeLabel(from)}</button>
+                    <button type="button" className="formula-graph-cell-link" onClick={() => props.onSelectCell(from.sheet, from.row, from.col)}>{nodeLabel(from)}</button>
                     <code style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{from.formula}</code>
                   </div>
                   <span aria-label="depends on" style={{ textAlign: "center", color: "var(--accent, #4f46e5)", fontWeight: 700 }}>→</span>
                   <div style={{ minWidth: 0 }}>
-                    <button type="button" className="link-button" style={{ border: 0, background: "transparent", color: "var(--accent, #4f46e5)", textDecoration: "underline", cursor: "pointer", padding: 0, font: "inherit" }} onClick={() => props.onSelectCell(to.sheet, to.row, to.col)}>{nodeLabel(to)}</button>
+                    <button type="button" className="formula-graph-cell-link" className="formula-graph-cell-link" onClick={() => props.onSelectCell(to.sheet, to.row, to.col)}>{nodeLabel(to)}</button>
                     <code style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{to.formula}</code>
                   </div>
                 </div>;
@@ -226,7 +226,7 @@ export function FormulaGraphDialog(props: { onClose(): void; onSelectCell(sheet:
           <h4>수식 셀 목록</h4>
           <div style={{ maxHeight: 180, overflow: "auto", border: "1px solid var(--border)", borderRadius: 6 }}>
             {visibleNodes.map((node) => <div key={node.id} style={{ display: "flex", gap: 12, padding: "5px 10px", borderBottom: "1px solid var(--border)" }}>
-              <button type="button" className="link-button" style={{ minWidth: 110, border: 0, background: "transparent", color: "var(--accent, #4f46e5)", textDecoration: "underline", cursor: "pointer", padding: 0, font: "inherit" }} onClick={() => props.onSelectCell(node.sheet, node.row, node.col)}>{nodeLabel(node)}</button><code style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{node.formula}</code>
+              <button type="button" className="formula-graph-cell-link formula-graph-cell-link-node" onClick={() => props.onSelectCell(node.sheet, node.row, node.col)}>{nodeLabel(node)}</button><code style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{node.formula}</code>
             </div>)}
             {graph.nodes.length > visibleNodes.length && <p className="muted" style={{ padding: 8 }}>상위 150개 수식 셀만 표시합니다.</p>}
           </div>
