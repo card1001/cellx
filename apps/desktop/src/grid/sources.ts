@@ -413,6 +413,8 @@ export class DataSource extends Emitter implements GridSource {
     }
     this.pages.set(p, page);
     this.pageAccess.set(p, ++this.accessClock);
+    this.pageBytes.set(p, estimatePageBytes(page));
+    this.cachedBytes = [...this.pageBytes.values()].reduce((sum, value) => sum + value, 0);
     const lastRid = page.row_ids[page.row_ids.length - 1];
     if (lastRid !== undefined) {
       this.pageCursors.set(p, lastRid);
@@ -440,7 +442,9 @@ export class DataSource extends Emitter implements GridSource {
     return {
       cachedPages: this.pages.size,
       cachedRows,
+      cachedBytes: this.cachedBytes,
       maxCachedPages: MAX_CACHED_PAGES,
+      maxCachedBytes: MAX_CACHED_BYTES,
       inflightPages: this.inflight.size,
     };
   }
@@ -458,6 +462,8 @@ export class DataSource extends Emitter implements GridSource {
     this.pagePromises.clear();
     this.pageCursors.clear();
     this.pageAccess.clear();
+    this.pageBytes.clear();
+    this.cachedBytes = 0;
     this.visiblePages.clear();
     this.lastQueryMs = 0;
     this.request(1, 1, PAGE);
