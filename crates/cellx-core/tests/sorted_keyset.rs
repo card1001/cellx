@@ -100,3 +100,58 @@ fn sorted_keyset_rejects_cursor_from_a_different_sort_or_table_version() {
     store.update_cell("items", 1, "rank", "99").unwrap();
     assert!(store.page_after_sort("items", Some(&cursor), 1, &ascending, &[]).is_err());
 }
+
+
+#[test]
+fn sorted_keyset_full_scan_matches_offset_for_many_duplicate_and_null_keys() {
+    let mut store = DataStore::open_in_memory().unwrap();
+    let values = (0..73)
+        .map(|i| {
+            let rank = if i % 9 == 0 { "NULL".to_string() } else { (i % 5).to_string() };
+            format!("('row-{i}', {rank})")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    store.create_table_from_sql(
+        "items",
+        &format!("SELECT * FROM (VALUES {values}) AS t(label, rank)"),
+    ).unwrap();
+
+    for descending in [false, true] {
+        let sort = Sort { column: "rank".into(), descending };
+        let expected = store.page("items", 0, 100, Some(&sort), &[]).unwrap();
+        let mut actual_ids = Vec::new();
+        let mut cursor: Option<SortCursor> = None;
+        loop {
+            let result = store.page_after_sort("items", cursor.as_ref(), 7, &sort, &[]).unwrap();
+            actual_ids.extend(result.page.row_ids);
+            cursor = result.next_cursor;
+            if cursor.is_none() { break; }
+        }
+        assert_eq!(actual_ids, expected.row_ids, "descending={descending}");
+        assert_eq!(actual_ids.len(), 73);
+    }
+}
+
+#[test]
+fn sorted_keyset_cursor_is_invalidated_by_insert_and_delete() {
+    let mut store = DataStore::open_in_memory().unwrap();
+    store.create_table_from_sql(
+        "items",
+        "SELECT * FROM (VALUES ('a', 1), ('b', 2), ('c', 3)) AS t(label, rank)",
+    ).unwrap();
+    let sort = Sort { column: "rank".into(), descending: false };
+    let first = store.page_after_sort("items", None, 1, &sort, &[]).unwrap();
+    let cursor_after_first = first.next_cursor.unwrap();
+
+    store.create_table_from_sql(
+        "items_extra",
+        "SELECT * FROM (VALUES ('d', 4)) AS t(label, rank)",
+    ).unwrap();
+    // An unrelated table mutation must not invalidate this table's cursor.
+    assert!(store.page_after_sort("items", Some(&cursor_after_first), 1, &sort, &[]).is_ok());
+
+    let cursor = store.page_after_sort("items", None, 1, &sort, &[]).unwrap().next_cursor.unwrap();
+    store.update_cell("items", 1, "rank", "10").unwrap();
+    assert!(store.page_after_sort("items", Some(&cursor), 1, &sort, &[]).is_err());
+}
