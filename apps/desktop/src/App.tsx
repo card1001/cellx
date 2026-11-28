@@ -35,6 +35,7 @@ import {
   type TransformPreview,
   type AggregateFunction,
   type SavedConnector,
+  type TableProfile,
 } from "./api";
 import { colorScaleRule, dataBarRule, highlightRule, type HighlightKind, ICON_SETS, iconSetRule, ratingRule } from "./cf";
 import { CHART_KINDS, ChartLayer } from "./components/Chart";
@@ -3991,6 +3992,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   const [connectors, setConnectors] = useState<SavedConnector[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [preview, setPreview] = useState<TransformPreview | null>(null);
+  const [profile, setProfile] = useState<TableProfile | null>(null);
   const [stepPreviews, setStepPreviews] = useState<{ step: number; preview: TransformPreview }[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -4088,6 +4090,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
     setConnectors(await api.dataConnectors());
     await props.onExecuted(table);
   });
+  const profileNow = () => runBusy(async () => { setProfile(await api.profileDataTable(source)); });
   const previewNow = () => runBusy(async () => { setStepPreviews([]); setPreview(await api.previewTransform(buildPipeline())); });
   const previewStepsNow = () => runBusy(async () => {
     const pipeline = buildPipeline();
@@ -4241,6 +4244,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
         <input value={output} onChange={(e) => setOutput(e.target.value)} />
       </label>
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <button disabled={busy || !source} onClick={() => void profileNow()}>데이터 프로파일</button>
         <button disabled={busy || !source} onClick={() => void previewNow()}>미리보기</button>
         <button disabled={busy || !source} onClick={() => void previewStepsNow()}>단계별 미리보기</button>
         <button disabled={busy || !source} onClick={() => void saveNow()}>저장</button>
@@ -4251,6 +4255,22 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
         })}>삭제</button>}
       </div>
       {error && <p role="alert" style={{ color: "var(--danger, #b42318)" }}>{error}</p>}
+      {profile && profile.table === source && <div>
+        <p className="muted">데이터 프로파일 · {profile.row_count.toLocaleString()}행 · {profile.columns.length}열</p>
+        <div style={{ overflow: "auto", maxHeight: 220 }}>
+          <table>
+            <thead><tr><th>열</th><th>형식</th><th>NULL</th><th>빈 문자열</th><th>고유값</th><th>최솟값</th><th>최댓값</th></tr></thead>
+            <tbody>{profile.columns.map((column) => {
+              const display = (value: typeof column.min) => value == null || value.t === "Empty" ? "—" : value.t === "Number" || value.t === "Bool" ? String(value.v) : value.v;
+              return <tr key={column.name}>
+                <td>{column.name}</td><td>{column.sql_type}</td>
+                <td>{column.null_count.toLocaleString()}</td><td>{column.empty_count.toLocaleString()}</td>
+                <td>{column.distinct_count.toLocaleString()}</td><td>{display(column.min)}</td><td>{display(column.max)}</td>
+              </tr>;
+            })}</tbody>
+          </table>
+        </div>
+      </div>}
       {stepPreviews.length > 0 && <div>
         <p className="muted">단계별 결과</p>
         {stepPreviews.map(({ step, preview: result }) => (
