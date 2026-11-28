@@ -944,6 +944,13 @@ pub fn reset_page_breaks(state: State<'_, AppState>, sheet: u32) -> CmdResult<()
 use cellx_core::audit::{EvalStep, TraceArea};
 
 #[tauri::command]
+pub fn formula_dependency_graph(
+    state: State<'_, AppState>,
+) -> CmdResult<cellx_core::audit::FormulaDependencyGraph> {
+    read(&state, |wb| Ok(wb.formula_dependency_graph()))
+}
+
+#[tauri::command]
 pub fn trace_precedents(state: State<'_, AppState>, sheet: u32, row: i32, col: i32) -> CmdResult<Vec<TraceArea>> {
     read(&state, |wb| Ok(wb.trace_precedents(sheet, row, col)))
 }
