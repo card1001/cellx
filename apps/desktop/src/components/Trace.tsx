@@ -216,7 +216,7 @@ export function FormulaGraphDialog(props: { onClose(): void; onSelectCell(sheet:
                   </div>
                   <span aria-label="depends on" style={{ textAlign: "center", color: "var(--accent, #4f46e5)", fontWeight: 700 }}>→</span>
                   <div style={{ minWidth: 0 }}>
-                    <button type="button" className="formula-graph-cell-link" className="formula-graph-cell-link" onClick={() => props.onSelectCell(to.sheet, to.row, to.col)}>{nodeLabel(to)}</button>
+                    <button type="button" className="formula-graph-cell-link" onClick={() => props.onSelectCell(to.sheet, to.row, to.col)}>{nodeLabel(to)}</button>
                     <code style={{ display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{to.formula}</code>
                   </div>
                 </div>;
