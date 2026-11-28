@@ -50,23 +50,24 @@ pub struct ConnectorStatus {
     pub changed: bool,
 }
 
+/// Hashing reads every source file in full, so it runs off the UI thread and
+/// without the workbook lock: the lock is held only to copy the connector list.
 #[tauri::command]
-pub fn data_connector_statuses(state: State<'_, AppState>) -> CmdResult<Vec<ConnectorStatus>> {
-    let book = state.0.lock().map_err(|_| "내부 상태를 잠글 수 없습니다".to_string())?;
-    Ok(book.connectors.iter().map(|connector| {
-        match file_fingerprint(Path::new(&connector.path)) {
-            Ok(current) => ConnectorStatus {
-                id: connector.id.clone(),
-                available: true,
-                changed: connector.fingerprint.is_empty() || connector.fingerprint != current,
-            },
-            Err(_) => ConnectorStatus {
-                id: connector.id.clone(),
-                available: false,
-                changed: true,
-            },
-        }
-    }).collect())
+pub async fn data_connector_statuses(state: State<'_, AppState>) -> CmdResult<Vec<ConnectorStatus>> {
+    let connectors: Vec<(String, String, String)> = {
+        let book = state.0.lock().map_err(|_| "내부 상태를 잠글 수 없습니다".to_string())?;
+        book.connectors
+            .iter()
+            .map(|c| (c.id.clone(), c.path.clone(), c.fingerprint.clone()))
+            .collect()
+    };
+    Ok(connectors
+        .into_iter()
+        .map(|(id, path, saved)| match file_fingerprint(Path::new(&path)) {
+            Ok(current) => ConnectorStatus { id, available: true, changed: saved.is_empty() || saved != current },
+            Err(_) => ConnectorStatus { id, available: false, changed: true },
+        })
+        .collect())
 }
 
 #[tauri::command]

@@ -82,18 +82,41 @@ impl Workbook {
             .collect::<HashMap<_, _>>();
         let mut edges = Vec::new();
 
+        // A precedent range larger than the number of formulas (A:A is a
+        // million cells) is matched against the formula list instead of
+        // being walked cell by cell.
+        let mut by_sheet: HashMap<u32, Vec<&FormulaNode>> = HashMap::new();
+        for node in &nodes {
+            by_sheet.entry(node.sheet).or_default().push(node);
+        }
         'formula: for node in &nodes {
             for area in self.model().cell_precedents(node.sheet, node.row, node.col) {
-                for row in area.row1..=area.row2 {
-                    for col in area.column1..=area.column2 {
-                        if let Some(from) = node_ids.get(&(area.sheet, row, col)) {
-                            if edges.len() >= MAX_EDGES {
-                                truncated = true;
-                                break 'formula;
-                            }
-                            edges.push(FormulaEdge { from: from.clone(), to: node.id.clone() });
+                let cells = (i64::from(area.row2) - i64::from(area.row1) + 1)
+                    .saturating_mul(i64::from(area.column2) - i64::from(area.column1) + 1);
+                let mut sources: Vec<&String> = Vec::new();
+                if cells > nodes.len() as i64 {
+                    for other in by_sheet.get(&area.sheet).into_iter().flatten() {
+                        if (area.row1..=area.row2).contains(&other.row)
+                            && (area.column1..=area.column2).contains(&other.col)
+                        {
+                            sources.push(&other.id);
                         }
                     }
+                } else {
+                    for row in area.row1..=area.row2 {
+                        for col in area.column1..=area.column2 {
+                            if let Some(from) = node_ids.get(&(area.sheet, row, col)) {
+                                sources.push(from);
+                            }
+                        }
+                    }
+                }
+                for from in sources {
+                    if edges.len() >= MAX_EDGES {
+                        truncated = true;
+                        break 'formula;
+                    }
+                    edges.push(FormulaEdge { from: from.clone(), to: node.id.clone() });
                 }
             }
         }
@@ -157,6 +180,21 @@ mod tests {
         assert_eq!(graph.nodes.len(), 2);
         assert!(graph.edges.iter().any(|edge| edge.from == "0!1:2" && edge.to == "0!1:3"));
         assert!(!graph.truncated);
+    }
+
+    #[test]
+    fn dependency_graph_handles_whole_column_references_quickly() {
+        let mut wb = Workbook::new().unwrap();
+        for r in 1..=200 {
+            wb.set_input(0, r, 1, &format!("={r}*2")).unwrap();
+            wb.set_input(0, r, 2, "=SUM(A:A)").unwrap();
+        }
+        let start = std::time::Instant::now();
+        let graph = wb.formula_dependency_graph().unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(5), "{:?}", start.elapsed());
+        assert_eq!(graph.nodes.len(), 400);
+        assert_eq!(graph.edges.len(), 20_000); // the edge cap
+        assert!(graph.truncated);
     }
 
     #[test]

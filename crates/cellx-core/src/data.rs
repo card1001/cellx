@@ -1016,12 +1016,29 @@ impl DataStore {
         } else {
             format!("WHERE {}", where_sql.join(" AND "))
         };
-        let total = match self.scalar(
-            &format!("SELECT count(*) FROM {} {}", quote_ident(table), filter_clause),
-            &params,
-        )? {
-            Scalar::Number(value) if value.is_finite() && value >= 0.0 => value as u64,
-            _ => 0,
+        // Same count cache as `page`: one count per filter, not one per page.
+        let key = format!(
+            "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{:?}",
+            info.name,
+            self.version(&info.name),
+            filter_clause,
+            "ORDER BY _rid",
+            params
+        );
+        let total = if filter_clause.is_empty() {
+            info.rows
+        } else if let Some((_, n)) = self.page_count.as_ref().filter(|(k, _)| *k == key) {
+            *n
+        } else {
+            let n = match self.scalar(
+                &format!("SELECT count(*) FROM {} {}", quote_ident(table), filter_clause),
+                &params,
+            )? {
+                Scalar::Number(value) if value.is_finite() && value >= 0.0 => value as u64,
+                _ => 0,
+            };
+            self.page_count = Some((key, n));
+            n
         };
 
         let mut page_params = params.clone();

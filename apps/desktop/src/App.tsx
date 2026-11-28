@@ -1,4 +1,4 @@
-import { formatLocaleNumber, getActiveLocale, tr } from "./i18n";
+import { getActiveLocale, tr } from "./i18n";
 import { DataJobProgress } from "./components/DataJobProgress";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
