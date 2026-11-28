@@ -487,7 +487,13 @@ export type TransformStep =
   | { type: "join"; table: string; left_column: string; right_column: string; kind: JoinKind; suffix: string }
   | { type: "group_by"; columns: string[]; aggregates: AggregateSpec[] };
 export interface TransformPipeline { source_table: string; steps: TransformStep[] }
-export interface SavedPipeline { id: string; name: string; pipeline: TransformPipeline }
+export interface SavedPipeline {
+  id: string;
+  name: string;
+  pipeline: TransformPipeline;
+  last_incremental_source_rid?: number | null;
+  incremental_output_table?: string | null;
+}
 export interface SavedConnector {
   id: string; name: string; path: string; table_name: string; locale: string;
   schema: [string, string][];
