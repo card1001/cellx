@@ -19,6 +19,33 @@ fn file_fingerprint(path: &Path) -> CmdResult<String> {
     Ok(format!("{}:{modified}", metadata.len()))
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConnectorStatus {
+    pub id: String,
+    pub available: bool,
+    /// True when file size or modification time differs from the last successful import.
+    pub changed: bool,
+}
+
+#[tauri::command]
+pub fn data_connector_statuses(state: State<'_, AppState>) -> CmdResult<Vec<ConnectorStatus>> {
+    let book = state.0.lock().map_err(|_| "내부 상태를 잠글 수 없습니다".to_string())?;
+    Ok(book.connectors.iter().map(|connector| {
+        match file_fingerprint(Path::new(&connector.path)) {
+            Ok(current) => ConnectorStatus {
+                id: connector.id.clone(),
+                available: true,
+                changed: connector.fingerprint.is_empty() || connector.fingerprint != current,
+            },
+            Err(_) => ConnectorStatus {
+                id: connector.id.clone(),
+                available: false,
+                changed: true,
+            },
+        }
+    }).collect())
+}
+
 #[tauri::command]
 pub fn data_connectors(state: State<'_, AppState>) -> CmdResult<Vec<SavedConnector>> {
     let book = state.0.lock().map_err(|_| "내부 상태를 잠글 수 없습니다".to_string())?;
