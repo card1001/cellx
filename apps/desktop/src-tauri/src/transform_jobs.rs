@@ -18,6 +18,7 @@ pub struct TransformJobSnapshot {
     pub id: String,
     pub pipeline_id: String,
     pub output_table: String,
+    pub incremental: bool,
     pub started_at_ms: u64,
     pub finished_at_ms: Option<u64>,
     pub result_rows: Option<u64>,
@@ -54,16 +55,22 @@ pub fn start_transform_job(
     jobs: State<'_, JobState>,
     pipeline_id: String,
     output_table: String,
+    incremental: bool,
 ) -> Result<TransformJobSnapshot, String> {
-    let (pipeline, interrupt) = {
+    let (pipeline, interrupt, checkpoint) = {
         let mut book = state.0.lock().map_err(|_| "통합 문서 상태를 잠글 수 없습니다".to_string())?;
         let saved = book.pipelines.iter().find(|item| item.id == pipeline_id)
             .ok_or_else(|| "저장된 파이프라인을 찾을 수 없습니다".to_string())?;
         let pipeline = saved.pipeline.clone();
+        let checkpoint = if incremental && saved.incremental_output_table.as_deref() == Some(output_table.as_str()) {
+            saved.last_incremental_source_rid
+        } else {
+            None
+        };
         book.wb.data().plan_transform(&pipeline).map_err(|e| e.to_string())?;
         let handle = book.wb.data().interrupt_handle();
         let interrupt: Arc<dyn Fn() + Send + Sync> = Arc::new(move || handle.interrupt());
-        (pipeline, interrupt)
+        (pipeline, interrupt, checkpoint)
     };
 
     let sequence = NEXT_JOB_ID.fetch_add(1, Ordering::Relaxed);
@@ -75,6 +82,7 @@ pub fn start_transform_job(
         id: id.clone(),
         pipeline_id: pipeline_id.clone(),
         output_table: output_table.clone(),
+        incremental,
         started_at_ms: timestamp as u64,
         finished_at_ms: None,
         result_rows: None,
@@ -119,14 +127,21 @@ pub fn start_transform_job(
                         if cancelled.load(Ordering::Acquire) {
                             Err("작업이 취소되었습니다".to_string())
                         } else {
-                            book.wb.data()
-                                .execute_transform(&output_table, &pipeline)
-                                .map_err(|e| e.to_string())
-                                .map(|table| {
-                                    book.dirty = true;
-                                    book.edits = book.edits.saturating_add(1);
-                                    table
-                                })
+                            let execution = if incremental {
+                                book.wb.data().execute_transform_incremental(&output_table, &pipeline, checkpoint)
+                            } else {
+                                book.wb.data().execute_transform(&output_table, &pipeline)
+                                    .and_then(|table| book.wb.data().max_row_id(&pipeline.source_table).map(|watermark| (table, watermark)))
+                            };
+                            execution.map_err(|e| e.to_string()).map(|(table, watermark)| {
+                                if let Some(saved) = book.pipelines.iter_mut().find(|item| item.id == pipeline_id) {
+                                    saved.incremental_output_table = Some(output_table.clone());
+                                    saved.last_incremental_source_rid = Some(watermark);
+                                }
+                                book.dirty = true;
+                                book.edits = book.edits.saturating_add(1);
+                                table
+                            })
                         }
                     }
                     Err(_) => Err("통합 문서 상태를 잠글 수 없습니다".to_string()),
@@ -212,6 +227,7 @@ pub fn list_transform_jobs(
                 id: saved.id.clone(),
                 pipeline_id: saved.pipeline_id.clone(),
                 output_table: saved.output_table.clone(),
+                incremental: saved.incremental,
                 started_at_ms: saved.started_at_ms,
                 finished_at_ms: saved.finished_at_ms,
                 result_rows: saved.result_rows,
@@ -243,6 +259,7 @@ pub fn get_transform_job(
         id: saved.id.clone(),
         pipeline_id: saved.pipeline_id.clone(),
         output_table: saved.output_table.clone(),
+        incremental: saved.incremental,
         started_at_ms: saved.started_at_ms,
         finished_at_ms: saved.finished_at_ms,
         result_rows: saved.result_rows,
