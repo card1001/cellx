@@ -740,6 +740,82 @@ impl DataStore {
         })
     }
 
+    /// Keyset-paginated page for large tables. The cursor is the last returned
+    /// stable row id; unlike OFFSET, query cost does not grow with page depth.
+    /// This API intentionally uses natural row order and filters, not a mutable
+    /// user sort, so inserts before the cursor cannot shift already-read rows.
+    pub fn page_after_rid(
+        &mut self,
+        table: &str,
+        after_rid: Option<i64>,
+        limit: u64,
+        filters: &[ColumnFilter],
+    ) -> Result<Page> {
+        let info = self.table_info(table)?;
+        let limit = limit.clamp(1, MAX_PAGE_SIZE);
+        let mut where_sql = Vec::new();
+        let mut params = Vec::new();
+        for filter in filters {
+            if filter.criterion.trim().is_empty() { continue; }
+            let column = self.column(table, &filter.column)?;
+            let (sql, mut values) = crate::criteria::criterion_sql(
+                &column,
+                &Scalar::Text(filter.criterion.clone()),
+            );
+            where_sql.push(sql);
+            params.append(&mut values);
+        }
+        let filter_clause = if where_sql.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", where_sql.join(" AND "))
+        };
+        let total = match self.scalar(
+            &format!("SELECT count(*) FROM {} {}", quote_ident(table), filter_clause),
+            &params,
+        )? {
+            Scalar::Number(value) if value.is_finite() && value >= 0.0 => value as u64,
+            _ => 0,
+        };
+
+        let mut page_params = params.clone();
+        let cursor_clause = if let Some(cursor) = after_rid {
+            page_params.push(duckdb::types::Value::BigInt(cursor));
+            if filter_clause.is_empty() {
+                "WHERE _rid > ?".to_string()
+            } else {
+                format!("{filter_clause} AND _rid > ?")
+            }
+        } else {
+            filter_clause
+        };
+        let columns = info.columns.iter().map(|column| quote_ident(&column.name)).collect::<Vec<_>>();
+        let sql = format!(
+            "SELECT _rid, {} FROM {} {} ORDER BY _rid LIMIT {}",
+            columns.join(", "),
+            quote_ident(table),
+            cursor_clause,
+            limit
+        );
+        let (_, rows, _) = self.rows(&sql, &page_params, limit as usize)?;
+        let mut row_ids = Vec::with_capacity(rows.len());
+        let mut data = Vec::with_capacity(rows.len());
+        for mut row in rows {
+            let rid = match row.remove(0) {
+                Scalar::Number(value) => value as i64,
+                _ => 0,
+            };
+            row_ids.push(rid);
+            data.push(row);
+        }
+        Ok(Page {
+            columns: info.columns.iter().map(|column| column.name.clone()).collect(),
+            row_ids,
+            rows: data,
+            total,
+        })
+    }
+
     /// Edits one cell of a data sheet in place, keyed by `_rid`.
     pub fn update_cell(&mut self, table: &str, rid: i64, column: &str, text: &str) -> Result<()> {
         let col = self.column(table, column)?;
@@ -961,6 +1037,27 @@ mod tests {
         };
         let error = store.execute_transform_incremental("summary", &pipeline, None).unwrap_err();
         assert!(error.to_string().contains("증분 실행"));
+    }
+
+    #[test]
+    fn keyset_page_advances_by_stable_row_id_without_offset() {
+        let mut store = store_with_sales();
+        let first = store.page_after_rid("sales", None, 2, &[]).unwrap();
+        assert_eq!(first.row_ids, vec![1, 2]);
+        assert_eq!(first.total, 4);
+
+        let second = store.page_after_rid("sales", first.row_ids.last().copied(), 2, &[]).unwrap();
+        assert_eq!(second.row_ids, vec![3, 4]);
+        assert_eq!(second.total, 4);
+
+        let filtered = store.page_after_rid(
+            "sales",
+            None,
+            10,
+            &[ColumnFilter { column: "region".into(), criterion: "서울".into() }],
+        ).unwrap();
+        assert_eq!(filtered.total, 2);
+        assert_eq!(filtered.rows.len(), 2);
     }
 
     #[test]
