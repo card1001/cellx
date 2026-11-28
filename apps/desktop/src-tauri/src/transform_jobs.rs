@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use cellx_core::data::{TableInfo};
+use cellx_core::data::TableInfo;
+use cellx_core::project::SavedTransformRun;
 use serde::Serialize;
 use tauri::State;
 
@@ -15,6 +16,11 @@ static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone, Serialize)]
 pub struct TransformJobSnapshot {
     pub id: String,
+    pub pipeline_id: String,
+    pub output_table: String,
+    pub started_at_ms: u64,
+    pub finished_at_ms: Option<u64>,
+    pub result_rows: Option<u64>,
     pub status: String,
     pub phase: String,
     pub result: Option<TableInfo>,
@@ -67,6 +73,11 @@ pub fn start_transform_job(
     let cancelled = Arc::new(AtomicBool::new(false));
     let snapshot = TransformJobSnapshot {
         id: id.clone(),
+        pipeline_id: pipeline_id.clone(),
+        output_table: output_table.clone(),
+        started_at_ms: timestamp as u64,
+        finished_at_ms: None,
+        result_rows: None,
         status: "queued".into(),
         phase: "대기 중".into(),
         result: None,
@@ -144,6 +155,32 @@ pub fn start_transform_job(
                     }
                 }
             });
+            let completed = worker_jobs.lock().ok()
+                .and_then(|records| records.get(&worker_id).map(|record| record.snapshot.clone()));
+            if let Some(snapshot) = completed {
+                if let Ok(mut book) = app_state.lock() {
+                    let saved = SavedTransformRun {
+                        id: snapshot.id.clone(),
+                        pipeline_id: snapshot.pipeline_id.clone(),
+                        output_table: snapshot.output_table.clone(),
+                        status: snapshot.status.clone(),
+                        phase: snapshot.phase.clone(),
+                        result_rows: snapshot.result.as_ref().map(|table| table.rows),
+                        error: snapshot.error.clone(),
+                        started_at_ms: snapshot.started_at_ms,
+                        finished_at_ms: Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64),
+                    };
+                    book.transform_runs.retain(|item| item.id != saved.id);
+                    book.transform_runs.push(saved);
+                    book.transform_runs.sort_by_key(|item| item.started_at_ms);
+                    if book.transform_runs.len() > 100 {
+                        let remove = book.transform_runs.len() - 100;
+                        book.transform_runs.drain(0..remove);
+                    }
+                    book.dirty = true;
+                    book.edits = book.edits.saturating_add(1);
+                }
+            }
         });
 
     if let Err(error) = spawn {
@@ -160,22 +197,58 @@ pub fn start_transform_job(
 
 #[tauri::command]
 pub fn list_transform_jobs(
+    state: State<'_, AppState>,
     jobs: State<'_, JobState>,
 ) -> Result<Vec<TransformJobSnapshot>, String> {
     let records = jobs.0.lock().map_err(|_| "작업 상태를 잠글 수 없습니다".to_string())?;
     let mut snapshots = records.values().map(|record| record.snapshot.clone()).collect::<Vec<_>>();
-    snapshots.sort_by(|a, b| b.id.cmp(&a.id));
+    drop(records);
+    let book = state.0.lock().map_err(|_| "통합 문서 상태를 잠글 수 없습니다".to_string())?;
+    for saved in &book.transform_runs {
+        if !snapshots.iter().any(|item| item.id == saved.id) {
+            snapshots.push(TransformJobSnapshot {
+                id: saved.id.clone(),
+                pipeline_id: saved.pipeline_id.clone(),
+                output_table: saved.output_table.clone(),
+                started_at_ms: saved.started_at_ms,
+                finished_at_ms: saved.finished_at_ms,
+                result_rows: saved.result_rows,
+                status: saved.status.clone(),
+                phase: saved.phase.clone(),
+                result: None,
+                error: saved.error.clone(),
+            });
+        }
+    }
+    snapshots.sort_by(|a, b| b.started_at_ms.cmp(&a.started_at_ms));
+    snapshots.truncate(100);
     Ok(snapshots)
 }
 
 #[tauri::command]
 pub fn get_transform_job(
+    state: State<'_, AppState>,
     jobs: State<'_, JobState>,
     id: String,
 ) -> Result<TransformJobSnapshot, String> {
     let records = jobs.0.lock().map_err(|_| "작업 상태를 잠글 수 없습니다".to_string())?;
-    records.get(&id).map(|record| record.snapshot.clone())
-        .ok_or_else(|| "작업을 찾을 수 없거나 작업 기록이 만료되었습니다".to_string())
+    if let Some(record) = records.get(&id) {
+        return Ok(record.snapshot.clone());
+    }
+    drop(records);
+    let book = state.0.lock().map_err(|_| "통합 문서 상태를 잠글 수 없습니다".to_string())?;
+    book.transform_runs.iter().find(|item| item.id == id).map(|saved| TransformJobSnapshot {
+        id: saved.id.clone(),
+        pipeline_id: saved.pipeline_id.clone(),
+        output_table: saved.output_table.clone(),
+        started_at_ms: saved.started_at_ms,
+        finished_at_ms: saved.finished_at_ms,
+        result_rows: saved.result_rows,
+        status: saved.status.clone(),
+        phase: saved.phase.clone(),
+        result: None,
+        error: saved.error.clone(),
+    }).ok_or_else(|| "작업을 찾을 수 없거나 작업 기록이 만료되었습니다".to_string())
 }
 
 #[tauri::command]
