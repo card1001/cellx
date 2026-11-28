@@ -185,7 +185,7 @@ fn bench_sorted_keyset(wb: &mut Workbook, runs: usize) -> Result<()> {
     let sort = Sort { column: "amount".into(), descending: true };
     let total = wb.data_page("orders", 0, 1, Some(&sort), &[])?.total;
     let depths = [0_u64, 10, 100];
-    println!("\\n정렬 페이지 OFFSET vs Keyset (페이지 크기 {PAGE}, 커서 준비 시간 제외)");
+    println!("\n정렬 페이지 OFFSET vs Keyset (페이지 크기 {PAGE}, 커서 준비 시간 제외)");
     println!("{:<16} {:>12} {:>12} {:>12} {:>12}", "페이지", "OFFSET ms", "Keyset ms", "OFFSET P95", "Keyset P95");
 
     for page_index in depths {
