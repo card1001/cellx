@@ -240,7 +240,7 @@ impl DataStore {
         let reader = if ext == "parquet" {
             "read_parquet(?)".to_string()
         } else {
-            let delimiter = if ext == "tsv" { ", delim = '\\t'" } else { "" };
+            let delimiter = if ext == "tsv" { ", delim = '\\t'" } else { ", delim = ','" };
             format!(
                 "read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = '{}', decimal_separator = '.'{})",
                 encoding, delimiter
@@ -283,7 +283,7 @@ impl DataStore {
             }
             let utf16 = count >= 2 && ((bom[0] == 0xff && bom[1] == 0xfe) || (bom[0] == 0xfe && bom[1] == 0xff));
             let encoding = if utf16 { "utf-16" } else { "utf-8" };
-            let delimiter = if ext == "tsv" { ", delim = '\\t'" } else { "" };
+            let delimiter = if ext == "tsv" { ", delim = '\\t'" } else { ", delim = ','" };
             format!(
                 "DESCRIBE SELECT * FROM read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = '{}', decimal_separator = '.'{})",
                 encoding, delimiter
