@@ -51,6 +51,28 @@ describe("DataSource sorted keyset paging", () => {
     await vi.waitFor(() => expect(source.cell(257, 1)?.text).toBe("second"));
   });
 
+
+  it("does not let an in-flight sorted response overwrite a newer sorted view", async () => {
+    let resolveOld!: (value: KeysetPage) => void;
+    let resolveNew!: (value: KeysetPage) => void;
+    const oldRequest = new Promise<KeysetPage>((resolve) => { resolveOld = resolve; });
+    const newRequest = new Promise<KeysetPage>((resolve) => { resolveNew = resolve; });
+    vi.mocked(api.dataPageAfterSort)
+      .mockReturnValueOnce(oldRequest)
+      .mockReturnValueOnce(newRequest);
+    const source = new DataSource(info, ["Arial", 10]);
+
+    source.setView(sort, []);
+    source.setView({ column: "value", descending: true }, []);
+
+    resolveOld(keysetPage("stale", cursor));
+    await Promise.resolve();
+    expect(source.cell(1, 1)).toBeUndefined();
+
+    resolveNew(keysetPage("current", cursor));
+    await vi.waitFor(() => expect(source.cell(1, 1)?.text).toBe("current"));
+  });
+
   it("clears sorted cursors on reload and starts again without a stale cursor", async () => {
     vi.mocked(api.dataPageAfterSort)
       .mockResolvedValueOnce(keysetPage("before reload", cursor))
