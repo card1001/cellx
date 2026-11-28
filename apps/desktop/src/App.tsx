@@ -35,6 +35,7 @@ import {
   type TransformPreview,
   type AggregateFunction,
   type SavedConnector,
+  type ConnectorStatus,
   type TableProfile,
   type TransformJobSnapshot,
 } from "./api";
@@ -3991,6 +3992,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   const [output, setOutput] = useState("clean_result");
   const [saved, setSaved] = useState<SavedPipeline[]>([]);
   const [connectors, setConnectors] = useState<SavedConnector[]>([]);
+  const [connectorStatuses, setConnectorStatuses] = useState<ConnectorStatus[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [preview, setPreview] = useState<TransformPreview | null>(null);
   const [profile, setProfile] = useState<TableProfile | null>(null);
@@ -4011,6 +4013,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
   useEffect(() => {
     void api.transformPipelines().then(setSaved).catch((e) => setError(errorText(e)));
     void api.dataConnectors().then(setConnectors).catch((e) => setError(errorText(e)));
+    void api.dataConnectorStatuses().then(setConnectorStatuses).catch((e) => setError(errorText(e)));
     void api.listTransformJobs().then(setJobHistory).catch((e) => setError(errorText(e)));
   }, []);
   useEffect(() => {
@@ -4174,7 +4177,12 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
       <button disabled={busy} onClick={() => void addConnector()}>로컬 파일 연결 추가</button>
       {connectors.map((connector) => (
         <div key={connector.id} style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
-          <span style={{ flex: 1 }}>{connector.name} <span className="muted">→ {connector.table_name}</span></span>
+          <span style={{ flex: 1 }}>{connector.name} <span className="muted">→ {connector.table_name}</span>
+            <span className="muted"> · {(() => {
+              const status = connectorStatuses.find((item) => item.id === connector.id);
+              return !status ? "상태 확인 중" : !status.available ? "원본 파일 없음" : status.changed ? "파일 변경 감지" : "최신 상태";
+            })()}</span>
+          </span>
           <button disabled={busy} onClick={() => void runBusy(async () => {
             let table: TableInfo;
             try {
@@ -4187,6 +4195,7 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
               table = await api.refreshDataConnector(connector.id, true);
             }
             setConnectors(await api.dataConnectors());
+            setConnectorStatuses(await api.dataConnectorStatuses());
             await props.onExecuted(table);
           })}>새로 고침</button>
           <button disabled={busy} onClick={() => void runBusy(async () => {
