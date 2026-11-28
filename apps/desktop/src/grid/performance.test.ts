@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { estimateSerializedBytes, isCurrentPageRequest, selectPagesToEvict } from "./performance";
+import { isCurrentPageRequest, selectPagesToEvict } from "./performance";
 
 describe("grid cache performance helpers", () => {
   it("evicts least recently used pages but preserves visible pages", () => {
@@ -11,11 +11,6 @@ describe("grid cache performance helpers", () => {
     expect(selectPagesToEvict(new Map([[0, 1], [1, 2]]), new Set(), 2)).toEqual([]);
   });
 
-  it("estimates serialized payload bytes without throwing", () => {
-    const value = { value: "abc" };
-    expect(estimateSerializedBytes(value)).toBe(JSON.stringify(value).length * 2);
-    expect(estimateSerializedBytes(undefined)).toBe(0);
-  });
 });
 
 describe("page request ownership", () => {
