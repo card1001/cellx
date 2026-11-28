@@ -391,7 +391,7 @@ export class DataSource extends Emitter implements GridSource {
    */
   private async fetchPage(p: number, gen: number, token: number) {
     try {
-      if (!this.sort && p > 0 && !this.pageCursors.has(p - 1)) {
+      if (p > 0 && ((!this.sort && !this.pageCursors.has(p - 1)) || (this.sort && !this.sortedCursors.has(p - 1)))) {
         await this.pagePromises.get(p - 1)?.catch(() => undefined);
       }
       if (!isCurrentPageRequest(this.generation, gen, this.inflight.get(p), token)) return;
@@ -405,8 +405,16 @@ export class DataSource extends Emitter implements GridSource {
           this.info.name, p === 0 ? null : this.sortedCursors.get(p - 1)!, PAGE, this.sort, this.filters,
         );
         page = result.page;
-        if (result.next_cursor) this.sortedCursors.set(p, result.next_cursor);
-        else this.sortedCursors.delete(p);
+        if (result.next_cursor) {
+          this.sortedCursors.set(p, result.next_cursor);
+          while (this.sortedCursors.size > MAX_CURSOR_CHECKPOINTS) {
+            const oldest = this.sortedCursors.keys().next().value;
+            if (oldest === undefined) break;
+            this.sortedCursors.delete(oldest);
+          }
+        } else {
+          this.sortedCursors.delete(p);
+        }
       } else {
         page = await api.dataPage(this.info.name, p * PAGE, PAGE, this.sort, this.filters);
       }
