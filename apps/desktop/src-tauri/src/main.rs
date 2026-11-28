@@ -86,6 +86,7 @@ fn main() {
             pipeline_commands::profile_data_table,
             transform_jobs::start_transform_job,
             transform_jobs::get_transform_job,
+            transform_jobs::list_transform_jobs,
             transform_jobs::cancel_transform_job,
             pipeline_commands::transform_pipelines,
             pipeline_commands::save_transform_pipeline,
