@@ -3,7 +3,7 @@
 
 use std::any::Any;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use cellx_core::data::{ColumnFilter, Page, Sort, TableInfo};
 use cellx_core::project;
@@ -14,6 +14,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::recovery::RecoveryState;
+use cellx_core::project::{SavedConnector, SavedPipeline};
 
 pub struct Book {
     pub(crate) wb: Workbook,
@@ -21,25 +22,27 @@ pub struct Book {
     pub(crate) dirty: bool,
     /// Counts changes, so autosave knows whether there is anything new.
     pub(crate) edits: u64,
+    pub(crate) pipelines: Vec<SavedPipeline>,
+    pub(crate) connectors: Vec<SavedConnector>,
 }
 
 impl Book {
     pub fn new() -> cellx_core::Result<Self> {
-        Ok(Book { wb: Workbook::new()?, path: None, dirty: false, edits: 0 })
+        Ok(Book { wb: Workbook::new()?, path: None, dirty: false, edits: 0, pipelines: Vec::new(), connectors: Vec::new() })
     }
 
     pub fn open(path: &Path) -> cellx_core::Result<Self> {
-        let mut wb = if is_project(path) {
-            project::open_project(path)?
+        let (mut wb, pipelines, connectors) = if is_project(path) {
+            project::open_project_with_assets(path)?
         } else {
-            Workbook::open_xlsx(path)?
+            (Workbook::open_xlsx(path)?, Vec::new(), Vec::new())
         };
         wb.recalc()?;
-        Ok(Book { wb, path: Some(path.to_path_buf()), dirty: false, edits: 0 })
+        Ok(Book { wb, path: Some(path.to_path_buf()), dirty: false, edits: 0, pipelines, connectors })
     }
 }
 
-pub struct AppState(pub Mutex<Book>);
+pub struct AppState(pub Arc<Mutex<Book>>);
 
 pub(crate) type CmdResult<T> = Result<T, String>;
 
@@ -180,7 +183,9 @@ pub async fn save_file(state: State<'_, AppState>, recovery: State<'_, RecoveryS
     let p = PathBuf::from(&path);
     let mut book = lock(&state)?;
     if is_project(&p) {
-        project::save_project(&mut book.wb, &p).map_err(err)?;
+        let pipelines = book.pipelines.clone();
+        let connectors = book.connectors.clone();
+        project::save_project_with_assets(&mut book.wb, &p, &pipelines, &connectors).map_err(err)?;
     } else {
         book.wb.save_xlsx(&p).map_err(err)?;
     }

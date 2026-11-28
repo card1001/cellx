@@ -30,6 +30,14 @@ import {
   type RecalcStats,
   type SelectionStats,
   type TableInfo,
+  type TransformPipeline,
+  type SavedPipeline,
+  type TransformPreview,
+  type AggregateFunction,
+  type SavedConnector,
+  type ConnectorStatus,
+  type TableProfile,
+  type TransformJobSnapshot,
 } from "./api";
 import { colorScaleRule, dataBarRule, highlightRule, type HighlightKind, ICON_SETS, iconSetRule, ratingRule } from "./cf";
 import { CHART_KINDS, ChartLayer } from "./components/Chart";
@@ -3135,6 +3143,12 @@ export default function App() {
         {showSql && (
           <SqlPanel
             tables={info?.tables ?? []}
+            onExecuted={async (table) => {
+              await refreshInfo();
+              sources.current.delete(tabKey({ kind: "data", name: table.name }));
+              switchTab({ kind: "data", name: table.name });
+              say(`${table.name}: ${formatCount(table.rows)}행`);
+            }}
             onCreate={async (sql, name) => {
               const table = await run("쿼리 실행 중", () => api.queryToTable(sql, name));
               if (!table) return;
@@ -3951,7 +3965,7 @@ function DataBar(props: { source: DataSource; onChange(): void }) {
   );
 }
 
-function SqlPanel(props: { tables: TableInfo[]; onCreate(sql: string, name: string): Promise<void> }) {
+function SqlPanel(props: { tables: TableInfo[]; onCreate(sql: string, name: string): Promise<void>; onExecuted(table: TableInfo): Promise<void> }) {
   const first = props.tables[0];
   const groupCol = first?.columns.find((c) => c.kind === "Text") ?? first?.columns[0];
   const [sql, setSql] = useState(
@@ -3993,6 +4007,381 @@ function SqlPanel(props: { tables: TableInfo[]; onCreate(sql: string, name: stri
         <li>{tr("=XLOOKUP(A2, 표[주문번호], 표[금액])")}</li>
         <li>{tr("=DQUERY(\"SELECT ... FROM 표\")")}</li>
       </ul>
+      <TransformPanel tables={props.tables} onExecuted={props.onExecuted} />
     </aside>
+  );
+}
+
+function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInfo): Promise<void> }) {
+  const [source, setSource] = useState(props.tables[0]?.name ?? "");
+  const [columnsText, setColumnsText] = useState(props.tables[0]?.columns.map((c) => c.name).join(", ") ?? "");
+  const [filterColumn, setFilterColumn] = useState("");
+  const [filterValue, setFilterValue] = useState("");
+  const [joinTable, setJoinTable] = useState("");
+  const [joinLeft, setJoinLeft] = useState("");
+  const [joinRight, setJoinRight] = useState("");
+  const [groupColumnsText, setGroupColumnsText] = useState("");
+  const [aggregateColumn, setAggregateColumn] = useState("");
+  const [aggregateName, setAggregateName] = useState("total");
+  const [aggregateFunction, setAggregateFunction] = useState<AggregateFunction>("sum");
+  const [name, setName] = useState("정제 파이프라인");
+  const [output, setOutput] = useState("clean_result");
+  const [saved, setSaved] = useState<SavedPipeline[]>([]);
+  const [connectors, setConnectors] = useState<SavedConnector[]>([]);
+  const [connectorStatuses, setConnectorStatuses] = useState<ConnectorStatus[]>([]);
+  const [selectedId, setSelectedId] = useState("");
+  const [preview, setPreview] = useState<TransformPreview | null>(null);
+  const [profile, setProfile] = useState<TableProfile | null>(null);
+  const [job, setJob] = useState<TransformJobSnapshot | null>(null);
+  const [jobHistory, setJobHistory] = useState<TransformJobSnapshot[]>([]);
+  const [stepPreviews, setStepPreviews] = useState<{ step: number; preview: TransformPreview }[]>([]);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const current = props.tables.find((t) => t.name === source);
+  const joinedTable = props.tables.find((t) => t.name === joinTable);
+  useEffect(() => {
+    if (!props.tables.some((t) => t.name === source)) {
+      const next = props.tables[0];
+      setSource(next?.name ?? "");
+      setColumnsText(next?.columns.map((c) => c.name).join(", ") ?? "");
+    }
+  }, [props.tables, source]);
+  useEffect(() => {
+    void api.transformPipelines().then(setSaved).catch((e) => setError(errorText(e)));
+    void api.dataConnectors().then(setConnectors).catch((e) => setError(errorText(e)));
+    void api.dataConnectorStatuses().then(setConnectorStatuses).catch((e) => setError(errorText(e)));
+    void api.listTransformJobs().then(setJobHistory).catch((e) => setError(errorText(e)));
+  }, []);
+  useEffect(() => {
+    const stored = saved.find((item) => item.id === selectedId && item.pipeline.source_table === source);
+    if (!selectedId) {
+      setGroupColumnsText("");
+      setAggregateColumn("");
+      setAggregateFunction("sum");
+      setAggregateName("total");
+    }
+    const selected = stored?.pipeline.steps.find((step) => step.type === "select_columns");
+    setColumnsText(selected?.type === "select_columns"
+      ? selected.columns.join(", ")
+      : current?.columns.map((c) => c.name).join(", ") ?? "");
+    const filter = stored?.pipeline.steps.find((step) => step.type === "filter");
+    if (filter?.type === "filter" && filter.predicate.op === "compare") {
+      setFilterColumn(filter.predicate.column);
+      setFilterValue(filter.predicate.value.type === "text" ? filter.predicate.value.value : "");
+    } else {
+      setFilterColumn(current?.columns[0]?.name ?? "");
+      setFilterValue("");
+    }
+    const join = stored?.pipeline.steps.find((step) => step.type === "join");
+    if (join?.type === "join") {
+      setJoinTable(join.table);
+      setJoinLeft(join.left_column);
+      setJoinRight(join.right_column);
+    } else {
+      setJoinTable("");
+      setJoinLeft("");
+      setJoinRight("");
+    }
+  }, [source, selectedId, saved]);
+  const buildPipeline = (): TransformPipeline => {
+    if (!source) throw new Error("원본 데이터 시트를 선택하세요.");
+    const steps: TransformPipeline["steps"] = [];
+    if (filterColumn && filterValue.trim()) {
+      steps.push({
+        type: "filter",
+        predicate: { op: "compare", column: filterColumn, operator: "equal", value: { type: "text", value: filterValue } },
+      });
+    }
+    if (joinTable) {
+      if (!joinLeft || !joinRight) throw new Error("조인 기준 열을 모두 선택하세요.");
+      steps.push({ type: "join", table: joinTable, left_column: joinLeft, right_column: joinRight, kind: "left", suffix: joinTable });
+    }
+    const groups = groupColumnsText.split(",").map((v) => v.trim()).filter(Boolean);
+    const aggregates = (aggregateColumn.trim() || aggregateFunction === "count") && aggregateName.trim()
+      ? [{ function: aggregateFunction, column: aggregateColumn.trim() || null, as_name: aggregateName.trim() }]
+      : [];
+    if (groups.length || aggregates.length) {
+      steps.push({ type: "group_by", columns: groups, aggregates });
+    } else {
+      const selected = columnsText.split(",").map((v) => v.trim()).filter(Boolean);
+      if (selected.length) steps.push({ type: "select_columns", columns: selected });
+    }
+    return { source_table: source, steps };
+  };
+  const runBusy = async (work: () => Promise<void>) => {
+    setBusy(true);
+    setError("");
+    try { await work(); } catch (e) { setError(errorText(e)); } finally { setBusy(false); }
+  };
+  const addConnector = () => runBusy(async () => {
+    const picked = await openDialog({
+      multiple: false,
+      filters: [{ name: "CSV / TSV / Parquet", extensions: ["csv", "tsv", "parquet"] }],
+    });
+    if (typeof picked !== "string") return;
+    const fileName = picked.split(/[\\/]/).pop() ?? "source.csv";
+    const baseName = fileName.replace(/\.[^.]+$/, "") || "source";
+    const safeName = `data_${baseName.toLowerCase().replace(/[^a-z0-9_]/g, "_")}`.slice(0, 64);
+    const connector: SavedConnector = {
+      id: crypto.randomUUID(),
+      name: baseName.slice(0, 120),
+      path: picked,
+      table_name: safeName,
+      locale: getActiveLocale(),
+      schema: [],
+      fingerprint: "",
+    };
+    const table = await api.saveDataConnector(connector);
+    setConnectors(await api.dataConnectors());
+    setConnectorStatuses(await api.dataConnectorStatuses());
+    await props.onExecuted(table);
+  });
+  const profileNow = () => runBusy(async () => { setProfile(await api.profileDataTable(source)); });
+  const previewNow = () => runBusy(async () => { setStepPreviews([]); setPreview(await api.previewTransform(buildPipeline())); });
+  const previewStepsNow = () => runBusy(async () => {
+    const pipeline = buildPipeline();
+    if (!pipeline.steps.length) throw new Error("단계가 없습니다. 필터, 열 선택, 조인 또는 그룹 집계를 추가하세요.");
+    setPreview(null);
+    setStepPreviews([]);
+    for (let index = 0; index < pipeline.steps.length; index += 1) {
+      const partial = { source_table: pipeline.source_table, steps: pipeline.steps.slice(0, index + 1) };
+      const result = await api.previewTransform(partial);
+      setStepPreviews((previous) => [...previous, { step: index + 1, preview: result }]);
+    }
+  });
+  const saveNow = () => runBusy(async () => {
+    const pipeline = buildPipeline();
+    const id = selectedId || crypto.randomUUID();
+    const list = await api.saveTransformPipeline({ id, name: name.trim() || "새 파이프라인", pipeline });
+    setSaved(list);
+    setSelectedId(id);
+  });
+  const executeNow = () => runBusy(async () => {
+    if (!selectedId) throw new Error("먼저 파이프라인을 저장하세요.");
+    const started = await api.startTransformJob(selectedId, output.trim());
+    setJob(started);
+    let latest = started;
+    while (latest.status === "queued" || latest.status === "running" || latest.status === "cancelling") {
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+      latest = await api.getTransformJob(started.id);
+      setJob(latest);
+    }
+    if (latest.status === "failed") throw new Error(latest.error || "데이터 변환 작업에 실패했습니다.");
+    if (latest.status === "cancelled") return;
+    if (!latest.result) throw new Error("작업 결과를 찾을 수 없습니다.");
+    await props.onExecuted(latest.result);
+    setJobHistory(await api.listTransformJobs());
+  });
+  const loadSaved = (id: string) => {
+    setSelectedId(id);
+    const item = saved.find((p) => p.id === id);
+    if (!item) return;
+    setName(item.name);
+    setSource(item.pipeline.source_table);
+    const select = item.pipeline.steps.find((step) => step.type === "select_columns");
+    if (select?.type === "select_columns") setColumnsText(select.columns.join(", "));
+    const filter = item.pipeline.steps.find((step) => step.type === "filter");
+    if (filter?.type === "filter" && filter.predicate.op === "compare" && filter.predicate.value.type === "text") {
+      setFilterColumn(filter.predicate.column);
+      setFilterValue(filter.predicate.value.value);
+    } else {
+      setFilterValue("");
+    }
+    const join = item.pipeline.steps.find((step) => step.type === "join");
+    if (join?.type === "join") {
+      setJoinTable(join.table); setJoinLeft(join.left_column); setJoinRight(join.right_column);
+    } else {
+      setJoinTable(""); setJoinLeft(""); setJoinRight("");
+    }
+    const group = item.pipeline.steps.find((step) => step.type === "group_by");
+    if (group?.type === "group_by") {
+      setGroupColumnsText(group.columns.join(", "));
+      const aggregate = group.aggregates[0];
+      if (aggregate) {
+        setAggregateFunction(aggregate.function);
+        setAggregateColumn(aggregate.column ?? "");
+        setAggregateName(aggregate.as_name);
+      }
+    } else {
+      setGroupColumnsText(""); setAggregateColumn("");
+    }
+    setPreview(null);
+  };
+  return (
+    <section style={{ borderTop: "1px solid var(--border)", marginTop: 16, paddingTop: 12 }}>
+      <h4>로컬 파일 연결</h4>
+      <p className="muted">CSV, TSV, Parquet 파일을 로컬에서 가져오고 필요할 때 다시 불러옵니다. 파일 경로는 .cellx 프로젝트에 이 PC의 로컬 경로로 저장됩니다. CellX가 자동 전송하지 않지만 프로젝트 파일을 공유하면 경로 문자열도 함께 전달될 수 있습니다.</p>
+      <button disabled={busy} onClick={() => void addConnector()}>로컬 파일 연결 추가</button>
+      {connectors.map((connector) => (
+        <div key={connector.id} style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+          <span style={{ flex: 1 }}>{connector.name} <span className="muted">→ {connector.table_name}</span>
+            <span className="muted"> · {(() => {
+              const status = connectorStatuses.find((item) => item.id === connector.id);
+              return !status ? "상태 확인 중" : !status.available ? "원본 파일 없음" : status.changed ? "파일 변경 감지" : "최신 상태";
+            })()}</span>
+          </span>
+          <button disabled={busy} onClick={() => void runBusy(async () => {
+            let table: TableInfo;
+            try {
+              table = await api.refreshDataConnector(connector.id, false);
+            } catch (cause) {
+              const message = errorText(cause);
+              if (!message.includes("SCHEMA_DRIFT")) throw cause;
+              const detail = message.replace(/^SCHEMA_DRIFT:\\s*/, "");
+              if (!window.confirm(detail)) return;
+              table = await api.refreshDataConnector(connector.id, true);
+            }
+            setConnectors(await api.dataConnectors());
+            setConnectorStatuses(await api.dataConnectorStatuses());
+            await props.onExecuted(table);
+          })}>새로 고침</button>
+          <button disabled={busy} onClick={() => void runBusy(async () => {
+            setConnectors(await api.deleteDataConnector(connector.id));
+          })}>연결 해제</button>
+        </div>
+      ))}
+      <h4>데이터 변환 파이프라인</h4>
+      <label>저장된 파이프라인
+        <select value={selectedId} onChange={(e) => loadSaved(e.target.value)}>
+          <option value="">새 파이프라인</option>
+          {saved.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+        </select>
+      </label>
+      <label>파이프라인 이름
+        <input value={name} onChange={(e) => setName(e.target.value)} />
+      </label>
+      <label>원본 데이터 시트
+        <select value={source} onChange={(e) => { setSource(e.target.value); setSelectedId(""); setPreview(null); }}>
+          {props.tables.map((t) => <option key={t.name} value={t.name}>{t.name}</option>)}
+        </select>
+      </label>
+      <label>출력 열 (쉼표로 구분)
+        <input value={columnsText} onChange={(e) => setColumnsText(e.target.value)} placeholder="열 이름, 열 이름" />
+      </label>
+      <label>같음 조건 열
+        <select value={filterColumn} onChange={(e) => setFilterColumn(e.target.value)}>
+          {(current?.columns ?? []).map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+        </select>
+      </label>
+      <label>필터 값
+        <input value={filterValue} onChange={(e) => setFilterValue(e.target.value)} placeholder="비우면 필터 미적용" />
+      </label>
+      <details>
+        <summary>테이블 조인</summary>
+        <label>조인할 데이터 시트
+          <select value={joinTable} onChange={(e) => {
+            const table = e.target.value;
+            setJoinTable(table);
+            setJoinLeft(current?.columns[0]?.name ?? "");
+            setJoinRight(props.tables.find((t) => t.name === table)?.columns[0]?.name ?? "");
+          }}>
+            <option value="">조인 안 함</option>
+            {props.tables.filter((t) => t.name !== source).map((t) => <option key={t.name} value={t.name}>{t.name}</option>)}
+          </select>
+        </label>
+        {joinTable && <>
+          <label>원본 조인 열
+            <select value={joinLeft} onChange={(e) => setJoinLeft(e.target.value)}>
+              {(current?.columns ?? []).map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+            </select>
+          </label>
+          <label>대상 조인 열
+            <select value={joinRight} onChange={(e) => setJoinRight(e.target.value)}>
+              {(joinedTable?.columns ?? []).map((c) => <option key={c.name} value={c.name}>{c.name}</option>)}
+            </select>
+          </label>
+        </>}
+      </details>
+      <details>
+        <summary>그룹 및 집계</summary>
+        <label>그룹 기준 열 (쉼표 구분)
+          <input value={groupColumnsText} onChange={(e) => setGroupColumnsText(e.target.value)} placeholder="지역, 상품군" />
+        </label>
+        <label>집계 함수
+          <select value={aggregateFunction} onChange={(e) => setAggregateFunction(e.target.value as AggregateFunction)}>
+            <option value="sum">SUM</option><option value="count">COUNT</option><option value="average">AVERAGE</option>
+            <option value="min">MIN</option><option value="max">MAX</option>
+          </select>
+        </label>
+        <label>집계 대상 열
+          <select value={aggregateColumn} onChange={(e) => setAggregateColumn(e.target.value)}>
+            <option value="">COUNT(*) 또는 미사용</option>
+            {[...(current?.columns ?? []), ...(joinedTable?.columns ?? [])].map((c, i) => <option key={i} value={c.name}>{c.name}</option>)}
+          </select>
+        </label>
+        <label>집계 결과 열 이름
+          <input value={aggregateName} onChange={(e) => setAggregateName(e.target.value)} />
+        </label>
+      </details>
+      <label>결과 데이터 시트 이름
+        <input value={output} onChange={(e) => setOutput(e.target.value)} />
+      </label>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <button disabled={busy || !source} onClick={() => void profileNow()}>데이터 프로파일</button>
+        <button disabled={busy || !source} onClick={() => void previewNow()}>미리보기</button>
+        <button disabled={busy || !source} onClick={() => void previewStepsNow()}>단계별 미리보기</button>
+        <button disabled={busy || !source} onClick={() => void saveNow()}>저장</button>
+        <button disabled={busy || !selectedId} onClick={() => void executeNow()}>새 데이터 시트로 실행</button>
+        {job && (job.status === "queued" || job.status === "running" || job.status === "cancelling") && <button onClick={() => {
+          void api.cancelTransformJob(job.id).then(setJob).catch((e) => setError(errorText(e)));
+        }}>실행 취소</button>}
+        {selectedId && <button disabled={busy} onClick={() => void runBusy(async () => {
+          const list = await api.deleteTransformPipeline(selectedId);
+          setSaved(list); setSelectedId(""); setPreview(null);
+        })}>삭제</button>}
+      </div>
+      {error && <p role="alert" style={{ color: "var(--danger, #b42318)" }}>{error}</p>}
+      {job && <p className="muted" role="status">백그라운드 작업: {job.phase}{job.status === "failed" && job.error ? ` · ${job.error}` : ""}</p>}
+      {jobHistory.length > 0 && <details>
+        <summary>최근 변환 실행 이력 ({jobHistory.length})</summary>
+        <div style={{ overflow: "auto", maxHeight: 180 }}>
+          <table>
+            <thead><tr><th>작업 ID</th><th>상태</th><th>결과 행</th><th>오류</th></tr></thead>
+            <tbody>{jobHistory.map((item) => <tr key={item.id}>
+              <td>{item.id}</td><td>{item.status}</td>
+              <td>{item.result?.rows.toLocaleString() ?? "—"}</td>
+              <td>{item.error ?? "—"}</td>
+            </tr>)}</tbody>
+          </table>
+        </div>
+      </details>}
+      {profile && profile.table === source && <div>
+        <p className="muted">데이터 프로파일 · {profile.row_count.toLocaleString()}행 · {profile.columns.length}열</p>
+        <div style={{ overflow: "auto", maxHeight: 220 }}>
+          <table>
+            <thead><tr><th>열</th><th>형식</th><th>NULL</th><th>빈 문자열</th><th>고유값</th><th>최솟값</th><th>최댓값</th></tr></thead>
+            <tbody>{profile.columns.map((column) => {
+              const display = (value: typeof column.min) => value == null || value.t === "Empty" ? "—" : value.t === "Number" || value.t === "Bool" ? String(value.v) : value.v;
+              return <tr key={column.name}>
+                <td>{column.name}</td><td>{column.sql_type}</td>
+                <td>{column.null_count.toLocaleString()}</td><td>{column.empty_count.toLocaleString()}</td>
+                <td>{column.distinct_count.toLocaleString()}</td><td>{display(column.min)}</td><td>{display(column.max)}</td>
+              </tr>;
+            })}</tbody>
+          </table>
+        </div>
+      </div>}
+      {stepPreviews.length > 0 && <div>
+        <p className="muted">단계별 결과</p>
+        {stepPreviews.map(({ step, preview: result }) => (
+          <details key={step}>
+            <summary>단계 {step} · {result.rows.length}행{result.truncated ? " 이상" : ""} · {result.columns.length}열</summary>
+            <div style={{ overflow: "auto", maxHeight: 160 }}>
+              <table><thead><tr>{result.columns.map((column) => <th key={column}>{column}</th>)}</tr></thead>
+                <tbody>{result.rows.slice(0, 10).map((row, rowIndex) => <tr key={rowIndex}>{row.map((value, colIndex) => <td key={colIndex}>{value.t === "Empty" ? "" : value.t === "Number" ? value.v : value.t === "Bool" ? String(value.v) : value.v}</td>)}</tr>)}</tbody>
+              </table>
+            </div>
+          </details>
+        ))}
+      </div>}
+      {preview && <>
+        <p className="muted">미리보기: {preview.rows.length}행{preview.truncated ? " 이상" : ""} · {preview.columns.length}열</p>
+        <div style={{ overflow: "auto", maxHeight: 220 }}>
+          <table><thead><tr>{preview.columns.map((c) => <th key={c}>{c}</th>)}</tr></thead>
+            <tbody>{preview.rows.map((row, i) => <tr key={i}>{row.map((v, j) => <td key={j}>{v.t === "Empty" ? "" : v.t === "Number" ? v.v : v.t === "Bool" ? String(v.v) : v.v}</td>)}</tr>)}</tbody>
+          </table>
+        </div>
+      </>}
+    </section>
   );
 }

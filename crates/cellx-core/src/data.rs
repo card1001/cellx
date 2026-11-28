@@ -15,6 +15,7 @@ use serde::Serialize;
 
 use crate::error::{CellxError, Result};
 use crate::value::{from_duckdb, Scalar};
+use crate::transform::{TransformPipeline, TransformPlan, TransformValue};
 
 /// Column kind as the bridge needs it to translate Excel criteria.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -64,6 +65,24 @@ pub struct TableInfo {
     pub name: String,
     pub rows: u64,
     pub columns: Vec<ColumnInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ColumnProfile {
+    pub name: String,
+    pub sql_type: String,
+    pub null_count: u64,
+    pub empty_count: u64,
+    pub distinct_count: u64,
+    pub min: Option<Scalar>,
+    pub max: Option<Scalar>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TableProfile {
+    pub table: String,
+    pub row_count: u64,
+    pub columns: Vec<ColumnProfile>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -304,6 +323,61 @@ impl DataStore {
         self.table_info(table)
     }
 
+    /// Inspects a local CSV, TSV, or Parquet file without importing or mutating a data sheet.
+    /// The schema is read directly from DuckDB's file readers using a bound path parameter.
+    /// The text encoding is detected as on import; a file in a legacy encoding is
+    /// read through a converted sample of its first 8 MB.
+    pub fn inspect_file_schema(&self, path: &Path, locale: &str) -> Result<Vec<ColumnInfo>> {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        let describe = |file: &Path, reader: String| -> Result<Vec<ColumnInfo>> {
+            let path_text = file
+                .to_str()
+                .ok_or_else(|| CellxError::InvalidName(file.display().to_string()))?;
+            let mut stmt = self.conn.prepare(&format!("DESCRIBE SELECT * FROM {reader}"))?;
+            let columns = stmt
+                .query_map([path_text], |row| {
+                    let name: String = row.get(0)?;
+                    let sql_type: String = row.get(1)?;
+                    Ok(ColumnInfo { kind: ColumnKind::from_duckdb_type(&sql_type), name, sql_type })
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(columns)
+        };
+        if ext == "parquet" {
+            return describe(path, "read_parquet(?)".to_string());
+        }
+        let csv_reader = |encoding: &str| {
+            let delimiter = if ext == "tsv" { ", delim = '\\t'" } else { "" };
+            format!(
+                "read_csv(?, auto_detect = true, sample_size = 20480, ignore_errors = false, encoding = '{encoding}', decimal_separator = '.'{delimiter})"
+            )
+        };
+        let mut head = Vec::with_capacity(64 * 1024);
+        File::open(path)?.take(64 * 1024).read_to_end(&mut head)?;
+        match detect_encoding(&head, locale)? {
+            TextEncoding::Utf16 => describe(path, csv_reader("utf-16")),
+            TextEncoding::Legacy(enc) => {
+                static INSPECT_ID: AtomicU64 = AtomicU64::new(1);
+                let id = INSPECT_ID.fetch_add(1, Ordering::Relaxed);
+                let temp = std::env::temp_dir().join(format!("cellx-inspect-{}-{id}.{ext}", std::process::id()));
+                let result = (|| -> Result<Vec<ColumnInfo>> {
+                    let mut sample = Vec::with_capacity(8 << 20);
+                    File::open(path)?.take(8 << 20).read_to_end(&mut sample)?;
+                    // Whole lines only.
+                    if let Some(end) = sample.iter().rposition(|&b| b == b'\n') {
+                        sample.truncate(end + 1);
+                    }
+                    let (text, _) = enc.decode_without_bom_handling(&sample);
+                    fs::write(&temp, text.as_bytes())?;
+                    describe(&temp, csv_reader("utf-8"))
+                })();
+                let _ = fs::remove_file(&temp);
+                result
+            }
+            _ => describe(path, csv_reader("utf-8")),
+        }
+    }
+
     /// Converts a CSV from a legacy encoding to a temporary UTF-8 file, a
     /// megabyte at a time, and imports that. Bytes that are not valid in the
     /// encoding make it an encoding error rather than silent replacement.
@@ -399,6 +473,146 @@ impl DataStore {
             .find(|c| c.name.eq_ignore_ascii_case(column))
             .cloned()
             .ok_or_else(|| CellxError::UnknownColumn(format!("{table}[{column}]")))
+    }
+
+    /// Computes bounded, column-level data quality statistics without loading table rows.
+    /// All identifiers come from the inspected schema and are quoted before SQL construction.
+    pub fn profile(&mut self, table: &str) -> Result<TableProfile> {
+        let info = self.table_info(table)?;
+        let mut expressions = Vec::with_capacity(info.columns.len() * 5);
+        for column in &info.columns {
+            let ident = quote_ident(&column.name);
+            let empty_expr = if column.kind == ColumnKind::Text {
+                format!("count(*) FILTER (WHERE {ident} = '')")
+            } else {
+                "CAST(0 AS BIGINT)".to_string()
+            };
+            expressions.push(format!("count(*) FILTER (WHERE {ident} IS NULL)"));
+            expressions.push(empty_expr);
+            expressions.push(format!("count(DISTINCT {ident})"));
+            expressions.push(format!("min({ident})"));
+            expressions.push(format!("max({ident})"));
+        }
+        // One aggregate query avoids rescanning a large table once per column.
+        let sql = format!(
+            "SELECT {} FROM {}",
+            expressions.join(", "),
+            quote_ident(table)
+        );
+        let (_, rows, _) = self.rows(&sql, &[], 1)?;
+        let values = rows.into_iter().next().ok_or_else(|| {
+            CellxError::Bridge("데이터 프로파일을 계산하지 못했습니다".into())
+        })?;
+        let count = |value: &Scalar| match value {
+            Scalar::Number(n) if n.is_finite() && *n >= 0.0 => *n as u64,
+            _ => 0,
+        };
+        let mut columns = Vec::with_capacity(info.columns.len());
+        for (index, column) in info.columns.iter().enumerate() {
+            let offset = index * 5;
+            columns.push(ColumnProfile {
+                name: column.name.clone(),
+                sql_type: column.sql_type.clone(),
+                null_count: count(&values[offset]),
+                empty_count: count(&values[offset + 1]),
+                distinct_count: count(&values[offset + 2]),
+                min: if values[offset + 3] == Scalar::Empty { None } else { Some(values[offset + 3].clone()) },
+                max: if values[offset + 4] == Scalar::Empty { None } else { Some(values[offset + 4].clone()) },
+            });
+        }
+        Ok(TableProfile { table: info.name, row_count: info.rows, columns })
+    }
+
+
+    /// Builds a validated transformation plan against the current source schema.
+    ///
+    /// Planning does not execute SQL or modify the source table. The caller can
+    /// inspect the generated SQL and bound parameters before scheduling execution.
+    pub fn plan_transform(&mut self, pipeline: &TransformPipeline) -> Result<TransformPlan> {
+        let info = self.table_info(&pipeline.source_table)?;
+        let columns = info.columns.iter().map(|column| column.name.clone()).collect::<Vec<_>>();
+        let mut joined_schemas = HashMap::new();
+        for table in pipeline.required_join_tables() {
+            let joined = self.table_info(&table)?;
+            joined_schemas.insert(
+                joined.name,
+                joined.columns.iter().map(|column| column.name.clone()).collect(),
+            );
+        }
+        pipeline.compile_with_schemas(&columns, &joined_schemas)
+    }
+
+    /// Returns a bounded preview without materializing or modifying a table.
+    pub fn preview_transform(
+        &mut self,
+        pipeline: &TransformPipeline,
+        max_rows: usize,
+    ) -> Result<(Vec<String>, Vec<Vec<Scalar>>, bool)> {
+        let plan = self.plan_transform(pipeline)?;
+        let parameters = plan.parameters.iter().map(|value| match value {
+            TransformValue::Text(value) => duckdb::types::Value::Text(value.clone()),
+            TransformValue::Number(value) => duckdb::types::Value::Double(*value),
+            TransformValue::Boolean(value) => duckdb::types::Value::Boolean(*value),
+        }).collect::<Vec<_>>();
+        let visible_limit = max_rows.clamp(1, 500);
+        let limit = visible_limit.saturating_add(1);
+        let sql = format!(
+            "SELECT * FROM ({}) AS {} LIMIT {}",
+            plan.sql,
+            quote_ident("_cellx_preview"),
+            limit
+        );
+        let (mut columns, mut rows, engine_truncated) = self.rows(&sql, &parameters, limit)?;
+        let truncated = engine_truncated || rows.len() > visible_limit;
+        rows.truncate(visible_limit);
+        // _rid is retained for stable internal ordering, but hidden in previews.
+        if columns.first().is_some_and(|name| name == "_rid") {
+            columns.remove(0);
+            for row in &mut rows {
+                if !row.is_empty() { row.remove(0); }
+            }
+        }
+        Ok((columns, rows, truncated))
+    }
+
+    /// Executes a validated pipeline into a separate data sheet.
+    ///
+    /// The source is never modified. The output is replaced only after DuckDB
+    /// successfully evaluates the parameterized CREATE TABLE AS statement.
+    pub fn execute_transform(
+        &mut self,
+        output_table: &str,
+        pipeline: &TransformPipeline,
+    ) -> Result<TableInfo> {
+        if !is_valid_table_name(output_table) {
+            return Err(CellxError::InvalidName(output_table.to_string()));
+        }
+        if output_table.eq_ignore_ascii_case(&pipeline.source_table)
+            || pipeline.required_join_tables().iter().any(|table| output_table.eq_ignore_ascii_case(table))
+        {
+            return Err(CellxError::Bridge(
+                "변환 결과를 원본 또는 조인 입력 데이터 시트에 덮어쓸 수 없습니다".into(),
+            ));
+        }
+
+        let plan = self.plan_transform(pipeline)?;
+        let parameters = plan
+            .parameters
+            .iter()
+            .map(|value| match value {
+                TransformValue::Text(value) => duckdb::types::Value::Text(value.clone()),
+                TransformValue::Number(value) => duckdb::types::Value::Double(*value),
+                TransformValue::Boolean(value) => duckdb::types::Value::Boolean(*value),
+            })
+            .collect::<Vec<_>>();
+        let sql = format!(
+            "CREATE OR REPLACE TABLE {} AS {}",
+            quote_ident(output_table),
+            plan.sql
+        );
+        self.conn.execute(&sql, params_from_iter(parameters.iter()))?;
+        self.touch(output_table);
+        self.table_info(output_table)
     }
 
     /// Runs a query that returns one value.
@@ -998,6 +1212,61 @@ mod tests {
     }
 
     #[test]
+    fn profile_reports_null_empty_distinct_and_range_statistics() {
+        let mut store = store_with_sales();
+        let profile = store.profile("sales").unwrap();
+        assert_eq!(profile.row_count, 4);
+        let amount = profile.columns.iter().find(|c| c.name == "amount").unwrap();
+        assert_eq!(amount.null_count, 1);
+        assert_eq!(amount.distinct_count, 3);
+        assert_eq!(amount.min, Some(Scalar::Number(100.0)));
+        assert_eq!(amount.max, Some(Scalar::Number(300.0)));
+        let region = profile.columns.iter().find(|c| c.name == "region").unwrap();
+        assert_eq!(region.distinct_count, 3);
+        assert_eq!(region.empty_count, 0);
+    }
+
+    #[test]
+    fn inspect_csv_schema_does_not_import_or_mutate_a_table() {
+        let path = std::env::temp_dir().join(format!("cellx-inspect-schema-{}.csv", std::process::id()));
+        fs::write(&path, "region,amount\nSeoul,12.5\nBusan,7.25\n").unwrap();
+        let store = DataStore::open_in_memory().unwrap();
+        let schema = store.inspect_file_schema(&path, "ko-KR").unwrap();
+        assert_eq!(schema.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(), vec!["region", "amount"]);
+        assert_eq!(schema[0].kind, ColumnKind::Text);
+        assert_eq!(schema[1].kind, ColumnKind::Number);
+        assert!(!store.has_table("schema_preview"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn inspect_cp949_csv_schema_decodes_korean_headers() {
+        let path = std::env::temp_dir().join(format!("cellx-inspect-cp949-{}.csv", std::process::id()));
+        let (bytes, _, _) = encoding_rs::EUC_KR.encode("지역,금액\n서울,12\n부산,7\n");
+        fs::write(&path, &bytes).unwrap();
+        let store = DataStore::open_in_memory().unwrap();
+        let schema = store.inspect_file_schema(&path, "ko-KR").unwrap();
+        assert_eq!(schema.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["지역", "금액"]);
+        assert_eq!(schema[1].kind, ColumnKind::Number);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn inspect_utf16_csv_schema_uses_the_import_encoding() {
+        let path = std::env::temp_dir().join(format!("cellx-inspect-utf16-{}.csv", std::process::id()));
+        let mut bytes = vec![0xff, 0xfe];
+        for unit in "name,amount\nalpha,12\n".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(&path, bytes).unwrap();
+        let store = DataStore::open_in_memory().unwrap();
+        let schema = store.inspect_file_schema(&path, "ko-KR").unwrap();
+        assert_eq!(schema.len(), 2);
+        assert_eq!(schema[0].name, "name");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn page_sorts_and_filters() {
         let mut s = store_with_sales();
         let page = s
@@ -1011,6 +1280,122 @@ mod tests {
             .unwrap();
         assert_eq!(page.total, 2);
         assert_eq!(page.rows[0][1], Scalar::Number(300.0));
+    }
+
+    #[test]
+    fn transform_pipeline_creates_a_separate_result_table() {
+        use crate::transform::{
+            CompareOperator, FilterExpr, TransformPipeline, TransformStep, TransformValue, SortKey,
+        };
+
+        let mut store = store_with_sales();
+        let pipeline = TransformPipeline {
+            source_table: "sales".into(),
+            steps: vec![
+                TransformStep::Filter {
+                    predicate: FilterExpr::Compare {
+                        column: "status".into(),
+                        operator: CompareOperator::NotEqual,
+                        value: TransformValue::Text("취소".into()),
+                    },
+                },
+                TransformStep::SelectColumns {
+                    columns: vec!["region".into(), "amount".into()],
+                },
+                TransformStep::Sort {
+                    keys: vec![SortKey {
+                        column: "amount".into(),
+                        descending: true,
+                    }],
+                },
+            ],
+        };
+
+        let result = store.execute_transform("sales_clean", &pipeline).unwrap();
+        assert_eq!(result.rows, 3);
+        assert_eq!(
+            result.columns.iter().map(|column| column.name.as_str()).collect::<Vec<_>>(),
+            vec!["region", "amount"]
+        );
+        assert_eq!(
+            store.scalar("SELECT amount FROM sales_clean LIMIT 1", &[]).unwrap(),
+            Scalar::Number(300.0)
+        );
+        assert_eq!(store.table_info("sales").unwrap().rows, 4);
+    }
+
+    #[test]
+    fn transform_pipeline_cannot_overwrite_its_source() {
+        use crate::transform::TransformPipeline;
+
+        let mut store = store_with_sales();
+        let pipeline = TransformPipeline {
+            source_table: "sales".into(),
+            steps: vec![],
+        };
+        assert!(store.execute_transform("SALES", &pipeline).is_err());
+        assert_eq!(store.table_info("sales").unwrap().rows, 4);
+    }
+
+    #[test]
+    fn join_and_group_by_materialize_expected_aggregates() {
+        use crate::transform::{AggregateFunction, AggregateSpec, JoinKind, TransformPipeline, TransformStep};
+
+        let mut store = DataStore::open_in_memory().unwrap();
+        store.create_table_from_sql(
+            "orders",
+            "SELECT * FROM (VALUES (1, 10.0::DOUBLE), (1, 20.0), (2, 15.0), (3, 7.0)) AS t(customer_id, amount)",
+        ).unwrap();
+        store.create_table_from_sql(
+            "customers",
+            "SELECT * FROM (VALUES (1, '서울'), (2, '부산')) AS t(id, region)",
+        ).unwrap();
+        let pipeline = TransformPipeline {
+            source_table: "orders".into(),
+            steps: vec![
+                TransformStep::Join {
+                    table: "customers".into(),
+                    left_column: "customer_id".into(),
+                    right_column: "id".into(),
+                    kind: JoinKind::Left,
+                    suffix: "customer".into(),
+                },
+                TransformStep::GroupBy {
+                    columns: vec!["region".into()],
+                    aggregates: vec![AggregateSpec {
+                        function: AggregateFunction::Sum,
+                        column: Some("amount".into()),
+                        as_name: "total".into(),
+                    }],
+                },
+            ],
+        };
+        assert!(store.execute_transform("customers", &pipeline).is_err());
+        assert_eq!(store.table_info("customers").unwrap().rows, 2);
+        let result = store.execute_transform("regional_totals", &pipeline).unwrap();
+        assert_eq!(result.rows, 3);
+        assert_eq!(
+            store.scalar("SELECT total FROM regional_totals WHERE region = '서울'", &[]).unwrap(),
+            Scalar::Number(30.0)
+        );
+        assert_eq!(store.table_info("orders").unwrap().rows, 4);
+    }
+
+    #[test]
+    fn transform_preview_is_bounded_and_does_not_create_a_table() {
+        use crate::transform::{TransformPipeline, TransformStep};
+
+        let mut store = store_with_sales();
+        let pipeline = TransformPipeline {
+            source_table: "sales".into(),
+            steps: vec![TransformStep::Limit { rows: 1000 }],
+        };
+        let (columns, rows, truncated) = store.preview_transform(&pipeline, 2).unwrap();
+        assert_eq!(columns.len(), 4);
+        assert_eq!(rows.len(), 2);
+        assert!(truncated);
+        assert!(!store.has_table("preview"));
+        assert_eq!(store.table_info("sales").unwrap().rows, 4);
     }
 
     #[test]

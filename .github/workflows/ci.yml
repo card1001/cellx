@@ -55,9 +55,26 @@ jobs:
       - run: pnpm test
       - run: pnpm build
 
+  desktop-check:
+    name: Tauri 명령 크레이트 컴파일 검사
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Tauri Linux 시스템 의존성
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl wget file libssl-dev \
+            libwebkit2gtk-4.1-dev libxdo-dev libayatana-appindicator3-dev \
+            librsvg2-dev
+      - name: 데스크톱 명령 크레이트 및 전체 타깃 컴파일
+        run: cargo check -p cellx-desktop --all-targets
+
   desktop:
-    name: 데스크톱 빌드 (${{ matrix.platform }})
-    needs: [core, frontend]
+    name: 데스크톱 패키지 빌드 (${{ matrix.platform }})
+    needs: [core, frontend, desktop-check]
     if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false

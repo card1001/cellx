@@ -477,6 +477,64 @@ export interface TableInfo {
   columns: ColumnInfo[];
 }
 
+export type TransformValue =
+  | { type: "text"; value: string }
+  | { type: "number"; value: number }
+  | { type: "boolean"; value: boolean };
+
+export type CompareOperator = "equal" | "not_equal" | "greater_than" | "greater_than_or_equal" | "less_than" | "less_than_or_equal";
+export type FilterExpr =
+  | { op: "compare"; column: string; operator: CompareOperator; value: TransformValue }
+  | { op: "is_null"; column: string; negated: boolean }
+  | { op: "and" | "or"; conditions: FilterExpr[] }
+  | { op: "not"; expression: FilterExpr };
+
+export type CastType = "text" | "integer" | "big_int" | "double" | "boolean" | "date" | "timestamp";
+export interface TransformSortKey { column: string; descending: boolean }
+export type JoinKind = "inner" | "left";
+export type AggregateFunction = "count" | "sum" | "average" | "min" | "max";
+export interface AggregateSpec { function: AggregateFunction; column: string | null; as_name: string }
+export type TransformStep =
+  | { type: "select_columns"; columns: string[] }
+  | { type: "filter"; predicate: FilterExpr }
+  | { type: "rename_column"; from: string; to: string }
+  | { type: "cast_column"; column: string; target: CastType }
+  | { type: "sort"; keys: TransformSortKey[] }
+  | { type: "limit"; rows: number }
+  | { type: "join"; table: string; left_column: string; right_column: string; kind: JoinKind; suffix: string }
+  | { type: "group_by"; columns: string[]; aggregates: AggregateSpec[] };
+export interface TransformPipeline { source_table: string; steps: TransformStep[] }
+export interface SavedPipeline { id: string; name: string; pipeline: TransformPipeline }
+export interface SavedConnector {
+  id: string; name: string; path: string; table_name: string; locale: string;
+  schema: [string, string][];
+  fingerprint: string;
+}
+export interface ConnectorStatus { id: string; available: boolean; changed: boolean }
+export interface TransformPreview { columns: string[]; rows: Scalar[][]; truncated: boolean }
+export interface ColumnProfile {
+  name: string;
+  sql_type: string;
+  null_count: number;
+  empty_count: number;
+  distinct_count: number;
+  min: Scalar | null;
+  max: Scalar | null;
+}
+export interface TableProfile {
+  table: string;
+  row_count: number;
+  columns: ColumnProfile[];
+}
+export interface TransformJobSnapshot {
+  id: string;
+  status: "queued" | "running" | "cancelling" | "completed" | "cancelled" | "failed";
+  phase: string;
+  result: TableInfo | null;
+  error: string | null;
+}
+
+
 export interface Page {
   columns: string[];
   row_ids: number[];
@@ -721,6 +779,24 @@ export const api = {
   previewDataFile: (path: string, locale: string, encoding: string | null) =>
     invoke<FilePreview>("preview_data_file", { path, locale, encoding }),
   queryToTable: (sql: string, name: string) => invoke<TableInfo>("query_to_table", { sql, name }),
+  profileDataTable: (table: string) => invoke<TableProfile>("profile_data_table", { table }),
+  transformPipelines: () => invoke<SavedPipeline[]>("transform_pipelines"),
+  saveTransformPipeline: (saved: SavedPipeline) => invoke<SavedPipeline[]>("save_transform_pipeline", { saved }),
+  deleteTransformPipeline: (id: string) => invoke<SavedPipeline[]>("delete_transform_pipeline", { id }),
+  previewTransform: (pipeline: TransformPipeline) => invoke<TransformPreview>("preview_transform", { pipeline }),
+  executeTransformPipeline: (id: string, outputTable: string) =>
+    invoke<TableInfo>("execute_transform_pipeline", { id, outputTable }),
+  startTransformJob: (pipelineId: string, outputTable: string) =>
+    invoke<TransformJobSnapshot>("start_transform_job", { pipelineId, outputTable }),
+  getTransformJob: (id: string) => invoke<TransformJobSnapshot>("get_transform_job", { id }),
+  listTransformJobs: () => invoke<TransformJobSnapshot[]>("list_transform_jobs"),
+  cancelTransformJob: (id: string) => invoke<TransformJobSnapshot>("cancel_transform_job", { id }),
+  dataConnectors: () => invoke<SavedConnector[]>("data_connectors"),
+  dataConnectorStatuses: () => invoke<ConnectorStatus[]>("data_connector_statuses"),
+  saveDataConnector: (connector: SavedConnector) => invoke<TableInfo>("save_data_connector", { connector }),
+  refreshDataConnector: (id: string, acceptSchemaChange = false) =>
+    invoke<TableInfo>("refresh_data_connector", { id, acceptSchemaChange }),
+  deleteDataConnector: (id: string) => invoke<SavedConnector[]>("delete_data_connector", { id }),
   dataPage: (table: string, offset: number, limit: number, sort: Sort | null, filters: ColumnFilter[]) =>
     invoke<Page>("data_page", { table, offset, limit, sort, filters }),
   updateDataCell: (table: string, rid: number, column: string, text: string) =>

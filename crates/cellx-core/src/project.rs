@@ -21,6 +21,32 @@ use crate::data::DataStore;
 use crate::error::{CellxError, Result};
 use crate::extras::PivotDef;
 use crate::workbook::{BridgeCell, Workbook};
+use crate::transform::TransformPipeline;
+
+/// A named, project-persisted transformation recipe.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SavedPipeline {
+    pub id: String,
+    pub name: String,
+    pub pipeline: TransformPipeline,
+}
+
+/// A reusable local file source. Paths are intentionally local to the machine
+/// and are never uploaded or resolved through a remote service.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SavedConnector {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub table_name: String,
+    pub locale: String,
+    /// Schema snapshot captured from the source file, used to prevent accidental refresh drift.
+    #[serde(default)]
+    pub schema: Vec<(String, String)>,
+    /// Metadata fingerprint (file size + modification time); not a content hash.
+    #[serde(default)]
+    pub fingerprint: String,
+}
 
 pub const FORMAT_VERSION: u32 = 1;
 
@@ -53,6 +79,19 @@ pub fn new_work_dir() -> Result<PathBuf> {
 }
 
 pub fn save_project(wb: &mut Workbook, path: &Path) -> Result<()> {
+    save_project_with_assets(wb, path, &[], &[])
+}
+
+pub fn save_project_with_pipelines(wb: &mut Workbook, path: &Path, pipelines: &[SavedPipeline]) -> Result<()> {
+    save_project_with_assets(wb, path, pipelines, &[])
+}
+
+pub fn save_project_with_assets(
+    wb: &mut Workbook,
+    path: &Path,
+    pipelines: &[SavedPipeline],
+    connectors: &[SavedConnector],
+) -> Result<()> {
     if wb.data_path().is_none() {
         let dir = new_work_dir()?;
         wb.persist_data_to(&dir.join("data.duckdb"))?;
@@ -85,6 +124,12 @@ pub fn save_project(wb: &mut Workbook, path: &Path) -> Result<()> {
         zip_err(zip.start_file("pivots.json", opts))?;
         zip.write_all(&serde_json::to_vec_pretty(&wb.pivots()).map_err(json_err)?)?;
 
+        zip_err(zip.start_file("pipelines.json", opts))?;
+        zip.write_all(&serde_json::to_vec_pretty(pipelines).map_err(json_err)?)?;
+
+        zip_err(zip.start_file("connectors.json", opts))?;
+        zip.write_all(&serde_json::to_vec_pretty(connectors).map_err(json_err)?)?;
+
         let bridges: Vec<StoredBridge> = wb
             .bridges()
             .iter()
@@ -108,6 +153,15 @@ pub fn save_project(wb: &mut Workbook, path: &Path) -> Result<()> {
 }
 
 pub fn open_project(path: &Path) -> Result<Workbook> {
+    Ok(open_project_with_assets(path)?.0)
+}
+
+pub fn open_project_with_pipelines(path: &Path) -> Result<(Workbook, Vec<SavedPipeline>)> {
+    let (wb, pipelines, _) = open_project_with_assets(path)?;
+    Ok((wb, pipelines))
+}
+
+pub fn open_project_with_assets(path: &Path) -> Result<(Workbook, Vec<SavedPipeline>, Vec<SavedConnector>)> {
     let file = File::open(path)?;
     let mut zip = zip_err(zip::ZipArchive::new(file))?;
 
@@ -151,7 +205,18 @@ pub fn open_project(path: &Path) -> Result<Workbook> {
         wb.set_pivots(pivots);
     }
     wb.recalc()?;
-    Ok(wb)
+    // Pipelines were added after the initial .cellx format; older projects remain valid.
+    let pipelines = if zip.file_names().any(|name| name.is_ok_and(|entry| entry == "pipelines.json")) {
+        serde_json::from_slice(&read_entry(&mut zip, "pipelines.json")?).map_err(json_err)?
+    } else {
+        Vec::new()
+    };
+    let connectors = if zip.file_names().any(|name| name.is_ok_and(|entry| entry == "connectors.json")) {
+        serde_json::from_slice(&read_entry(&mut zip, "connectors.json")?).map_err(json_err)?
+    } else {
+        Vec::new()
+    };
+    Ok((wb, pipelines, connectors))
 }
 
 // Upper bounds for untrusted project archives. These limits are intentionally
@@ -239,9 +304,28 @@ mod tests {
         wb.set_input(0, 1, 2, "=A1*10").unwrap();
         let dir = new_work_dir().unwrap();
         let path = dir.join("book.cellx");
-        save_project(&mut wb, &path).unwrap();
+        let saved_pipeline = SavedPipeline {
+            id: "pipeline-1".into(),
+            name: "Clean sales".into(),
+            pipeline: TransformPipeline {
+                source_table: "sales".into(),
+                steps: vec![],
+            },
+        };
+        let saved_connector = SavedConnector {
+            id: "connector-1".into(),
+            name: "Sales source".into(),
+            path: "/local/sales.csv".into(),
+            table_name: "sales".into(),
+            locale: "ko-KR".into(),
+            schema: vec![("region".into(), "VARCHAR".into()), ("amount".into(), "DOUBLE".into())],
+            fingerprint: "123:456".into(),
+        };
+        save_project_with_assets(&mut wb, &path, &[saved_pipeline.clone()], &[saved_connector.clone()]).unwrap();
 
-        let mut reopened = open_project(&path).unwrap();
+        let (mut reopened, pipelines, connectors) = open_project_with_assets(&path).unwrap();
+        assert_eq!(pipelines, vec![saved_pipeline]);
+        assert_eq!(connectors, vec![saved_connector]);
         assert_eq!(reopened.value(0, 1, 2).unwrap(), Scalar::Number(40.0));
         assert_eq!(reopened.input(0, 1, 1).unwrap(), "=SUM(sales[v])");
         // The data sheet came back and the bridge still works against it.
