@@ -83,23 +83,7 @@ import { canPointAt, completeFunctions, cycleAbsolute, functionPrefixAt, insertR
 import { fontCss, Grid, type Hit, type RefBox, type Selection } from "./grid/Grid";
 import { addr, colName, normalize, parseAddr, type Pos, type Range, rangeLabel, toTsv } from "./grid/model";
 import { DataSource, SheetSource } from "./grid/sources";
-
-type Tab = { kind: "sheet"; index: number } | { kind: "data"; name: string };
-const tabKey = (t: Tab) => (t.kind === "sheet" ? `s:${t.index}` : `d:${t.name}`);
-const START: Selection = { anchor: { r: 1, c: 1 }, focus: { r: 1, c: 1 } };
-
-interface Session {
-  tab: Tab;
-  pos: Pos;
-  text: string;
-  /** Text before editing, to skip writes that change nothing. */
-  original: string;
-  caret: number;
-  /** enter: arrows leave the cell (or point); edit (F2): arrows move the caret. */
-  mode: "enter" | "edit";
-  origin: "cell" | "bar";
-  point: PointRef | null;
-}
+import { START, tabKey, type Session, type Tab } from "./appTypes";
 
 type Dialog =
   | { kind: "prompt"; title: string; label: string; value: string; resolve(v: string | null): void }
