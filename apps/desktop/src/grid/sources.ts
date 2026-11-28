@@ -237,6 +237,7 @@ export class SheetSource extends Emitter implements GridSource {
 
 const PAGE = 256;
 const MAX_CACHED_PAGES = 64;
+const MAX_CURSOR_CHECKPOINTS = 256;
 
 function pad(n: number) {
   return String(n).padStart(2, "0");
@@ -415,7 +416,14 @@ export class DataSource extends Emitter implements GridSource {
     this.pageAccess.set(p, ++this.accessClock);
     this.pageBytes.set(p, estimateSerializedBytes(page));
     const lastRid = page.row_ids[page.row_ids.length - 1];
-    if (lastRid !== undefined) this.pageCursors.set(p, lastRid);
+    if (lastRid !== undefined) {
+      this.pageCursors.set(p, lastRid);
+      while (this.pageCursors.size > MAX_CURSOR_CHECKPOINTS) {
+        const oldest = this.pageCursors.keys().next().value;
+        if (oldest === undefined) break;
+        this.pageCursors.delete(oldest);
+      }
+    }
     this.prunePages();
     this.emit();
   }
