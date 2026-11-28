@@ -493,6 +493,7 @@ export interface SavedConnector {
   schema: [string, string][];
   fingerprint: string;
 }
+export interface ConnectorStatus { id: string; available: boolean; changed: boolean }
 export interface TransformPreview { columns: string[]; rows: Scalar[][]; truncated: boolean }
 export interface ColumnProfile {
   name: string;
@@ -771,6 +772,7 @@ export const api = {
   listTransformJobs: () => invoke<TransformJobSnapshot[]>("list_transform_jobs"),
   cancelTransformJob: (id: string) => invoke<TransformJobSnapshot>("cancel_transform_job", { id }),
   dataConnectors: () => invoke<SavedConnector[]>("data_connectors"),
+  dataConnectorStatuses: () => invoke<ConnectorStatus[]>("data_connector_statuses"),
   saveDataConnector: (connector: SavedConnector) => invoke<TableInfo>("save_data_connector", { connector }),
   refreshDataConnector: (id: string, acceptSchemaChange = false) =>
     invoke<TableInfo>("refresh_data_connector", { id, acceptSchemaChange }),
