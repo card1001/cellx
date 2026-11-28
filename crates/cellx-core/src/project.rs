@@ -61,6 +61,9 @@ pub struct SavedTransformRun {
     pub id: String,
     pub pipeline_id: String,
     pub output_table: String,
+    /// Exact recipe used by this run, retained so a rerun is reproducible.
+    #[serde(default)]
+    pub pipeline: Option<TransformPipeline>,
     pub status: String,
     pub phase: String,
     #[serde(default)]
@@ -373,6 +376,7 @@ mod tests {
             id: "transform-1".into(),
             pipeline_id: "pipeline-1".into(),
             output_table: "clean_sales".into(),
+            pipeline: Some(saved_pipeline.pipeline.clone()),
             status: "completed".into(),
             phase: "완료".into(),
             incremental: true,
