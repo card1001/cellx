@@ -77,8 +77,8 @@ pub fn start_transform_job(
         let mut records = jobs_map.lock().map_err(|_| "작업 상태를 잠글 수 없습니다".to_string())?;
         // Bound in-memory job history for long-running desktop sessions.
         if records.len() >= 100 {
-            if let Some(oldest) = records.keys().next().cloned() {
-                records.remove(&oldest);
+            if let Some(retained) = records.keys().next().cloned() {
+                records.remove(&retained);
             }
         }
         records.insert(id.clone(), JobControl {
@@ -122,24 +122,24 @@ pub fn start_transform_job(
             };
 
             update_job(&worker_jobs, &worker_id, |job| {
-                if cancelled.load(Ordering::Acquire) {
-                    job.status = "cancelled".into();
-                    job.phase = "취소됨".into();
-                    job.error = None;
-                    job.result = None;
-                } else {
-                    match result {
-                        Ok(table) => {
-                            job.status = "completed".into();
-                            job.phase = "완료".into();
-                            job.result = Some(table);
-                            job.error = None;
-                        }
-                        Err(error) => {
-                            job.status = "failed".into();
-                            job.phase = "실패".into();
-                            job.error = Some(error);
-                        }
+                match result {
+                    Ok(table) => {
+                        // A late cancel request must not hide a result that already committed.
+                        job.status = "completed".into();
+                        job.phase = "완료".into();
+                        job.result = Some(table);
+                        job.error = None;
+                    }
+                    Err(error) if cancelled.load(Ordering::Acquire) => {
+                        job.status = "cancelled".into();
+                        job.phase = "취소됨".into();
+                        job.error = None;
+                        job.result = None;
+                    }
+                    Err(error) => {
+                        job.status = "failed".into();
+                        job.phase = "실패".into();
+                        job.error = Some(error);
                     }
                 }
             });
