@@ -5,8 +5,9 @@ mod commands;
 mod recovery;
 mod pipeline_commands;
 mod connector_commands;
+mod transform_jobs;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use tauri::Manager;
 
@@ -23,7 +24,8 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(commands::AppState(Mutex::new(book)))
+        .manage(commands::AppState(Arc::new(Mutex::new(book))))
+        .manage(transform_jobs::JobState::default())
         .setup(|app| {
             // 자동 복구 files live with the app's local data.
             let dir = app
@@ -82,6 +84,9 @@ fn main() {
             commands::import_data,
             commands::query_to_table,
             pipeline_commands::profile_data_table,
+            transform_jobs::start_transform_job,
+            transform_jobs::get_transform_job,
+            transform_jobs::cancel_transform_job,
             pipeline_commands::transform_pipelines,
             pipeline_commands::save_transform_pipeline,
             pipeline_commands::delete_transform_pipeline,
