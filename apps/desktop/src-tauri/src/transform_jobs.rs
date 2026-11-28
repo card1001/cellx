@@ -13,6 +13,8 @@ use tauri::State;
 use crate::commands::AppState;
 
 static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
+const MAX_ACTIVE_JOBS: usize = 8;
+const MAX_RETAINED_JOBS: usize = 100;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TransformJobSnapshot {
@@ -103,11 +105,32 @@ pub fn start_transform_job(
     let jobs_map = jobs.0.clone();
     {
         let mut records = jobs_map.lock().map_err(|_| "작업 상태를 잠글 수 없습니다".to_string())?;
-        // Bound in-memory job history for long-running desktop sessions.
-        if records.len() >= 100 {
-            // IDs begin with a millisecond timestamp, so lexical order is chronological.
-            if let Some(oldest) = records.keys().min().cloned() {
+        // Prevent duplicate writes to the same output and unbounded thread
+        // creation. The workbook lock serializes DuckDB work, so this is a
+        // bounded FIFO-like waiting set rather than parallel database execution.
+        let active = records.values().filter(|record|
+            matches!(record.snapshot.status.as_str(), "queued" | "running")
+        ).count();
+        if active >= MAX_ACTIVE_JOBS {
+            return Err(format!("대기 또는 실행 중인 작업은 최대 {}개까지 허용됩니다", MAX_ACTIVE_JOBS));
+        }
+        if records.values().any(|record|
+            matches!(record.snapshot.status.as_str(), "queued" | "running")
+                && record.snapshot.output_table.eq_ignore_ascii_case(&output_table)
+        ) {
+            return Err("같은 결과 테이블을 대상으로 실행 중인 작업이 있습니다. 기존 작업이 끝난 뒤 다시 시도해 주세요.".into());
+        }
+
+        // Keep active records. Evict the oldest terminal record only.
+        if records.len() >= MAX_RETAINED_JOBS {
+            let oldest_terminal = records.iter()
+                .filter(|(_, record)| !matches!(record.snapshot.status.as_str(), "queued" | "running"))
+                .min_by_key(|(_, record)| record.snapshot.started_at_ms)
+                .map(|(id, _)| id.clone());
+            if let Some(oldest) = oldest_terminal {
                 records.remove(&oldest);
+            } else {
+                return Err("작업 이력이 가득 찼습니다. 실행 중인 작업이 완료된 뒤 다시 시도해 주세요.".into());
             }
         }
         records.insert(id.clone(), JobControl {
