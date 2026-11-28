@@ -185,11 +185,17 @@ fn bench_grid(wb: &mut Workbook, runs: usize) -> Result<()> {
         ("가운데로 스크롤", total / 2, None, vec![]),
         ("금액 내림차순 정렬", 0, Some(Sort { column: "amount".into(), descending: true }), vec![]),
         ("정렬 후 가운데", total / 2, Some(Sort { column: "amount".into(), descending: true }), vec![]),
+        ("정렬 후 깊은 위치", total.saturating_sub(100), Some(Sort { column: "amount".into(), descending: true }), vec![]),
+        ("정렬 후 임의 점프", total.saturating_mul(3) / 4, Some(Sort { column: "amount".into(), descending: true }), vec![]),
+        ("오름차순 깊은 위치", total.saturating_mul(3) / 4, Some(Sort { column: "amount".into(), descending: false }), vec![]),
         ("필터 지역=서울", 0, None, vec![f("region", "서울")]),
+        ("필터 지역=서울 깊은 위치", total / 2, None, vec![f("region", "서울")]),
         ("필터 2개 + 정렬", 0, Some(Sort { column: "order_date".into(), descending: false }),
             vec![f("region", "서울"), f("category", "*가전")]),
+        ("필터 + 정렬 깊은 위치", total / 2, Some(Sort { column: "order_date".into(), descending: false }),
+            vec![f("region", "서울"), f("category", "*가전")]),
     ];
-    println!("\n{:<24} {:>12} {:>12} {:>14}", "격자 작업", "첫 요청 ms", "중앙값 ms", "일치 행");
+    println!("\n{:<30} {:>12} {:>12} {:>12} {:>14}", "격자 작업", "첫 요청 ms", "중앙값 ms", "P95 ms", "일치 행");
     for (label, offset, sort, filters) in cases {
         let mut times = Vec::with_capacity(runs);
         let mut matched = 0;
