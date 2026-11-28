@@ -1,5 +1,5 @@
 //! Tauri commands for saved data-transformation recipes.
-use cellx_core::data::TableInfo;
+use cellx_core::data::{TableInfo, TableProfile};
 use cellx_core::project::SavedPipeline;
 use cellx_core::transform::TransformPipeline;
 use cellx_core::value::Scalar;
@@ -17,6 +17,12 @@ pub struct TransformPreview {
     pub truncated: bool,
 }
 
+
+#[tauri::command]
+pub fn profile_data_table(state: State<'_, AppState>, table: String) -> CmdResult<TableProfile> {
+    let mut book = state.0.lock().map_err(|_| "내부 상태를 잠글 수 없습니다".to_string())?;
+    book.wb.data().profile(&table).map_err(|e| e.to_string())
+}
 
 #[tauri::command]
 pub fn transform_pipelines(state: State<'_, AppState>) -> CmdResult<Vec<SavedPipeline>> {
