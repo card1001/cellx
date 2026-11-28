@@ -172,6 +172,7 @@ pub fn bench_data_generated(rows: u64, db: &Path, runs: usize) -> Result<()> {
         ms,
         size as f64 / 1e6
     );
+    bench_sorted_keyset(&mut wb, runs)?;
     bench_formulas(&mut wb, runs)
 }
 
