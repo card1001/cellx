@@ -947,7 +947,7 @@ use cellx_core::audit::{EvalStep, TraceArea};
 pub fn formula_dependency_graph(
     state: State<'_, AppState>,
 ) -> CmdResult<cellx_core::audit::FormulaDependencyGraph> {
-    read(&state, |wb| Ok(wb.formula_dependency_graph()))
+    read(&state, |wb| wb.formula_dependency_graph())
 }
 
 #[tauri::command]
