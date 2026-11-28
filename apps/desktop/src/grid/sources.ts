@@ -13,6 +13,7 @@ import {
 } from "../api";
 import { Axis } from "./axis";
 import { colName, MAX_COLS, MAX_ROWS } from "./model";
+import { isCurrentPageRequest, selectPagesToEvict } from "./performance";
 
 export interface CellData {
   text: string;
@@ -235,6 +236,8 @@ export class SheetSource extends Emitter implements GridSource {
 }
 
 const PAGE = 256;
+const MAX_CACHED_PAGES = 64;
+const MAX_CURSOR_CHECKPOINTS = 256;
 
 function pad(n: number) {
   return String(n).padStart(2, "0");
@@ -284,7 +287,13 @@ export class DataSource extends Emitter implements GridSource {
   frozenCols = 0;
   showGrid = true;
   private pages = new Map<number, Page>();
-  private inflight = new Set<number>();
+  private inflight = new Map<number, number>();
+  private pagePromises = new Map<number, Promise<void>>();
+  private pageCursors = new Map<number, number>();
+  private pageAccess = new Map<number, number>();
+  private visiblePages = new Set<number>();
+  private accessClock = 0;
+  private requestSequence = 0;
   private generation = 0;
   total: number;
   sort: Sort | null = null;
@@ -329,6 +338,7 @@ export class DataSource extends Emitter implements GridSource {
     const p = Math.floor((r - 1) / PAGE);
     const page = this.pages.get(p);
     if (!page) return undefined;
+    this.pageAccess.set(p, ++this.accessClock);
     const i = r - 1 - p * PAGE;
     return i < page.rows.length ? { page, i } : undefined;
   }
@@ -353,33 +363,46 @@ export class DataSource extends Emitter implements GridSource {
   request(r0: number, _c0: number, r1: number) {
     const p0 = Math.floor((r0 - 1) / PAGE);
     const p1 = Math.floor((r1 - 1) / PAGE);
+    this.visiblePages = new Set(Array.from({ length: p1 - p0 + 1 }, (_, index) => p0 + index));
     for (let p = p0; p <= p1; p++) {
-      if (this.pages.has(p) || this.inflight.has(p)) continue;
-      this.inflight.add(p);
-      void this.fetchPage(p, this.generation);
+      if (this.pages.has(p)) {
+        this.pageAccess.set(p, ++this.accessClock);
+        continue;
+      }
+      if (this.inflight.has(p)) continue;
+      const token = ++this.requestSequence;
+      const generation = this.generation;
+      this.inflight.set(p, token);
+      let task: Promise<void>;
+      task = this.fetchPage(p, generation, token).finally(() => {
+        if (this.inflight.get(p) === token) this.inflight.delete(p);
+        if (this.pagePromises.get(p) === task) this.pagePromises.delete(p);
+      });
+      this.pagePromises.set(p, task);
     }
   }
 
   /**
-   * An unsorted page right after a loaded one continues from that page's last
-   * `_rid` (keyset: cost does not grow with depth). Any other page — a sorted
-   * view, or a jump with the scroll bar — is read by position, so reaching
-   * row 5,000,000 never means reading the rows before it.
+   * Sequential unsorted navigation uses the previous page's `_rid` checkpoint.
+   * A random jump falls back to offset once, then seeds a cursor checkpoint so
+   * subsequent forward pages return to keyset pagination.
    */
-  private async fetchPage(p: number, gen: number) {
+  private async fetchPage(p: number, gen: number, token: number) {
     try {
-      const t = performance.now();
-      const before = p > 0 ? this.pages.get(p - 1) : undefined;
-      const cursor = before?.row_ids.length === PAGE ? before.row_ids[PAGE - 1] : undefined;
-      const page =
-        !this.sort && (p === 0 || cursor !== undefined)
-          ? await api.dataPageAfterRid(this.info.name, p === 0 ? null : cursor!, PAGE, this.filters)
-          : await api.dataPage(this.info.name, p * PAGE, PAGE, this.sort, this.filters);
-      if (gen !== this.generation) return;
-      this.lastQueryMs = performance.now() - t;
+      if (!this.sort && p > 0 && !this.pageCursors.has(p - 1)) {
+        await this.pagePromises.get(p - 1)?.catch(() => undefined);
+      }
+      if (!isCurrentPageRequest(this.generation, gen, this.inflight.get(p), token)) return;
+      const started = performance.now();
+      const cursor = p > 0 ? this.pageCursors.get(p - 1) : undefined;
+      const page = !this.sort && (p === 0 || cursor !== undefined)
+        ? await api.dataPageAfterRid(this.info.name, p === 0 ? null : cursor!, PAGE, this.filters)
+        : await api.dataPage(this.info.name, p * PAGE, PAGE, this.sort, this.filters);
+      if (!isCurrentPageRequest(this.generation, gen, this.inflight.get(p), token)) return;
+      this.lastQueryMs = performance.now() - started;
       this.applyPage(p, page);
     } finally {
-      this.inflight.delete(p);
+      if (this.inflight.get(p) === token) this.inflight.delete(p);
     }
   }
 
@@ -389,7 +412,37 @@ export class DataSource extends Emitter implements GridSource {
       this.rows.count = Math.max(1, page.total);
     }
     this.pages.set(p, page);
+    this.pageAccess.set(p, ++this.accessClock);
+    const lastRid = page.row_ids[page.row_ids.length - 1];
+    if (lastRid !== undefined) {
+      this.pageCursors.set(p, lastRid);
+      while (this.pageCursors.size > MAX_CURSOR_CHECKPOINTS) {
+        const oldest = this.pageCursors.keys().next().value;
+        if (oldest === undefined) break;
+        this.pageCursors.delete(oldest);
+      }
+    }
+    this.prunePages();
     this.emit();
+  }
+
+  private prunePages() {
+    const candidates = selectPagesToEvict(this.pageAccess, this.visiblePages, MAX_CACHED_PAGES);
+    for (const page of candidates) {
+      this.pages.delete(page);
+      this.pageAccess.delete(page);
+    }
+  }
+
+  getDiagnosticsSnapshot() {
+    let cachedRows = 0;
+    for (const page of this.pages.values()) cachedRows += page.rows.length;
+    return {
+      cachedPages: this.pages.size,
+      cachedRows,
+      maxCachedPages: MAX_CACHED_PAGES,
+      inflightPages: this.inflight.size,
+    };
   }
 
   setView(sort: Sort | null, filters: ColumnFilter[]) {
@@ -402,6 +455,11 @@ export class DataSource extends Emitter implements GridSource {
     this.generation++;
     this.pages.clear();
     this.inflight.clear();
+    this.pagePromises.clear();
+    this.pageCursors.clear();
+    this.pageAccess.clear();
+    this.visiblePages.clear();
+    this.lastQueryMs = 0;
     this.request(1, 1, PAGE);
     this.emit();
   }
