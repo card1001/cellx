@@ -4120,9 +4120,8 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
     setSaved(list);
     setSelectedId(id);
   });
-  const executeNow = () => runBusy(async () => {
-    if (!selectedId) throw new Error("먼저 파이프라인을 저장하세요.");
-    const started = await api.startTransformJob(selectedId, output.trim());
+  const runPipeline = async (pipelineId: string, outputTable: string) => {
+    const started = await api.startTransformJob(pipelineId, outputTable);
     setJob(started);
     let latest = started;
     while (latest.status === "queued" || latest.status === "running" || latest.status === "cancelling") {
@@ -4130,11 +4129,15 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
       latest = await api.getTransformJob(started.id);
       setJob(latest);
     }
+    setJobHistory(await api.listTransformJobs());
     if (latest.status === "failed") throw new Error(latest.error || "데이터 변환 작업에 실패했습니다.");
     if (latest.status === "cancelled") return;
     if (!latest.result) throw new Error("작업 결과를 찾을 수 없습니다.");
     await props.onExecuted(latest.result);
-    setJobHistory(await api.listTransformJobs());
+  };
+  const executeNow = () => runBusy(async () => {
+    if (!selectedId) throw new Error("먼저 파이프라인을 저장하세요.");
+    await runPipeline(selectedId, output.trim());
   });
   const loadSaved = (id: string) => {
     setSelectedId(id);
@@ -4298,13 +4301,17 @@ function TransformPanel(props: { tables: TableInfo[]; onExecuted(table: TableInf
       {job && <p className="muted" role="status">백그라운드 작업: {job.phase}{job.status === "failed" && job.error ? ` · ${job.error}` : ""}</p>}
       {jobHistory.length > 0 && <details>
         <summary>최근 변환 실행 이력 ({jobHistory.length})</summary>
-        <div style={{ overflow: "auto", maxHeight: 180 }}>
+        <div style={{ overflow: "auto", maxHeight: 220 }}>
           <table>
-            <thead><tr><th>작업 ID</th><th>상태</th><th>결과 행</th><th>오류</th></tr></thead>
+            <thead><tr><th>실행 시각</th><th>파이프라인</th><th>대상 시트</th><th>상태</th><th>결과 행</th><th>오류</th><th>작업</th></tr></thead>
             <tbody>{jobHistory.map((item) => <tr key={item.id}>
-              <td>{item.id}</td><td>{item.status}</td>
-              <td>{item.result?.rows.toLocaleString() ?? "—"}</td>
+              <td>{new Date(item.started_at_ms).toLocaleString()}</td>
+              <td>{saved.find((entry) => entry.id === item.pipeline_id)?.name ?? item.pipeline_id}</td>
+              <td>{item.output_table}</td><td>{item.status}</td>
+              <td>{(item.result_rows ?? item.result?.rows)?.toLocaleString() ?? "—"}</td>
               <td>{item.error ?? "—"}</td>
+              <td><button disabled={busy || item.status === "queued" || item.status === "running" || item.status === "cancelling" || !saved.some((entry) => entry.id === item.pipeline_id)}
+                onClick={() => void runBusy(() => runPipeline(item.pipeline_id, item.output_table))}>다시 실행</button></td>
             </tr>)}</tbody>
           </table>
         </div>
