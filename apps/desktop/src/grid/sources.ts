@@ -13,7 +13,7 @@ import {
 } from "../api";
 import { Axis } from "./axis";
 import { colName, MAX_COLS, MAX_ROWS } from "./model";
-import { isCurrentPageRequest, selectPagesToEvict } from "./performance";
+import { estimatePageBytes, isCurrentPageRequest, selectPagesToEvictByBudget } from "./performance";
 
 export interface CellData {
   text: string;
@@ -236,7 +236,7 @@ export class SheetSource extends Emitter implements GridSource {
 }
 
 const PAGE = 256;
-const MAX_CACHED_PAGES = 64;
+const MAX_CACHED_PAGES = 64;\nconst MAX_CACHED_BYTES = 64 * 1024 * 1024;
 const MAX_CURSOR_CHECKPOINTS = 256;
 
 function pad(n: number) {
@@ -290,7 +290,7 @@ export class DataSource extends Emitter implements GridSource {
   private inflight = new Map<number, number>();
   private pagePromises = new Map<number, Promise<void>>();
   private pageCursors = new Map<number, number>();
-  private pageAccess = new Map<number, number>();
+  private pageAccess = new Map<number, number>();\n  private pageBytes = new Map<number, number>();\n  private cachedBytes = 0;
   private visiblePages = new Set<number>();
   private accessClock = 0;
   private requestSequence = 0;
@@ -427,10 +427,10 @@ export class DataSource extends Emitter implements GridSource {
   }
 
   private prunePages() {
-    const candidates = selectPagesToEvict(this.pageAccess, this.visiblePages, MAX_CACHED_PAGES);
+    const candidates = selectPagesToEvictByBudget(this.pageAccess, this.pageBytes, this.visiblePages, MAX_CACHED_PAGES, MAX_CACHED_BYTES);
     for (const page of candidates) {
       this.pages.delete(page);
-      this.pageAccess.delete(page);
+      this.pageAccess.delete(page);\n      this.cachedBytes -= this.pageBytes.get(page) ?? 0;\n      this.pageBytes.delete(page);
     }
   }
 
