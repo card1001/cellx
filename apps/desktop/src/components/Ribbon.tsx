@@ -96,6 +96,7 @@ export interface RibbonActions {
   removeArrows(): void;
   toggleShowFormulas(): void;
   evaluateFormula(): void;
+  formulaGraph(): void;
   defineName(): void;
   print(): void;
   group(rows: boolean): void;
@@ -859,6 +860,9 @@ export function Ribbon(props: Props) {
               </div>
               <Btn big title={tr("수식을 단계별로 계산합니다")} onClick={a.evaluateFormula}>
                 <span className="ic">ⓕ</span>{tr("수식 계산")}
+              </Btn>
+              <Btn big title={tr("통합 문서의 수식 간 참조 관계를 그래프로 확인합니다")} onClick={a.formulaGraph}>
+                <span className="ic">▤</span>{tr("수식 관계도")}
               </Btn>
             </Group>
           </>
