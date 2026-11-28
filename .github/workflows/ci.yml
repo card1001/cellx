@@ -11,8 +11,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Which parts changed. On main (push) and manual runs everything runs, so the
+  # packaged build always has every check behind it.
+  changes:
+    name: 변경 범위
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust || 'true' }}
+      frontend: ${{ steps.filter.outputs.frontend || 'true' }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            rust:
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'crates/**'
+              - 'vendor/**'
+              - 'apps/desktop/src-tauri/**'
+              - '.github/workflows/**'
+            frontend:
+              - 'apps/desktop/**'
+              - '!apps/desktop/src-tauri/**'
+              - '.github/workflows/**'
+
   core:
-    name: 엔진 테스트 + 호환성 측정
+    name: 엔진 테스트
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -20,16 +49,41 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: 엔진 단위 테스트
         run: cargo test -p cellx-core -p cellx-cli
+
+  vendored:
+    name: IronCalc(내장 사본) 테스트
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: IronCalc(내장 사본) 단위 테스트
+        # The copy is built outside the workspace; its target dir sits under
+        # ./target so rust-cache keeps it between runs.
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/vendored
         run: |
           cp -r vendor/ironcalc_base /tmp/ironcalc_base
           printf '\n[workspace]\n' >> /tmp/ironcalc_base/Cargo.toml
           cd /tmp/ironcalc_base && cargo test --release --lib
+
+  compat:
+    name: 호환성 측정
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: IronCalc 테스트 파일 받기 (Excel이 만든 xlsx)
-        run: git clone --depth 1 https://github.com/ironcalc/IronCalc /tmp/ironcalc
-      - name: 호환성 측정
         run: |
-          cargo run --release -p cellx-cli -- compat /tmp/ironcalc/xlsx/tests --json compat.json
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/ironcalc/IronCalc /tmp/ironcalc
+          git -C /tmp/ironcalc sparse-checkout set xlsx/tests
+      - name: 호환성 측정
+        run: cargo run --release -p cellx-cli -- compat /tmp/ironcalc/xlsx/tests --json compat.json
       - uses: actions/upload-artifact@v7
         with:
           name: compat-report
@@ -37,6 +91,8 @@ jobs:
 
   frontend:
     name: 화면 테스트
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -57,6 +113,8 @@ jobs:
 
   desktop-check:
     name: Tauri 명령 크레이트 컴파일 검사
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -74,7 +132,7 @@ jobs:
 
   desktop:
     name: 데스크톱 패키지 빌드 (${{ matrix.platform }})
-    needs: [core, frontend, desktop-check]
+    needs: [core, vendored, compat, frontend, desktop-check]
     if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
