@@ -94,6 +94,7 @@ fn main() {
             pipeline_commands::preview_transform,
             pipeline_commands::execute_transform_pipeline,
             connector_commands::data_connectors,
+            connector_commands::data_connector_statuses,
             connector_commands::save_data_connector,
             connector_commands::refresh_data_connector,
             connector_commands::delete_data_connector,
