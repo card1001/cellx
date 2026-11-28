@@ -579,6 +579,7 @@ export interface Page {
 export interface SortCursor {
   value: string | null;
   rid: number;
+  query_id: number;
 }
 export interface KeysetPage {
   page: Page;
