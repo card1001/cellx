@@ -1,7 +1,7 @@
 import { getActiveLocale, tr } from "./i18n";
 import { DataJobProgress } from "./components/DataJobProgress";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { Profiler, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Profiler, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   api,
   SPREADSHEET_EXTENSIONS,
@@ -95,6 +95,11 @@ const ARROWS: Record<string, Direction> = { ArrowUp: "Up", ArrowDown: "Down", Ar
 const DELTA: Record<Direction, [number, number]> = { Up: [-1, 0], Down: [1, 0], Left: [0, -1], Right: [0, 1] };
 const PROTECTED_MSG = "변경하려는 셀이나 차트가 보호된 시트에 있습니다. 변경하려면 검토 탭에서 시트 보호를 해제하세요. 암호를 입력해야 할 수도 있습니다.";
 const FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72];
+
+function GridDiagnostics({ children, onRender }: { children: ReactNode; onRender: (id: string, phase: string, actualDuration: number) => void }) {
+  if (!import.meta.env.DEV) return <>{children}</>;
+  return <Profiler id="CellXGrid" onRender={onRender}>{children}</Profiler>;
+}
 
 export default function App() {
   const { locale, setLocale, t } = useI18n();
@@ -2754,7 +2759,7 @@ export default function App() {
       <main className="main">
         <div className="grid-host">
           {source && (
-            <Profiler id="CellXGrid" onRender={onGridRender}>
+            <GridDiagnostics onRender={onGridRender}>
             <Grid
               key={tabKey(tab)}
               source={source}
@@ -3057,7 +3062,7 @@ export default function App() {
                 );
               }}
             />
-            </Profiler>
+            </GridDiagnostics>
           )}
           {findOpen && (
             <FindReplaceDialog
@@ -3196,14 +3201,14 @@ export default function App() {
         )}
         {onSheetTab && detail?.bridge_error && <span className="msg err">{detail.bridge_error}</span>}
         <span className="spacer" />
-        {source instanceof DataSource && (() => {
-          const cache = source.getPerformanceSnapshot();
+        {source instanceof DataSource && <span>{formatCount(source.total)}행</span>}
+        {import.meta.env.DEV && source instanceof DataSource && (() => {
+          const cache = source.getDiagnosticsSnapshot();
           const heapBytes = (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize;
-          return <span title="JS 힙은 WebView가 제공할 때만 표시됩니다. 캐시 KB는 직렬화된 페이지 데이터 추정치이며 WASM/native 메모리는 포함하지 않습니다.">
-            {formatCount(source.total)}행 · 조회 {source.lastQueryMs.toFixed(0)} ms · 캐시 {cache.cachedPages}/{cache.maxCachedPages}p · {formatCount(cache.cachedRows)}행 · 캐시 약 {(cache.estimatedBytes / 1024).toFixed(0)} KB{heapBytes ? ` · JS 힙 ${(heapBytes / 1024 / 1024).toFixed(1)} MB` : ""}
+          return <span className="grid-diagnostics" title="개발 전용 진단 정보입니다. JS 힙은 WebView가 제공할 때만 표시됩니다.">
+            조회 {source.lastQueryMs.toFixed(0)} ms · 캐시 {cache.cachedPages}/{cache.maxCachedPages}p · {formatCount(cache.cachedRows)}행 · 진행 중 {cache.inflightPages}p{heapBytes ? ` · JS 힙 ${(heapBytes / 1024 / 1024).toFixed(1)} MB` : ""} · 그리드 렌더 {gridPerf.current.renderMs.toFixed(1)} ms · {gridPerf.current.commits}회
           </span>;
         })()}
-        <span title="React Profiler actualDuration">그리드 렌더 {gridPerf.current.renderMs.toFixed(1)} ms · {gridPerf.current.commits}회</span>
         {stats && onSheetTab && stats.bridge_calls > 0 && <span title={tr("데이터 엔진 계산 시간")}>데이터 엔진 {stats.bridge_ms.toFixed(0)} ms</span>}
         {stats?.not_converged && (
           <span className="warn" title={tr("데이터 시트 결과와 셀이 서로를 참조해 계산이 끝나지 않았습니다. 일부 값이 최신이 아닐 수 있습니다. 순환 참조를 확인하세요.")}>
