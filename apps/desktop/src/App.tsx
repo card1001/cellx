@@ -1,4 +1,4 @@
-import { tr } from "./i18n";
+import { getActiveLocale, tr } from "./i18n";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -16,10 +16,8 @@ import {
   type Picture,
   type Shape,
   type ShapeKind,
-  type Slicer,
   type SlicerView,
   type SparkKind,
-  type SparklineGroup,
   type SparklineView,
   type RecoveredFile,
   type Direction,
@@ -39,7 +37,7 @@ import {
   type TableProfile,
   type TransformJobSnapshot,
 } from "./api";
-import { colorScaleRule, dataBarRule, highlightRule, type HighlightKind, ICON_SETS, iconSetRule, ratingRule } from "./cf";
+import { colorScaleRule, dataBarRule, highlightRule, ICON_SETS, iconSetRule, ratingRule } from "./cf";
 import { CHART_KINDS, ChartLayer } from "./components/Chart";
 import { PictureLayer, pictureUrl } from "./components/Picture";
 import { ShapeFormatDialog, ShapeLayer } from "./components/Shape";
