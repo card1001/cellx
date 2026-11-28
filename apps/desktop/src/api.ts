@@ -511,6 +511,11 @@ export interface TableProfile {
 }
 export interface TransformJobSnapshot {
   id: string;
+  pipeline_id: string;
+  output_table: string;
+  started_at_ms: number;
+  finished_at_ms: number | null;
+  result_rows: number | null;
   status: "queued" | "running" | "cancelling" | "completed" | "cancelled" | "failed";
   phase: string;
   result: TableInfo | null;
