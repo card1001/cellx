@@ -87,7 +87,6 @@ import { fontCss, Grid, type Hit, type RefBox, type Selection } from "./grid/Gri
 import { addr, colName, normalize, parseAddr, type Pos, type Range, rangeLabel, toTsv } from "./grid/model";
 import { DataSource, SheetSource } from "./grid/sources";
 import { START, tabKey, type Session, type Tab } from "./appTypes";
-import type { Dialog } from "./appDialogs";
 import { editorWidth, formatCount, formatNumber } from "./appUtils";
 import { useAppCommands } from "./hooks/useAppCommands";
 import { useDialogController } from "./hooks/useDialogController";
@@ -2755,6 +2754,7 @@ export default function App() {
       <main className="main">
         <div className="grid-host">
           {source && (
+            <Profiler id="CellXGrid" onRender={onGridRender}>
             <Grid
               key={tabKey(tab)}
               source={source}
@@ -3057,6 +3057,7 @@ export default function App() {
                 );
               }}
             />
+            </Profiler>
           )}
           {findOpen && (
             <FindReplaceDialog
@@ -3195,11 +3196,13 @@ export default function App() {
         )}
         {onSheetTab && detail?.bridge_error && <span className="msg err">{detail.bridge_error}</span>}
         <span className="spacer" />
-        {source instanceof DataSource && (
-          <span>
-            {formatCount(source.total)}행 · 조회 {source.lastQueryMs.toFixed(0)} ms
-          </span>
-        )}
+        {source instanceof DataSource && (() => {
+          const cache = source.getPerformanceSnapshot();
+          return <span title="캐시 크기는 직렬화된 페이지 데이터 기반 추정치이며 실제 JavaScript 힙 사용량과 다를 수 있습니다.">
+            {formatCount(source.total)}행 · 조회 {source.lastQueryMs.toFixed(0)} ms · 캐시 {cache.cachedPages}/{cache.maxCachedPages}p · {formatCount(cache.cachedRows)}행 · 약 {(cache.estimatedBytes / 1024).toFixed(0)} KB
+          </span>;
+        })()}
+        <span title="React Profiler actualDuration">그리드 렌더 {gridPerf.current.renderMs.toFixed(1)} ms · {gridPerf.current.commits}회</span>
         {stats && onSheetTab && stats.bridge_calls > 0 && <span title={tr("데이터 엔진 계산 시간")}>데이터 엔진 {stats.bridge_ms.toFixed(0)} ms</span>}
         {stats?.not_converged && (
           <span className="warn" title={tr("데이터 시트 결과와 셀이 서로를 참조해 계산이 끝나지 않았습니다. 일부 값이 최신이 아닐 수 있습니다. 순환 참조를 확인하세요.")}>
@@ -3609,6 +3612,14 @@ export default function App() {
       {dialog?.kind === "formulaGraph" && (
         <FormulaGraphDialog
           onClose={() => {
+            setDialog(null);
+            focusGrid();
+          }}
+          onSelectCell={(sheet, row, col) => {
+            const target = { kind: "sheet" as const, index: sheet };
+            if (tabRef.current.kind !== "sheet" || tabRef.current.index !== sheet) switchTab(target);
+            const cell = { r: row, c: col };
+            setSelection({ anchor: cell, focus: cell });
             setDialog(null);
             focusGrid();
           }}
