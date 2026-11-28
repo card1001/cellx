@@ -81,6 +81,7 @@ fn main() {
             commands::unmerge,
             commands::import_data,
             commands::query_to_table,
+            pipeline_commands::profile_data_table,
             pipeline_commands::transform_pipelines,
             pipeline_commands::save_transform_pipeline,
             pipeline_commands::delete_transform_pipeline,
